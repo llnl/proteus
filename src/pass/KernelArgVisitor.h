@@ -174,6 +174,249 @@ inline bool isPointerSpillLoad(const LoadInst &LI) {
   return Slot && Slot->getAllocatedType()->isPointerTy();
 }
 
+// Own the analyses needed to buildgit  MemorySSA for one function.  Lambda
+// provenance is analyzed by a module pass, so it cannot directly request a
+// FunctionAnalysisManager result.  Keeping these objects together also keeps
+// every reference held by AAResults and MemorySSA valid.
+class FunctionMemorySSAState {
+  DominatorTree DT;
+  AssumptionCache AC;
+  TargetLibraryInfoImpl TLII;
+  TargetLibraryInfo TLI;
+  AAResults AA;
+  BasicAAResult BAA;
+  std::unique_ptr<MemorySSA> MSSA;
+
+public:
+  explicit FunctionMemorySSAState(Function &F)
+      : DT(F), AC(F), TLII(Triple(F.getParent()->getTargetTriple())),
+        TLI(TLII, &F), AA(TLI),
+        BAA(F.getParent()->getDataLayout(), F, TLI, AC, &DT) {
+    AA.addAAResult(BAA);
+    MSSA = std::make_unique<MemorySSA>(F, &AA, &DT);
+  }
+
+  MemorySSA &get() { return *MSSA; }
+};
+
+enum class PointerClobberKind { Value, Incoming, Cycle, Ambiguous, Unknown };
+
+struct PointerClobberResult {
+  PointerClobberKind Kind;
+  Value *V = nullptr;
+};
+
+// Resolve the pointer definition reaching a pointer-valued load.  MemorySSA
+// supplies write order and CFG joins within each function.  Direct calls are
+// summarized by resolving the tracked formal argument at every callee return;
+// the callee's MemorySSA remains separate from the caller's graph.
+class PointerClobberResolver {
+  const DataLayout &DL;
+  DenseMap<Function *, std::unique_ptr<FunctionMemorySSAState>> States;
+  SmallPtrSet<LoadInst *, 8> ResolvingOrigins;
+
+  FunctionMemorySSAState &getState(Function &F) {
+    auto &State = States[&F];
+    if (!State)
+      State = std::make_unique<FunctionMemorySSAState>(F);
+    return *State;
+  }
+
+  Value *getPointerOrigin(Value *V) {
+    if (auto *LI = dyn_cast<LoadInst>(V)) {
+      if (isa<AllocaInst>(getUnderlyingObject(LI->getPointerOperand())) &&
+          ResolvingOrigins.insert(LI).second) {
+        PointerClobberResult Clobber = resolve(*LI);
+        ResolvingOrigins.erase(LI);
+        if (Clobber.Kind == PointerClobberKind::Value)
+          return Clobber.V;
+      }
+    }
+    SmallPtrSet<Value *, 8> Visited;
+    return getPointerLoadOrigin(DL, V, Visited);
+  }
+
+  bool namesTrackedAddress(Value *Candidate, const Value *Tracked) {
+    Value *CandidateOrigin = getPointerOrigin(Candidate);
+    Value *TrackedOrigin = getPointerOrigin(const_cast<Value *>(Tracked));
+    return CandidateOrigin && TrackedOrigin &&
+           isSamePointerAddress(DL, CandidateOrigin, TrackedOrigin);
+  }
+
+  static PointerClobberResult merge(PointerClobberResult LHS,
+                                    PointerClobberResult RHS) {
+    if (LHS.Kind == PointerClobberKind::Cycle)
+      return RHS;
+    if (RHS.Kind == PointerClobberKind::Cycle)
+      return LHS;
+    if (LHS.Kind == PointerClobberKind::Unknown ||
+        RHS.Kind == PointerClobberKind::Unknown)
+      return {PointerClobberKind::Unknown};
+    if (LHS.Kind == PointerClobberKind::Ambiguous ||
+        RHS.Kind == PointerClobberKind::Ambiguous)
+      return {PointerClobberKind::Ambiguous};
+    if (LHS.Kind != RHS.Kind)
+      return {PointerClobberKind::Ambiguous};
+    if (LHS.Kind == PointerClobberKind::Value && LHS.V != RHS.V)
+      return {PointerClobberKind::Ambiguous};
+    return LHS;
+  }
+
+  PointerClobberResult resolveAccess(FunctionMemorySSAState &State,
+                                     MemoryAccess *Access,
+                                     const MemoryLocation &Location,
+                                     SmallPtrSetImpl<MemoryAccess *> &Active) {
+    MemorySSA &MSSA = State.get();
+    DEBUG(if (Access) Logger::logs("proteus-pass")
+              << "[Lambda arg analysis]: Resolving MemorySSA access " << *Access
+              << "\n";)
+    if (!Access || MSSA.isLiveOnEntryDef(Access))
+      return {PointerClobberKind::Incoming};
+    if (!Active.insert(Access).second)
+      return {PointerClobberKind::Cycle};
+
+    PointerClobberResult Result{PointerClobberKind::Unknown};
+    if (auto *Phi = dyn_cast<MemoryPhi>(Access)) {
+      bool HaveResult = false;
+      for (unsigned I = 0; I < Phi->getNumIncomingValues(); ++I) {
+        MemoryAccess *Incoming = Phi->getIncomingValue(I);
+        MemoryAccess *Clobber =
+            MSSA.getWalker()->getClobberingMemoryAccess(Incoming, Location);
+        PointerClobberResult IncomingResult =
+            resolveAccess(State, Clobber, Location, Active);
+        if (!HaveResult || Result.Kind == PointerClobberKind::Cycle) {
+          Result = IncomingResult;
+          HaveResult = true;
+        } else {
+          Result = merge(Result, IncomingResult);
+        }
+      }
+      if (!HaveResult)
+        Result = {PointerClobberKind::Unknown};
+    } else if (auto *Def = dyn_cast<MemoryDef>(Access)) {
+      Instruction *I = Def->getMemoryInst();
+      if (auto *SI = dyn_cast<StoreInst>(I)) {
+        if (!SI->getValueOperand()->getType()->isPointerTy() ||
+            !namesTrackedAddress(SI->getPointerOperand(), Location.Ptr)) {
+          DEBUG(Logger::logs("proteus-pass")
+                << "[Lambda arg analysis]: MemorySSA store does not exactly "
+                   "define the tracked pointer: "
+                << *SI << "\n");
+          Result = {PointerClobberKind::Unknown};
+        } else if (Value *Origin = getPointerOrigin(SI->getValueOperand())) {
+          Result = {PointerClobberKind::Value, Origin};
+        }
+      } else if (auto *CB = dyn_cast<CallBase>(I)) {
+        Result = resolveCall(State, *Def, *CB, Location, Active);
+      }
+    } else if (auto *Use = dyn_cast<MemoryUse>(Access)) {
+      Result = resolveAccess(State, Use->getDefiningAccess(), Location, Active);
+    }
+
+    Active.erase(Access);
+    return Result;
+  }
+
+  MemoryAccess *getStateBefore(FunctionMemorySSAState &State,
+                               Instruction &Boundary,
+                               SmallPtrSetImpl<BasicBlock *> &VisitedBlocks) {
+    MemorySSA &MSSA = State.get();
+    for (Instruction *I = Boundary.getPrevNode(); I; I = I->getPrevNode())
+      if (auto *Def = dyn_cast_or_null<MemoryDef>(MSSA.getMemoryAccess(I)))
+        return Def;
+
+    BasicBlock *BB = Boundary.getParent();
+    if (MemoryPhi *Phi = MSSA.getMemoryAccess(BB))
+      return Phi;
+    if (!VisitedBlocks.insert(BB).second || pred_empty(BB))
+      return MSSA.getLiveOnEntryDef();
+    if (BasicBlock *Pred = BB->getSinglePredecessor())
+      return getStateBefore(State, *Pred->getTerminator(), VisitedBlocks);
+    return MSSA.getLiveOnEntryDef();
+  }
+
+  PointerClobberResult
+  resolveCall(FunctionMemorySSAState &CallerState, MemoryDef &CallDef,
+              CallBase &CB, const MemoryLocation &CallerLocation,
+              SmallPtrSetImpl<MemoryAccess *> &CallerActive) {
+    Function *Callee = CB.getCalledFunction();
+    if (!Callee || Callee->isDeclaration())
+      return {PointerClobberKind::Unknown};
+
+    unsigned TrackedArg = Callee->arg_size();
+    for (unsigned I = 0; I < CB.arg_size() && I < Callee->arg_size(); ++I) {
+      Value *Actual = CB.getArgOperand(I);
+      if (Actual->getType()->isPointerTy() &&
+          namesTrackedAddress(Actual, CallerLocation.Ptr)) {
+        if (TrackedArg != Callee->arg_size())
+          return {PointerClobberKind::Ambiguous};
+        TrackedArg = I;
+      }
+    }
+    if (TrackedArg == Callee->arg_size())
+      return {PointerClobberKind::Unknown};
+
+    FunctionMemorySSAState &CalleeState = getState(*Callee);
+    Value *Formal = Callee->getArg(TrackedArg);
+    MemoryLocation CalleeLocation(
+        Formal,
+        LocationSize::precise(DL.getPointerTypeSize(Formal->getType())));
+    PointerClobberResult Summary{PointerClobberKind::Cycle};
+
+    for (BasicBlock &BB : *Callee) {
+      auto *Ret = dyn_cast<ReturnInst>(BB.getTerminator());
+      if (!Ret)
+        continue;
+      SmallPtrSet<BasicBlock *, 8> VisitedBlocks;
+      MemoryAccess *ExitState =
+          getStateBefore(CalleeState, *Ret, VisitedBlocks);
+      MemoryAccess *Clobber =
+          CalleeState.get().getWalker()->getClobberingMemoryAccess(
+              ExitState, CalleeLocation);
+      SmallPtrSet<MemoryAccess *, 16> CalleeActive;
+      PointerClobberResult AtReturn =
+          resolveAccess(CalleeState, Clobber, CalleeLocation, CalleeActive);
+
+      if (AtReturn.Kind == PointerClobberKind::Incoming) {
+        AtReturn = resolveAccess(CallerState, CallDef.getDefiningAccess(),
+                                 CallerLocation, CallerActive);
+      } else if (AtReturn.Kind == PointerClobberKind::Value) {
+        if (auto *A = dyn_cast<Argument>(AtReturn.V))
+          if (A->getParent() == Callee)
+            AtReturn.V = CB.getArgOperand(A->getArgNo());
+        AtReturn.V = getPointerOrigin(AtReturn.V);
+      }
+      Summary = merge(Summary, AtReturn);
+    }
+    return Summary.Kind == PointerClobberKind::Cycle
+               ? PointerClobberResult{PointerClobberKind::Unknown}
+               : Summary;
+  }
+
+public:
+  explicit PointerClobberResolver(const DataLayout &DL) : DL(DL) {}
+
+  PointerClobberResult resolve(LoadInst &LI) {
+    FunctionMemorySSAState &State = getState(*LI.getFunction());
+    MemorySSA &MSSA = State.get();
+    MemoryAccess *LoadAccess = MSSA.getMemoryAccess(&LI);
+    if (!LoadAccess)
+      return {PointerClobberKind::Unknown};
+    MemoryLocation Location = MemoryLocation::get(&LI);
+    MemoryAccess *Clobber =
+        MSSA.getWalker()->getClobberingMemoryAccess(LoadAccess, Location);
+    SmallPtrSet<MemoryAccess *, 16> Active;
+    PointerClobberResult Result =
+        resolveAccess(State, Clobber, Location, Active);
+    DEBUG(Logger::logs("proteus-pass")
+          << "[Lambda arg analysis]: MemorySSA clobber result "
+          << static_cast<unsigned>(Result.Kind) << " for " << LI << "\n");
+    if (Result.Kind == PointerClobberKind::Cycle)
+      return {PointerClobberKind::Unknown};
+    return Result;
+  }
+};
+
 struct LambdaKernelArgAnalysis {
   Function *KernelFunction = nullptr;
   uint32_t KernelArgIndex = 0;
@@ -201,6 +444,7 @@ class LambdaArgVisitor : public InstVisitor<LambdaArgVisitor> {
 private:
   CallBase *LambdaCB;
   const DataLayout &DL;
+  std::shared_ptr<PointerClobberResolver> Clobbers;
   SmallVector<WorkItem> WorkList;
   SmallDenseSet<Value *> Seen;
 
@@ -215,8 +459,10 @@ private:
 
   // Constructor used for cloning and merging branches of phi node analysis
   LambdaArgVisitor(Value *Start, Value *LastSeen, CallBase *LambdaCBArg,
-                   int64_t Off, const DataLayout &Dl)
-      : LambdaCB(LambdaCBArg), DL(Dl), Offset(Off) {
+                   int64_t Off, const DataLayout &Dl,
+                   std::shared_ptr<PointerClobberResolver> ClobberResolver)
+      : LambdaCB(LambdaCBArg), DL(Dl), Clobbers(std::move(ClobberResolver)),
+        Offset(Off) {
     WorkList.push_back({Start, LastSeen});
   }
 
@@ -265,7 +511,7 @@ private:
   cloneAndAnalyze(Value *Start, Value *MemoryAnalysisPtrUse,
                   int64_t StartOffset) {
     LambdaArgVisitor Visitor(Start, MemoryAnalysisPtrUse, LambdaCB, StartOffset,
-                             DL);
+                             DL, Clobbers);
     while (!Visitor.empty() && !Visitor.success() && !Visitor.failed()) {
       auto [V, AccessedFrom] = Visitor.back();
       Visitor.MemoryAnalysisPtrUse = AccessedFrom;
@@ -295,7 +541,8 @@ private:
     if (!RetInstOpt)
       return std::nullopt;
     LambdaArgVisitor Visitor(RetInstOpt.value()->getReturnValue(),
-                             MemoryAnalysisPtrUse, LambdaCB, StartOffset, DL);
+                             MemoryAnalysisPtrUse, LambdaCB, StartOffset, DL,
+                             Clobbers);
     while (!Visitor.empty() && !Visitor.success() && !Visitor.failed()) {
       auto [V, AccessedFrom] = Visitor.back();
       DEBUG(Logger::logs("proteus-pass")
@@ -332,7 +579,8 @@ private:
 
 public:
   LambdaArgVisitor(CallBase *LambdaCB, Module &M)
-      : LambdaCB(LambdaCB), DL(M.getDataLayout()), Offset(0) {
+      : LambdaCB(LambdaCB), DL(M.getDataLayout()),
+        Clobbers(std::make_shared<PointerClobberResolver>(DL)), Offset(0) {
     auto *ClosurePtr = LambdaCB->getArgOperand(0);
     WorkList.push_back({ClosurePtr, LambdaCB});
   }
@@ -368,6 +616,22 @@ public:
 
   void visitLoadInst(LoadInst &LI) {
     DEBUG(Logger::logs("proteus-pass") << "Load inst analysis \n")
+    if (isa<AllocaInst>(getUnderlyingObject(LI.getPointerOperand()))) {
+      PointerClobberResult Clobber = Clobbers->resolve(LI);
+      if (Clobber.Kind == PointerClobberKind::Value) {
+        WorkList.push_back({Clobber.V, &LI});
+        return;
+      }
+      if (Clobber.Kind == PointerClobberKind::Ambiguous) {
+        DEBUG(Logger::logs("proteus-pass")
+              << "[Lambda arg analysis]: MemorySSA found ambiguous pointer "
+                 "clobbers for "
+              << LI << "\n");
+        AnalysisFailed = true;
+        AnalysisSuccess = false;
+        return;
+      }
+    }
     // Loading a pointer from a spill slot does not change the offset within
     // the pointee.  Resolve the pointer-sized store at offset zero in the slot,
     // then continue with the original pointee-relative Offset.
