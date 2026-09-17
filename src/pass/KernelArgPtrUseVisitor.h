@@ -100,70 +100,6 @@ getTrackedPointerLocation(const DataLayout &DL, Value *Ptr) {
                         LocationSize::precise(DL.getTypeStoreSize(PointeeTy)));
 }
 
-// Find the closest preceding same-block store whose written range covers the
-// tracked byte. This preserves execution order where Value::users() does not:
-// a later overwrite must win over an earlier initializer. Calls that might
-// clobber the storage force the general analysis instead. See the latest-store
-// and capture-overwrite cases in tests/gpu/lambda_store_order.cpp.
-inline std::optional<LambdaPtrUseAnalysis>
-getPreviousCoveringStore(const DataLayout &DL, Value *Ptr, Value *UseBoundary,
-                         int64_t TargetOffset) {
-  auto *PtrI = dyn_cast<Instruction>(Ptr);
-  auto *BoundaryI = dyn_cast<Instruction>(UseBoundary);
-  if (!PtrI || !BoundaryI || PtrI->getFunction() != BoundaryI->getFunction() ||
-      PtrI->getParent() != BoundaryI->getParent())
-    return std::nullopt;
-
-  int64_t RootOffset = 0;
-  Value *RootBase = GetPointerBaseWithConstantOffset(Ptr, RootOffset, DL);
-  if (!RootBase)
-    return std::nullopt;
-  int64_t AbsoluteTarget = RootOffset + TargetOffset;
-
-  // A backwards provenance edge commonly ends at the GEP that computes the
-  // lambda field, while a modifying call follows that GEP before the field is
-  // read.  Do not select an older initializer across such a call: the regular
-  // def-use visitor must inspect the call (and, for a dynamic memcpy, decline
-  // specialization).  For a non-escaping local, a call can only clobber this
-  // storage if one of its pointer arguments aliases the same base.
-  for (Instruction *I = BoundaryI->getNextNode(); I; I = I->getNextNode()) {
-    auto *CB = dyn_cast<CallBase>(I);
-    if (!CB || isa<DbgInfoIntrinsic>(CB) || CB->onlyReadsMemory())
-      continue;
-    for (Value *Arg : CB->args()) {
-      if (!Arg->getType()->isPointerTy())
-        continue;
-      int64_t ArgOffset = 0;
-      Value *ArgBase = GetPointerBaseWithConstantOffset(Arg, ArgOffset, DL);
-      if (ArgBase == RootBase)
-        return std::nullopt;
-    }
-  }
-
-  for (Instruction *I = BoundaryI->getPrevNode(); I; I = I->getPrevNode()) {
-    if (auto *SI = dyn_cast<StoreInst>(I)) {
-      int64_t StoreOffset = 0;
-      Value *StoreBase = GetPointerBaseWithConstantOffset(
-          SI->getPointerOperand(), StoreOffset, DL);
-      auto StoreSize = getTypeStoreSize(DL, SI->getValueOperand()->getType());
-      if (StoreBase == RootBase && StoreSize &&
-          offsetCoveredByRange(AbsoluteTarget, StoreOffset, *StoreSize))
-        return LambdaPtrUseAnalysis{.DominatingWrite = SI->getValueOperand(),
-                                    .Offset = StoreOffset - RootOffset,
-                                    .ChangedRCLayout = std::nullopt};
-      continue;
-    }
-
-    // A call that may write memory could clobber Ptr.  Leave such cases to the
-    // interprocedural visitor, which understands memcpy and pointer arguments.
-    if (auto *CB = dyn_cast<CallBase>(I)) {
-      if (!isa<DbgInfoIntrinsic>(CB) && !CB->onlyReadsMemory())
-        return std::nullopt;
-    }
-  }
-  return std::nullopt;
-}
-
 // Given a newly allocated ptr encountered in def-use analysis beginning at a
 // Lambda callsite, we need to determine which definition dominates that ptr.
 class LambdaInstUseVisitor : public InstVisitor<LambdaInstUseVisitor> {
@@ -554,15 +490,11 @@ public:
 };
 
 inline std::optional<LambdaPtrUseAnalysis>
-getDominatingUse(const DataLayout &DL, Value *ValueNeedingAnalysis,
-                 Value *SeenUse, int64_t TargetOffset,
-                 CallBase *LambdaCB = nullptr) {
+runDominatingUseVisitor(const DataLayout &DL, Value *ValueNeedingAnalysis,
+                        Value *SeenUse, int64_t TargetOffset,
+                        CallBase *LambdaCB = nullptr) {
   DEBUG(Logger::logs("proteus-pass")
         << "Beginning PtrUse analysis with offset = " << TargetOffset << "\n");
-
-  if (auto Store = getPreviousCoveringStore(DL, ValueNeedingAnalysis, SeenUse,
-                                            TargetOffset))
-    return Store;
 
   LambdaInstUseVisitor Visitor(ValueNeedingAnalysis, SeenUse, LambdaCB, DL,
                                TargetOffset);

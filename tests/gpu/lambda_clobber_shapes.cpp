@@ -134,6 +134,111 @@ kernelAmbiguousLoopOverwrite(F Initial, F Replacement, int Iterations) {
   invokeAfterAmbiguousLoopOverwrite(&Initial, &Replacement, Iterations);
 }
 
+template <typename F>
+__device__ __attribute__((noinline, optnone)) static void
+overwritePointerTransitively(F *volatile *Slot, F *Replacement) {
+  overwritePointerInCall(Slot, Replacement);
+}
+
+template <typename F>
+__device__ __attribute__((noinline, optnone)) static void
+invokeAfterNestedCallOverwrite(F *Initial, F *Replacement) {
+  F *volatile Slot = Initial;
+  overwritePointerTransitively(&Slot, Replacement);
+  (*Slot)();
+}
+
+template <typename F>
+__global__ __attribute__((annotate("jit"))) static void
+kernelNestedCallOverwrite(F Initial, F Replacement) {
+  invokeAfterNestedCallOverwrite(&Initial, &Replacement);
+}
+
+template <typename F>
+__device__ __attribute__((noinline, optnone)) static void
+overwriteSamePointerOnBothPaths(F *volatile *Slot, F *Replacement,
+                                bool LeftPath) {
+  if (LeftPath)
+    overwritePointerInCall(Slot, Replacement);
+  else
+    overwritePointerTransitively(Slot, Replacement);
+}
+
+template <typename F>
+__device__ __attribute__((noinline, optnone)) static void
+invokeAfterSameCallBranchOverwrite(F *Initial, F *Replacement, bool LeftPath) {
+  F *volatile Slot = Initial;
+  overwriteSamePointerOnBothPaths(&Slot, Replacement, LeftPath);
+  (*Slot)();
+}
+
+template <typename F>
+__global__ __attribute__((annotate("jit"))) static void
+kernelSameCallBranchOverwrite(F Initial, F Replacement, bool LeftPath) {
+  invokeAfterSameCallBranchOverwrite(&Initial, &Replacement, LeftPath);
+}
+
+template <typename F>
+__device__ __attribute__((noinline, optnone)) static void
+overwriteDifferentPointersOnPaths(F *volatile *Slot, F *First, F *Second,
+                                  bool UseSecond) {
+  if (UseSecond)
+    overwritePointerInCall(Slot, Second);
+  else
+    overwritePointerTransitively(Slot, First);
+}
+
+template <typename F>
+__device__ __attribute__((noinline, optnone)) static void
+invokeAfterDifferentCallBranchOverwrite(F *Initial, F *First, F *Second,
+                                        bool UseSecond) {
+  F *volatile Slot = Initial;
+  overwriteDifferentPointersOnPaths(&Slot, First, Second, UseSecond);
+  (*Slot)();
+}
+
+template <typename F>
+__global__ __attribute__((annotate("jit"))) static void
+kernelDifferentCallBranchOverwrite(F Initial, F First, F Second,
+                                   bool UseSecond) {
+  invokeAfterDifferentCallBranchOverwrite(&Initial, &First, &Second, UseSecond);
+}
+
+template <typename F>
+__device__ __attribute__((noinline, optnone)) static void
+invokeAfterLocalSupersedesCall(F *Initial, F *CallReplacement,
+                               F *FinalReplacement) {
+  F *volatile Slot = Initial;
+  overwritePointerInCall(&Slot, CallReplacement);
+  Slot = FinalReplacement;
+  (*Slot)();
+}
+
+template <typename F>
+__global__ __attribute__((annotate("jit"))) static void
+kernelLocalSupersedesCall(F Initial, F CallReplacement, F FinalReplacement) {
+  invokeAfterLocalSupersedesCall(&Initial, &CallReplacement, &FinalReplacement);
+}
+
+template <typename F>
+__device__ __attribute__((noinline, optnone)) static void
+invokeAcrossUnrelatedCallOverwrite(F *Initial, F *Replacement, F *NoiseInitial,
+                                   F *NoiseReplacement) {
+  F *volatile Slot = Initial;
+  F *volatile NoiseSlot = NoiseInitial;
+  Slot = Replacement;
+  overwritePointerInCall(&NoiseSlot, NoiseReplacement);
+  (*Slot)();
+}
+
+template <typename F>
+__global__ __attribute__((annotate("jit"))) static void
+kernelUnrelatedCallOverwrite(F Initial, F Replacement, F NoiseInitial,
+                             F NoiseReplacement) {
+  invokeAcrossUnrelatedCallOverwrite(&Initial, &Replacement, &NoiseInitial,
+                                     &NoiseReplacement);
+}
+
 static auto makePredecessorBody(int Value) {
   return proteus::register_lambda(
       [X = proteus::jit_variable(Value)] __host__ __device__ {
@@ -183,6 +288,41 @@ static auto makeAmbiguousLoopBody(int Value) {
       });
 }
 
+static auto makeNestedCallBody(int Value) {
+  return proteus::register_lambda(
+      [X = proteus::jit_variable(Value)] __host__ __device__ {
+        printf("nested call clobber %d\n", X);
+      });
+}
+
+static auto makeSameCallBranchBody(int Value) {
+  return proteus::register_lambda(
+      [X = proteus::jit_variable(Value)] __host__ __device__ {
+        printf("same call branch clobber %d\n", X);
+      });
+}
+
+static auto makeDifferentCallBranchBody(int Value) {
+  return proteus::register_lambda(
+      [X = proteus::jit_variable(Value)] __host__ __device__ {
+        printf("different call branch clobber %d\n", X);
+      });
+}
+
+static auto makeLocalAfterCallBody(int Value) {
+  return proteus::register_lambda(
+      [X = proteus::jit_variable(Value)] __host__ __device__ {
+        printf("local after call clobber %d\n", X);
+      });
+}
+
+static auto makeUnrelatedCallBody(int Value) {
+  return proteus::register_lambda(
+      [X = proteus::jit_variable(Value)] __host__ __device__ {
+        printf("unrelated call clobber %d\n", X);
+      });
+}
+
 int main() {
   auto PredecessorInitial = makePredecessorBody(229);
   auto PredecessorReplacement = makePredecessorBody(233);
@@ -225,6 +365,41 @@ int main() {
   kernelAmbiguousLoopOverwrite<<<1, 1>>>(AmbiguousLoopInitial,
                                          AmbiguousLoopReplacement, 2);
   gpuErrCheck(gpuDeviceSynchronize());
+
+  auto NestedCallInitial = makeNestedCallBody(311);
+  auto NestedCallReplacement = makeNestedCallBody(313);
+  kernelNestedCallOverwrite<<<1, 1>>>(NestedCallInitial, NestedCallReplacement);
+  gpuErrCheck(gpuDeviceSynchronize());
+
+  auto SameCallBranchInitial = makeSameCallBranchBody(317);
+  auto SameCallBranchReplacement = makeSameCallBranchBody(331);
+  kernelSameCallBranchOverwrite<<<1, 1>>>(SameCallBranchInitial,
+                                          SameCallBranchReplacement, false);
+  gpuErrCheck(gpuDeviceSynchronize());
+
+  auto DifferentCallBranchInitial = makeDifferentCallBranchBody(337);
+  auto DifferentCallBranchFirst = makeDifferentCallBranchBody(347);
+  auto DifferentCallBranchSecond = makeDifferentCallBranchBody(349);
+  kernelDifferentCallBranchOverwrite<<<1, 1>>>(DifferentCallBranchInitial,
+                                               DifferentCallBranchFirst,
+                                               DifferentCallBranchSecond, true);
+  gpuErrCheck(gpuDeviceSynchronize());
+
+  auto LocalAfterCallInitial = makeLocalAfterCallBody(353);
+  auto LocalAfterCallIntermediate = makeLocalAfterCallBody(359);
+  auto LocalAfterCallFinal = makeLocalAfterCallBody(367);
+  kernelLocalSupersedesCall<<<1, 1>>>(
+      LocalAfterCallInitial, LocalAfterCallIntermediate, LocalAfterCallFinal);
+  gpuErrCheck(gpuDeviceSynchronize());
+
+  auto UnrelatedCallInitial = makeUnrelatedCallBody(373);
+  auto UnrelatedCallReplacement = makeUnrelatedCallBody(379);
+  auto UnrelatedCallNoiseInitial = makeUnrelatedCallBody(383);
+  auto UnrelatedCallNoiseReplacement = makeUnrelatedCallBody(389);
+  kernelUnrelatedCallOverwrite<<<1, 1>>>(
+      UnrelatedCallInitial, UnrelatedCallReplacement, UnrelatedCallNoiseInitial,
+      UnrelatedCallNoiseReplacement);
+  gpuErrCheck(gpuDeviceSynchronize());
   return 0;
 }
 
@@ -245,4 +420,15 @@ int main() {
 // CHECK: [KernelConfig] ID:{{.*}}kernelAmbiguousLoopOverwrite
 // CHECK-NOT: [LambdaSpec]
 // CHECK: ambiguous loop clobber 307
+// CHECK: [LambdaSpec] Replacing slot 0 with i32 313
+// CHECK: nested call clobber 313
+// CHECK: [LambdaSpec] Replacing slot 0 with i32 331
+// CHECK: same call branch clobber 331
+// CHECK: [KernelConfig] ID:{{.*}}kernelDifferentCallBranchOverwrite
+// CHECK-NOT: [LambdaSpec]
+// CHECK: different call branch clobber 349
+// CHECK: [LambdaSpec] Replacing slot 0 with i32 367
+// CHECK: local after call clobber 367
+// CHECK: [LambdaSpec] Replacing slot 0 with i32 379
+// CHECK: unrelated call clobber 379
 // clang-format on

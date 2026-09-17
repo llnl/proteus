@@ -174,7 +174,7 @@ inline bool isPointerSpillLoad(const LoadInst &LI) {
   return Slot && Slot->getAllocatedType()->isPointerTy();
 }
 
-// Own the analyses needed to buildgit  MemorySSA for one function.  Lambda
+// Own the analyses needed to build MemorySSA for one function.  Lambda
 // provenance is analyzed by a module pass, so it cannot directly request a
 // FunctionAnalysisManager result.  Keeping these objects together also keeps
 // every reference held by AAResults and MemorySSA valid.
@@ -202,8 +202,10 @@ public:
 enum class PointerClobberKind { Value, Incoming, Cycle, Ambiguous, Unknown };
 
 struct PointerClobberResult {
-  PointerClobberKind Kind;
+  PointerClobberKind Kind = PointerClobberKind::Unknown;
   Value *V = nullptr;
+  int64_t Offset = 0;
+  std::optional<RuntimeConstantType> ChangedRCLayout = std::nullopt;
 };
 
 // Resolve the pointer definition reaching a pointer-valued load.  MemorySSA
@@ -226,7 +228,7 @@ class PointerClobberResolver {
     if (auto *LI = dyn_cast<LoadInst>(V)) {
       if (isa<AllocaInst>(getUnderlyingObject(LI->getPointerOperand())) &&
           ResolvingOrigins.insert(LI).second) {
-        PointerClobberResult Clobber = resolve(*LI);
+        PointerClobberResult Clobber = resolve(LI->getPointerOperand(), *LI, 0);
         ResolvingOrigins.erase(LI);
         if (Clobber.Kind == PointerClobberKind::Value)
           return Clobber.V;
@@ -335,6 +337,87 @@ class PointerClobberResolver {
     return MSSA.getLiveOnEntryDef();
   }
 
+  static PointerClobberResult mergeGeneral(PointerClobberResult LHS,
+                                           PointerClobberResult RHS) {
+    if (LHS.Kind == PointerClobberKind::Cycle)
+      return RHS;
+    if (RHS.Kind == PointerClobberKind::Cycle)
+      return LHS;
+    if (LHS.Kind == PointerClobberKind::Unknown ||
+        RHS.Kind == PointerClobberKind::Unknown)
+      return {};
+    if (LHS.Kind == PointerClobberKind::Ambiguous ||
+        RHS.Kind == PointerClobberKind::Ambiguous || LHS.Kind != RHS.Kind)
+      return {PointerClobberKind::Ambiguous};
+    if (LHS.Kind == PointerClobberKind::Value &&
+        (LHS.V != RHS.V || LHS.Offset != RHS.Offset ||
+         LHS.ChangedRCLayout != RHS.ChangedRCLayout))
+      return {PointerClobberKind::Ambiguous};
+    return LHS;
+  }
+
+  PointerClobberResult
+  resolveGeneralAccess(FunctionMemorySSAState &State, MemoryAccess *Access,
+                       const MemoryLocation &Location, Value *TrackedPtr,
+                       int64_t TargetOffset,
+                       SmallPtrSetImpl<MemoryAccess *> &Active) {
+    MemorySSA &MSSA = State.get();
+    if (!Access || MSSA.isLiveOnEntryDef(Access))
+      return {};
+    if (!Active.insert(Access).second)
+      return {PointerClobberKind::Cycle};
+
+    PointerClobberResult Result{PointerClobberKind::Unknown};
+    if (auto *Phi = dyn_cast<MemoryPhi>(Access)) {
+      Result.Kind = PointerClobberKind::Cycle;
+      for (unsigned I = 0; I < Phi->getNumIncomingValues(); ++I) {
+        MemoryAccess *Clobber = MSSA.getWalker()->getClobberingMemoryAccess(
+            Phi->getIncomingValue(I), Location);
+        Result = mergeGeneral(
+            Result, resolveGeneralAccess(State, Clobber, Location, TrackedPtr,
+                                         TargetOffset, Active));
+      }
+    } else if (auto *Def = dyn_cast<MemoryDef>(Access)) {
+      Instruction *I = Def->getMemoryInst();
+      if (auto *SI = dyn_cast<StoreInst>(I)) {
+        int64_t RootOffset = 0;
+        int64_t StoreOffset = 0;
+        Value *Root =
+            GetPointerBaseWithConstantOffset(TrackedPtr, RootOffset, DL);
+        Value *StoreRoot = GetPointerBaseWithConstantOffset(
+            SI->getPointerOperand(), StoreOffset, DL);
+        auto StoreSize = getTypeStoreSize(DL, SI->getValueOperand()->getType());
+        int64_t AbsoluteTarget = RootOffset + TargetOffset;
+        if (Root && Root == StoreRoot && StoreSize &&
+            offsetCoveredByRange(AbsoluteTarget, StoreOffset, *StoreSize)) {
+          if (SI->isAtomic()) {
+            Result = {PointerClobberKind::Ambiguous};
+          } else {
+            Value *Stored = SI->getValueOperand();
+            if (Stored->getType()->isPointerTy())
+              Stored = getPointerOrigin(Stored);
+            if (Stored)
+              Result = {PointerClobberKind::Value, Stored,
+                        StoreOffset - RootOffset, std::nullopt};
+          }
+        } else {
+          MemoryAccess *Previous = MSSA.getWalker()->getClobberingMemoryAccess(
+              Def->getDefiningAccess(), Location);
+          Result = resolveGeneralAccess(State, Previous, Location, TrackedPtr,
+                                        TargetOffset, Active);
+        }
+      } else if (auto *CB = dyn_cast<CallBase>(I)) {
+        SmallPtrSet<MemoryAccess *, 16> CallActive;
+        PointerClobberResult CallResult =
+            resolveCall(State, *Def, *CB, Location, CallActive);
+        Result = CallResult;
+      }
+    }
+
+    Active.erase(Access);
+    return Result;
+  }
+
   PointerClobberResult
   resolveCall(FunctionMemorySSAState &CallerState, MemoryDef &CallDef,
               CallBase &CB, const MemoryLocation &CallerLocation,
@@ -396,26 +479,57 @@ class PointerClobberResolver {
 public:
   explicit PointerClobberResolver(const DataLayout &DL) : DL(DL) {}
 
-  PointerClobberResult resolve(LoadInst &LI) {
-    FunctionMemorySSAState &State = getState(*LI.getFunction());
+  PointerClobberResult resolve(Value *Ptr, Instruction &UseBoundary,
+                               int64_t TargetOffset) {
+    if (!Ptr || !Ptr->getType()->isPointerTy())
+      return {PointerClobberKind::Unknown};
+
+    FunctionMemorySSAState &State = getState(*UseBoundary.getFunction());
     MemorySSA &MSSA = State.get();
-    MemoryAccess *LoadAccess = MSSA.getMemoryAccess(&LI);
-    if (!LoadAccess)
+    auto Location = getTrackedPointerLocation(DL, Ptr);
+    if (!Location)
       return {PointerClobberKind::Unknown};
-    MemoryLocation Location = MemoryLocation::get(&LI);
+
+    MemoryAccess *Before = nullptr;
+    if (auto *BoundaryAccess = dyn_cast_or_null<MemoryUseOrDef>(
+            MSSA.getMemoryAccess(&UseBoundary)))
+      Before = BoundaryAccess->getDefiningAccess();
+    else {
+      SmallPtrSet<BasicBlock *, 8> VisitedBlocks;
+      Before = getStateBefore(State, UseBoundary, VisitedBlocks);
+    }
     MemoryAccess *Clobber =
-        MSSA.getWalker()->getClobberingMemoryAccess(LoadAccess, Location);
+        MSSA.getWalker()->getClobberingMemoryAccess(Before, *Location);
     SmallPtrSet<MemoryAccess *, 16> Active;
-    PointerClobberResult Result =
-        resolveAccess(State, Clobber, Location, Active);
-    DEBUG(Logger::logs("proteus-pass")
-          << "[Lambda arg analysis]: MemorySSA clobber result "
-          << static_cast<unsigned>(Result.Kind) << " for " << LI << "\n");
-    if (Result.Kind == PointerClobberKind::Cycle)
-      return {PointerClobberKind::Unknown};
-    return Result;
+    return resolveGeneralAccess(State, Clobber, *Location, Ptr, TargetOffset,
+                                Active);
   }
 };
+
+inline std::optional<LambdaPtrUseAnalysis>
+getDominatingUse(const DataLayout &DL, Value *ValueNeedingAnalysis,
+                 Value *SeenUse, int64_t TargetOffset, CallBase *LambdaCB,
+                 const std::shared_ptr<PointerClobberResolver> &Clobbers) {
+  Instruction *UseBoundary = dyn_cast_or_null<Instruction>(LambdaCB);
+  auto *StartInstruction = dyn_cast<Instruction>(ValueNeedingAnalysis);
+  if (!UseBoundary || !StartInstruction ||
+      UseBoundary->getFunction() != StartInstruction->getFunction())
+    UseBoundary = dyn_cast<Instruction>(SeenUse);
+  if (Clobbers && UseBoundary && StartInstruction &&
+      UseBoundary->getFunction() == StartInstruction->getFunction()) {
+    PointerClobberResult Clobber =
+        Clobbers->resolve(ValueNeedingAnalysis, *UseBoundary, TargetOffset);
+    if (Clobber.Kind == PointerClobberKind::Value)
+      return LambdaPtrUseAnalysis{.DominatingWrite = Clobber.V,
+                                  .Offset = Clobber.Offset,
+                                  .ChangedRCLayout = Clobber.ChangedRCLayout};
+    if (Clobber.Kind == PointerClobberKind::Ambiguous)
+      return std::nullopt;
+  }
+
+  return runDominatingUseVisitor(DL, ValueNeedingAnalysis, SeenUse,
+                                 TargetOffset, LambdaCB);
+}
 
 struct LambdaKernelArgAnalysis {
   Function *KernelFunction = nullptr;
@@ -617,7 +731,8 @@ public:
   void visitLoadInst(LoadInst &LI) {
     DEBUG(Logger::logs("proteus-pass") << "Load inst analysis \n")
     if (isa<AllocaInst>(getUnderlyingObject(LI.getPointerOperand()))) {
-      PointerClobberResult Clobber = Clobbers->resolve(LI);
+      PointerClobberResult Clobber =
+          Clobbers->resolve(LI.getPointerOperand(), LI, 0);
       if (Clobber.Kind == PointerClobberKind::Value) {
         WorkList.push_back({Clobber.V, &LI});
         return;
@@ -652,7 +767,8 @@ public:
         AnalysisSuccess = false;
         return;
       }
-      auto Res = getDominatingUse(DL, LI.getPointerOperand(), &LI, 0, LambdaCB);
+      auto Res = getDominatingUse(DL, LI.getPointerOperand(), &LI, 0, LambdaCB,
+                                  Clobbers);
       if (!Res) {
         AnalysisFailed = true;
         AnalysisSuccess = false;
@@ -719,8 +835,8 @@ public:
 
   // todo: these three methods need to be changed to find a dominating store
   void visitAllocaInst(AllocaInst &Alloca) {
-    auto Res =
-        getDominatingUse(DL, &Alloca, MemoryAnalysisPtrUse, Offset, LambdaCB);
+    auto Res = getDominatingUse(DL, &Alloca, MemoryAnalysisPtrUse, Offset,
+                                LambdaCB, Clobbers);
     if (!Res)
       return;
 
@@ -733,8 +849,8 @@ public:
   }
 
   void visitBitCastInst(BitCastInst &BC) {
-    auto Res =
-        getDominatingUse(DL, &BC, MemoryAnalysisPtrUse, Offset, LambdaCB);
+    auto Res = getDominatingUse(DL, &BC, MemoryAnalysisPtrUse, Offset, LambdaCB,
+                                Clobbers);
     if (!Res)
       return;
     WorkList.push_back({Res->DominatingWrite, &BC});
@@ -745,8 +861,8 @@ public:
 
   void visitAddrSpaceCastInst(AddrSpaceCastInst &ASC) {
     WorkList.push_back({ASC.getPointerOperand(), &ASC});
-    auto Res =
-        getDominatingUse(DL, &ASC, MemoryAnalysisPtrUse, Offset, LambdaCB);
+    auto Res = getDominatingUse(DL, &ASC, MemoryAnalysisPtrUse, Offset,
+                                LambdaCB, Clobbers);
     if (!Res)
       return;
 
