@@ -3,6 +3,7 @@
 
 #include "Helpers.h"
 #include "KernelArgPtrUseVisitor.h"
+#include "PointerClobberAnalysis.h"
 #include "proteus/CompilerInterfaceTypes.h"
 #include "proteus/impl/Logger.h"
 #include "proteus/impl/RuntimeConstantTypeHelpers.h"
@@ -199,20 +200,11 @@ public:
   MemorySSA &get() { return *MSSA; }
 };
 
-enum class PointerClobberKind { Value, Incoming, Cycle, Ambiguous, Unknown };
-
-struct PointerClobberResult {
-  PointerClobberKind Kind = PointerClobberKind::Unknown;
-  Value *V = nullptr;
-  int64_t Offset = 0;
-  std::optional<RuntimeConstantType> ChangedRCLayout = std::nullopt;
-};
-
 // Resolve the pointer definition reaching a pointer-valued load.  MemorySSA
 // supplies write order and CFG joins within each function.  Direct calls are
 // summarized by resolving the tracked formal argument at every callee return;
 // the callee's MemorySSA remains separate from the caller's graph.
-class PointerClobberResolver {
+class PointerClobberResolver final : public PointerClobberAnalysis {
   const DataLayout &DL;
   DenseMap<Function *, std::unique_ptr<FunctionMemorySSAState>> States;
   SmallPtrSet<LoadInst *, 8> ResolvingOrigins;
@@ -232,6 +224,12 @@ class PointerClobberResolver {
         ResolvingOrigins.erase(LI);
         if (Clobber.Kind == PointerClobberKind::Value)
           return Clobber.V;
+        // Preserve the load as an unresolved provenance step when MemorySSA
+        // selected a concrete write that needs interpretation (for example a
+        // memcpy). Falling through to the legacy reaching-store scan here
+        // would skip that write and recover an older initializer.
+        if (Clobber.ClobberingInstruction)
+          return LI;
       }
     }
     SmallPtrSet<Value *, 8> Visited;
@@ -243,6 +241,30 @@ class PointerClobberResolver {
     Value *TrackedOrigin = getPointerOrigin(const_cast<Value *>(Tracked));
     return CandidateOrigin && TrackedOrigin &&
            isSamePointerAddress(DL, CandidateOrigin, TrackedOrigin);
+  }
+
+  std::optional<int64_t> getTrackedOffsetFrom(Value *Candidate, Value *Tracked,
+                                              int64_t TargetOffset) {
+    auto GetOriginAndOffset = [&](Value *V) {
+      int64_t TotalOffset = 0;
+      SmallPtrSet<Value *, 8> Visited;
+      while (V && Visited.insert(V).second) {
+        int64_t StepOffset = 0;
+        Value *Base = GetPointerBaseWithConstantOffset(V, StepOffset, DL);
+        TotalOffset += StepOffset;
+        Value *Origin = getPointerOrigin(Base);
+        if (!Origin || Origin == Base)
+          return std::pair<Value *, int64_t>{Base, TotalOffset};
+        V = Origin;
+      }
+      return std::pair<Value *, int64_t>{nullptr, 0};
+    };
+
+    auto [CandidateRoot, CandidateOffset] = GetOriginAndOffset(Candidate);
+    auto [TrackedRoot, TrackedOffset] = GetOriginAndOffset(Tracked);
+    if (!CandidateRoot || CandidateRoot != TrackedRoot)
+      return std::nullopt;
+    return TrackedOffset + TargetOffset - CandidateOffset;
   }
 
   static PointerClobberResult merge(PointerClobberResult LHS,
@@ -310,6 +332,9 @@ class PointerClobberResolver {
         }
       } else if (auto *CB = dyn_cast<CallBase>(I)) {
         Result = resolveCall(State, *Def, *CB, Location, Active);
+        if (Result.Kind == PointerClobberKind::NoClobber)
+          Result =
+              resolveAccess(State, Def->getDefiningAccess(), Location, Active);
       }
     } else if (auto *Use = dyn_cast<MemoryUse>(Access)) {
       Result = resolveAccess(State, Use->getDefiningAccess(), Location, Active);
@@ -345,7 +370,7 @@ class PointerClobberResolver {
       return LHS;
     if (LHS.Kind == PointerClobberKind::Unknown ||
         RHS.Kind == PointerClobberKind::Unknown)
-      return {};
+      return {PointerClobberKind::Unknown};
     if (LHS.Kind == PointerClobberKind::Ambiguous ||
         RHS.Kind == PointerClobberKind::Ambiguous || LHS.Kind != RHS.Kind)
       return {PointerClobberKind::Ambiguous};
@@ -362,13 +387,27 @@ class PointerClobberResolver {
                        int64_t TargetOffset,
                        SmallPtrSetImpl<MemoryAccess *> &Active) {
     MemorySSA &MSSA = State.get();
-    if (!Access || MSSA.isLiveOnEntryDef(Access))
+    DEBUG(if (Access) Logger::logs("proteus-pass")
+              << "[PTR clobber analysis]: Examining MemorySSA access "
+              << *Access << "\n";)
+    if (!Access || MSSA.isLiveOnEntryDef(Access)) {
+      DEBUG(Logger::logs("proteus-pass")
+            << "[PTR clobber analysis]: Reached live-on-entry without finding "
+               "a clobber\n");
       return {};
-    if (!Active.insert(Access).second)
+    }
+    if (!Active.insert(Access).second) {
+      DEBUG(Logger::logs("proteus-pass")
+            << "[PTR clobber analysis]: Encountered a MemorySSA cycle at "
+            << *Access << "\n");
       return {PointerClobberKind::Cycle};
+    }
 
     PointerClobberResult Result{PointerClobberKind::Unknown};
     if (auto *Phi = dyn_cast<MemoryPhi>(Access)) {
+      DEBUG(Logger::logs("proteus-pass")
+            << "[PTR clobber analysis]: Merging clobbers reaching " << *Phi
+            << "\n");
       Result.Kind = PointerClobberKind::Cycle;
       for (unsigned I = 0; I < Phi->getNumIncomingValues(); ++I) {
         MemoryAccess *Clobber = MSSA.getWalker()->getClobberingMemoryAccess(
@@ -379,18 +418,22 @@ class PointerClobberResolver {
       }
     } else if (auto *Def = dyn_cast<MemoryDef>(Access)) {
       Instruction *I = Def->getMemoryInst();
+      DEBUG(Logger::logs("proteus-pass")
+            << "[PTR clobber analysis]: Candidate clobbering instruction: "
+            << *I << "\n");
       if (auto *SI = dyn_cast<StoreInst>(I)) {
-        int64_t RootOffset = 0;
-        int64_t StoreOffset = 0;
-        Value *Root =
-            GetPointerBaseWithConstantOffset(TrackedPtr, RootOffset, DL);
-        Value *StoreRoot = GetPointerBaseWithConstantOffset(
-            SI->getPointerOperand(), StoreOffset, DL);
         auto StoreSize = getTypeStoreSize(DL, SI->getValueOperand()->getType());
-        int64_t AbsoluteTarget = RootOffset + TargetOffset;
-        if (Root && Root == StoreRoot && StoreSize &&
-            offsetCoveredByRange(AbsoluteTarget, StoreOffset, *StoreSize)) {
+        auto RelativeOffset = getTrackedOffsetFrom(
+            SI->getPointerOperand(), TrackedPtr, TargetOffset);
+        if (RelativeOffset && StoreSize &&
+            offsetCoveredByRange(*RelativeOffset, 0, *StoreSize)) {
+          DEBUG(Logger::logs("proteus-pass")
+                << "[PTR clobber analysis]: Found covering clobber: " << *SI
+                << "\n");
           if (SI->isAtomic()) {
+            DEBUG(Logger::logs("proteus-pass")
+                  << "[PTR clobber analysis]: Covering atomic store is "
+                     "ambiguous\n");
             Result = {PointerClobberKind::Ambiguous};
           } else {
             Value *Stored = SI->getValueOperand();
@@ -398,24 +441,160 @@ class PointerClobberResolver {
               Stored = getPointerOrigin(Stored);
             if (Stored)
               Result = {PointerClobberKind::Value, Stored,
-                        StoreOffset - RootOffset, std::nullopt};
+                        TargetOffset - *RelativeOffset, std::nullopt};
           }
         } else {
+          DEBUG(Logger::logs("proteus-pass")
+                << "[PTR clobber analysis]: Store does not cover the tracked "
+                   "byte; continuing past "
+                << *SI << "\n");
           MemoryAccess *Previous = MSSA.getWalker()->getClobberingMemoryAccess(
               Def->getDefiningAccess(), Location);
           Result = resolveGeneralAccess(State, Previous, Location, TrackedPtr,
                                         TargetOffset, Active);
         }
       } else if (auto *CB = dyn_cast<CallBase>(I)) {
-        SmallPtrSet<MemoryAccess *, 16> CallActive;
-        PointerClobberResult CallResult =
-            resolveCall(State, *Def, *CB, Location, CallActive);
-        Result = CallResult;
+        if (auto *MI = dyn_cast<MemIntrinsic>(CB)) {
+          auto RelativeOffset =
+              getTrackedOffsetFrom(MI->getRawDest(), TrackedPtr, TargetOffset);
+          if (!RelativeOffset) {
+            // The intrinsic may read the tracked storage, but it does not
+            // write it. Continue with the state preceding the call.
+            MemoryAccess *Previous =
+                MSSA.getWalker()->getClobberingMemoryAccess(
+                    Def->getDefiningAccess(), Location);
+            Result = resolveGeneralAccess(State, Previous, Location, TrackedPtr,
+                                          TargetOffset, Active);
+          } else if (auto *Length = dyn_cast<ConstantInt>(MI->getLength())) {
+            if (!offsetCoveredByRange(*RelativeOffset, 0,
+                                      Length->getZExtValue())) {
+              MemoryAccess *Previous =
+                  MSSA.getWalker()->getClobberingMemoryAccess(
+                      Def->getDefiningAccess(), Location);
+              Result = resolveGeneralAccess(State, Previous, Location,
+                                            TrackedPtr, TargetOffset, Active);
+            } else if (isa<MemSetInst>(MI)) {
+              Result = {PointerClobberKind::Ambiguous};
+            } else {
+              // Let LambdaInstUseVisitor translate a covering transfer from
+              // destination coordinates to source coordinates.
+              Result.ClobberingInstruction = MI;
+              Result.ClobberPointer = MI->getRawDest();
+              Result.ClobberOffset = *RelativeOffset;
+            }
+          } else {
+            // A dynamic length may cover the tracked byte.
+            Result = {PointerClobberKind::Ambiguous};
+          }
+        } else {
+          Result = resolveGeneralCall(State, *Def, *CB, Location, TrackedPtr,
+                                      TargetOffset, Active);
+        }
+        DEBUG({
+          auto &OS = Logger::logs("proteus-pass");
+          OS << "[PTR clobber analysis]: Call clobber result "
+             << static_cast<unsigned>(Result.Kind) << " from " << *CB;
+          if (Result.Kind == PointerClobberKind::Value && Result.V)
+            OS << "; resolved value: " << *Result.V;
+          OS << "\n";
+        });
+      } else {
+        DEBUG(Logger::logs("proteus-pass")
+              << "[PTR clobber analysis]: Unsupported clobbering instruction: "
+              << *I << "\n");
       }
     }
 
+    DEBUG({
+      auto &OS = Logger::logs("proteus-pass");
+      OS << "[PTR clobber analysis]: Result kind "
+         << static_cast<unsigned>(Result.Kind);
+      if (Result.Kind == PointerClobberKind::Value && Result.V)
+        OS << " with value " << *Result.V;
+      OS << "\n";
+    });
     Active.erase(Access);
     return Result;
+  }
+
+  PointerClobberResult
+  resolveGeneralCall(FunctionMemorySSAState &CallerState, MemoryDef &CallDef,
+                     CallBase &CB, const MemoryLocation &CallerLocation,
+                     Value *TrackedPtr, int64_t TargetOffset,
+                     SmallPtrSetImpl<MemoryAccess *> &CallerActive) {
+    Function *Callee = CB.getCalledFunction();
+    if (!Callee || Callee->isDeclaration())
+      return {PointerClobberKind::Unknown};
+
+    unsigned TrackedArg = Callee->arg_size();
+    int64_t CalleeTargetOffset = 0;
+    for (unsigned I = 0; I < CB.arg_size() && I < Callee->arg_size(); ++I) {
+      Value *Actual = CB.getArgOperand(I);
+      if (!Actual->getType()->isPointerTy())
+        continue;
+      auto RelativeOffset =
+          getTrackedOffsetFrom(Actual, TrackedPtr, TargetOffset);
+      if (!RelativeOffset)
+        continue;
+      if (TrackedArg != Callee->arg_size())
+        return {PointerClobberKind::Ambiguous};
+      TrackedArg = I;
+      CalleeTargetOffset = *RelativeOffset;
+    }
+    if (TrackedArg == Callee->arg_size()) {
+      MemoryAccess *Previous =
+          CallerState.get().getWalker()->getClobberingMemoryAccess(
+              CallDef.getDefiningAccess(), CallerLocation);
+      return resolveGeneralAccess(CallerState, Previous, CallerLocation,
+                                  TrackedPtr, TargetOffset, CallerActive);
+    }
+
+    FunctionMemorySSAState &CalleeState = getState(*Callee);
+    Value *Formal = Callee->getArg(TrackedArg);
+    MemoryLocation CalleeLocation = MemoryLocation::getBeforeOrAfter(Formal);
+    PointerClobberResult Summary{PointerClobberKind::Cycle};
+
+    for (BasicBlock &BB : *Callee) {
+      auto *Ret = dyn_cast<ReturnInst>(BB.getTerminator());
+      if (!Ret)
+        continue;
+      SmallPtrSet<BasicBlock *, 8> VisitedBlocks;
+      MemoryAccess *ExitState =
+          getStateBefore(CalleeState, *Ret, VisitedBlocks);
+      MemoryAccess *Clobber =
+          CalleeState.get().getWalker()->getClobberingMemoryAccess(
+              ExitState, CalleeLocation);
+      SmallPtrSet<MemoryAccess *, 16> CalleeActive;
+      PointerClobberResult AtReturn = resolveGeneralAccess(
+          CalleeState, Clobber, CalleeLocation, Formal, CalleeTargetOffset,
+          CalleeActive);
+
+      if (AtReturn.Kind == PointerClobberKind::Unknown &&
+          !AtReturn.ClobberingInstruction)
+        AtReturn.Kind = PointerClobberKind::Incoming;
+      if (AtReturn.Kind == PointerClobberKind::Incoming) {
+        MemoryAccess *Previous =
+            CallerState.get().getWalker()->getClobberingMemoryAccess(
+                CallDef.getDefiningAccess(), CallerLocation);
+        AtReturn = resolveGeneralAccess(CallerState, Previous, CallerLocation,
+                                        TrackedPtr, TargetOffset,
+                                        CallerActive);
+      } else if (AtReturn.Kind == PointerClobberKind::Value) {
+        if (auto *A = dyn_cast<Argument>(AtReturn.V))
+          if (A->getParent() == Callee)
+            AtReturn.V = CB.getArgOperand(A->getArgNo());
+        // Normalize pointer spills before merging return paths. Distinct SSA
+        // loads of the same formal are one semantic value, while loads rooted
+        // in different formals must remain distinguishable.
+        if (AtReturn.V && AtReturn.V->getType()->isPointerTy())
+          AtReturn.V = getPointerOrigin(AtReturn.V);
+      }
+      Summary = mergeGeneral(Summary, AtReturn);
+    }
+
+    return Summary.Kind == PointerClobberKind::Cycle
+               ? PointerClobberResult{PointerClobberKind::Unknown}
+               : Summary;
   }
 
   PointerClobberResult
@@ -437,7 +616,7 @@ class PointerClobberResolver {
       }
     }
     if (TrackedArg == Callee->arg_size())
-      return {PointerClobberKind::Unknown};
+      return {PointerClobberKind::NoClobber};
 
     FunctionMemorySSAState &CalleeState = getState(*Callee);
     Value *Formal = Callee->getArg(TrackedArg);
@@ -480,7 +659,7 @@ public:
   explicit PointerClobberResolver(const DataLayout &DL) : DL(DL) {}
 
   PointerClobberResult resolve(Value *Ptr, Instruction &UseBoundary,
-                               int64_t TargetOffset) {
+                               int64_t TargetOffset) override {
     if (!Ptr || !Ptr->getType()->isPointerTy())
       return {PointerClobberKind::Unknown};
 
@@ -509,7 +688,7 @@ public:
 inline std::optional<LambdaPtrUseAnalysis>
 getDominatingUse(const DataLayout &DL, Value *ValueNeedingAnalysis,
                  Value *SeenUse, int64_t TargetOffset, CallBase *LambdaCB,
-                 const std::shared_ptr<PointerClobberResolver> &Clobbers) {
+                 const std::shared_ptr<PointerClobberAnalysis> &Clobbers) {
   Instruction *UseBoundary = dyn_cast_or_null<Instruction>(LambdaCB);
   auto *StartInstruction = dyn_cast<Instruction>(ValueNeedingAnalysis);
   if (!UseBoundary || !StartInstruction ||
@@ -528,7 +707,7 @@ getDominatingUse(const DataLayout &DL, Value *ValueNeedingAnalysis,
   }
 
   return runDominatingUseVisitor(DL, ValueNeedingAnalysis, SeenUse,
-                                 TargetOffset, LambdaCB);
+                                 TargetOffset, LambdaCB, Clobbers);
 }
 
 struct LambdaKernelArgAnalysis {
@@ -558,7 +737,7 @@ class LambdaArgVisitor : public InstVisitor<LambdaArgVisitor> {
 private:
   CallBase *LambdaCB;
   const DataLayout &DL;
-  std::shared_ptr<PointerClobberResolver> Clobbers;
+  std::shared_ptr<PointerClobberAnalysis> Clobbers;
   SmallVector<WorkItem> WorkList;
   SmallDenseSet<Value *> Seen;
 
@@ -574,7 +753,7 @@ private:
   // Constructor used for cloning and merging branches of phi node analysis
   LambdaArgVisitor(Value *Start, Value *LastSeen, CallBase *LambdaCBArg,
                    int64_t Off, const DataLayout &Dl,
-                   std::shared_ptr<PointerClobberResolver> ClobberResolver)
+                   std::shared_ptr<PointerClobberAnalysis> ClobberResolver)
       : LambdaCB(LambdaCBArg), DL(Dl), Clobbers(std::move(ClobberResolver)),
         Offset(Off) {
     WorkList.push_back({Start, LastSeen});
@@ -730,9 +909,9 @@ public:
 
   void visitLoadInst(LoadInst &LI) {
     DEBUG(Logger::logs("proteus-pass") << "Load inst analysis \n")
+    PointerClobberResult Clobber;
     if (isa<AllocaInst>(getUnderlyingObject(LI.getPointerOperand()))) {
-      PointerClobberResult Clobber =
-          Clobbers->resolve(LI.getPointerOperand(), LI, 0);
+      Clobber = Clobbers->resolve(LI.getPointerOperand(), LI, 0);
       if (Clobber.Kind == PointerClobberKind::Value) {
         WorkList.push_back({Clobber.V, &LI});
         return;
@@ -744,6 +923,18 @@ public:
               << LI << "\n");
         AnalysisFailed = true;
         AnalysisSuccess = false;
+        return;
+      }
+      if (Clobber.ClobberingInstruction) {
+        auto Res = runDominatingUseVisitor(DL, LI.getPointerOperand(), &LI, 0,
+                                           nullptr, Clobbers);
+        if (!Res) {
+          AnalysisFailed = true;
+          AnalysisSuccess = false;
+          return;
+        }
+        WorkList.push_back({Res->DominatingWrite, &LI});
+        Offset -= Res->EnclosingObjectOffsetCorrection;
         return;
       }
     }

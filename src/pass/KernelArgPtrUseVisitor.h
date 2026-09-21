@@ -2,6 +2,7 @@
 #define PROTEUS_KERNELARGPTRDEFVISITOR_H
 
 #include "Helpers.h"
+#include "PointerClobberAnalysis.h"
 #include "proteus/CompilerInterfaceTypes.h"
 #include "proteus/impl/Logger.h"
 #include "proteus/impl/RuntimeConstantTypeHelpers.h"
@@ -67,6 +68,7 @@ inline std::optional<uint64_t> getTypeStoreSize(const DataLayout &DL,
 struct LambdaPtrUseAnalysis {
   Value *DominatingWrite = nullptr;
   int64_t Offset = 0;
+  int64_t EnclosingObjectOffsetCorrection = 0;
   // Sometimes instructions like ptrtoint --> inttoptr change the layout of
   // the kernel args.
   std::optional<RuntimeConstantType> ChangedRCLayout = std::nullopt;
@@ -83,6 +85,11 @@ struct UseEdge {
   Value *CurVal;
   Value *LastVal;
 };
+
+inline std::optional<LambdaPtrUseAnalysis> runDominatingUseVisitor(
+    const DataLayout &DL, Value *ValueNeedingAnalysis, Value *SeenUse,
+    int64_t TargetOffset, CallBase *LambdaCB = nullptr,
+    std::shared_ptr<PointerClobberAnalysis> Clobbers = nullptr);
 
 inline std::optional<MemoryLocation>
 getTrackedPointerLocation(const DataLayout &DL, Value *Ptr) {
@@ -106,6 +113,9 @@ class LambdaInstUseVisitor : public InstVisitor<LambdaInstUseVisitor> {
 private:
   DominatorTree DTree;
   int64_t Offset = 0;
+  // Additional correction when analysis starts from an interior pointer but
+  // the selected clobber writes through its enclosing object.
+  int64_t CoordinateCorrection = 0;
   // The ValueOffsetMap contains the "live range" of the ptr we're analyzing.
   // For example, let's say that LambdaInstUseVisitor is handed ptr %0 = alloca
   // ptr, and LambdaArgVisitor has already identified that the closure starts at
@@ -117,6 +127,8 @@ private:
   Value *TrackedBase = nullptr;
   LambdaPtrUseAnalysis Result;
   DataLayout DL;
+  std::shared_ptr<PointerClobberAnalysis> Clobbers;
+  Instruction *UseBoundary = nullptr;
   SmallVector<UseEdge> WorkList;
   // The visitor pattern is always setting LastUse to the back of the
   // edge at the front of the worklist (the def that brought us to the
@@ -130,9 +142,16 @@ public:
   // Constructor used whenever a NeedsDefUseAnalysis Value is encountered. We
   // need to track where the calling LambdaArgVisitor came in from, so that our
   // analysis does not
-  LambdaInstUseVisitor(Value *PtrBegin, Value *SeenUse, CallBase *LambdaCB,
-                       const DataLayout &Dl, int64_t TargetOff)
-      : TrackedBase(PtrBegin), DL(Dl) {
+  LambdaInstUseVisitor(
+      Value *PtrBegin, Value *SeenUse, CallBase *LambdaCB, const DataLayout &Dl,
+      int64_t TargetOff,
+      std::shared_ptr<PointerClobberAnalysis> ClobberAnalysis = nullptr)
+      : TrackedBase(PtrBegin), DL(Dl), Clobbers(std::move(ClobberAnalysis)) {
+    UseBoundary = dyn_cast_or_null<Instruction>(LambdaCB);
+    auto *StartInstruction = dyn_cast<Instruction>(PtrBegin);
+    if (!UseBoundary || !StartInstruction ||
+        UseBoundary->getFunction() != StartInstruction->getFunction())
+      UseBoundary = dyn_cast<Instruction>(SeenUse);
     WorkList.push_back({PtrBegin, nullptr});
     // A pointer-transform on the backwards provenance path may also have an
     // earlier store as a user.  Visit that transform so those writes remain
@@ -170,6 +189,40 @@ public:
     DEBUG(Logger::logs("proteus-pass")
           << "    [PTR use analysis]: Analysis failed due to absence of " << *V
           << " in offset tracking map, this is an internal compiler bug\n");
+  }
+
+  // Ask MemorySSA to select the final write reaching this procedure-local use.
+  // If the resolver understands the write, finish immediately. Otherwise seed
+  // the visitor with only the selected instruction, rather than all users of
+  // the pointer (which have no meaningful ordering).
+  bool resolveSelectedClobber(Value *Ptr) {
+    auto *PtrInstruction = dyn_cast<Instruction>(Ptr);
+    if (!Clobbers || !UseBoundary || !PtrInstruction ||
+        UseBoundary->getFunction() != PtrInstruction->getFunction())
+      return false;
+
+    PointerClobberResult Clobber =
+        Clobbers->resolve(Ptr, *UseBoundary, ValueOffsetMap.lookup(Ptr));
+    if (Clobber.Kind == PointerClobberKind::Value) {
+      Result = {.DominatingWrite = Clobber.V,
+                .Offset = Clobber.Offset,
+                .EnclosingObjectOffsetCorrection = CoordinateCorrection,
+                .ChangedRCLayout = Clobber.ChangedRCLayout};
+      AnalysisSuccess = Clobber.V != nullptr;
+      AnalysisFailed = !AnalysisSuccess;
+      return true;
+    }
+    if (Clobber.Kind == PointerClobberKind::Ambiguous) {
+      AnalysisFailed = true;
+      AnalysisSuccess = false;
+      return true;
+    }
+    if (!Clobber.ClobberingInstruction || !Clobber.ClobberPointer)
+      return false;
+
+    ValueOffsetMap[Clobber.ClobberPointer] = Clobber.ClobberOffset;
+    pushBack(Clobber.ClobberingInstruction, Clobber.ClobberPointer);
+    return true;
   }
 
   // WorkList is LIFO.  Enqueue possible writers last so they are inspected
@@ -227,7 +280,8 @@ public:
     AnalysisFailed = false;
     AnalysisSuccess = true;
     Result = {.DominatingWrite = SI.getValueOperand(),
-              .Offset = Offset,
+              .Offset = Offset + CoordinateCorrection,
+              .EnclosingObjectOffsetCorrection = CoordinateCorrection,
               .ChangedRCLayout = std::nullopt};
   }
 
@@ -323,6 +377,18 @@ public:
     if (!GEPBase)
       return;
 
+    // When analysis begins at a field GEP, the reaching write can target the
+    // enclosing object (for example, a copy constructor). Translate the
+    // field-relative target back into the base object's coordinates before
+    // looking for that write.
+    if (!Def && ValueOffsetMap.contains(&GEP)) {
+      ValueOffsetMap[GEPBase] = ValueOffsetMap[&GEP] + GEPOffset;
+      CoordinateCorrection -= GEPOffset;
+      if (!resolveSelectedClobber(GEPBase))
+        pushPointerUsers(GEPBase);
+      return;
+    }
+
     if (!ValueOffsetMap.contains(GEPBase)) {
       offsetValueMapFailure(GEPBase);
       return;
@@ -369,7 +435,8 @@ public:
       return;
     }
 
-    pushPointerUsers(&Alloca);
+    if (!resolveSelectedClobber(&Alloca))
+      pushPointerUsers(&Alloca);
   }
 
   // TODO(bowen) come up with a unit test for an analysis starting with
@@ -381,7 +448,8 @@ public:
       ValueOffsetMap[BC.getOperand(0)] = Offset;
     // AddrSpaceCast does not change the offset we track.
     ValueOffsetMap[&BC] = ValueOffsetMap[BC.getOperand(0)];
-    pushPointerUsers(&BC);
+    if (!resolveSelectedClobber(&BC))
+      pushPointerUsers(&BC);
   }
 
   void visitAddrSpaceCastInst(AddrSpaceCastInst &ASC) {
@@ -399,7 +467,8 @@ public:
           << "    [PTR use analysis]: Setting offset " << ASC << " = "
           << ValueOffsetMap[&ASC]);
 
-    pushPointerUsers(&ASC);
+    if (!resolveSelectedClobber(&ASC))
+      pushPointerUsers(&ASC);
   }
 
   void visitMemIntrinsic(MemIntrinsic &I) {
@@ -467,16 +536,16 @@ public:
     DEBUG(Logger::logs("proteus-pass")
           << "  [PTR use analysis]: Completed instrinsic analysis " << "\n");
     // LambdaArgVisitor applies Result.Offset by subtracting it from its
-    // current, destination-relative offset.  The value carried across a
-    // transfer is therefore the difference between the destination and
-    // source bases, rather than the source's absolute offset.  For example,
-    // copying a field at byte 8 into a field at byte 24 needs a correction of
-    // 16, so the caller turns 24 into 8.
-    int64_t OffsetCorrection = DstOff - SrcOff;
+    // current, destination-relative offset.  The transfer contributes the
+    // difference between destination and source bases. CoordinateCorrection
+    // additionally translates an interior pointer to an enclosing-object
+    // clobber when that was required to select this transfer.
+    int64_t OffsetCorrection = DstOff - SrcOff + CoordinateCorrection;
     AnalysisSuccess = true;
     AnalysisFailed = false;
     Result = {.DominatingWrite = SrcBase,
               .Offset = OffsetCorrection,
+              .EnclosingObjectOffsetCorrection = CoordinateCorrection,
               .ChangedRCLayout = std::nullopt};
   }
 
@@ -492,12 +561,13 @@ public:
 inline std::optional<LambdaPtrUseAnalysis>
 runDominatingUseVisitor(const DataLayout &DL, Value *ValueNeedingAnalysis,
                         Value *SeenUse, int64_t TargetOffset,
-                        CallBase *LambdaCB = nullptr) {
+                        CallBase *LambdaCB,
+                        std::shared_ptr<PointerClobberAnalysis> Clobbers) {
   DEBUG(Logger::logs("proteus-pass")
         << "Beginning PtrUse analysis with offset = " << TargetOffset << "\n");
 
   LambdaInstUseVisitor Visitor(ValueNeedingAnalysis, SeenUse, LambdaCB, DL,
-                               TargetOffset);
+                               TargetOffset, std::move(Clobbers));
   // Analysis loop
   while (!Visitor.empty() && !Visitor.success() && !Visitor.failed()) {
     auto *V = Visitor.popBack().CurVal;
