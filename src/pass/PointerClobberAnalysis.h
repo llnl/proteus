@@ -3,6 +3,7 @@
 
 #include "proteus/CompilerInterfaceTypes.h"
 
+#include <llvm/ADT/ArrayRef.h>
 #include <llvm/IR/Instruction.h>
 #include <llvm/IR/Value.h>
 
@@ -35,13 +36,23 @@ struct PointerClobberResult {
   int64_t ClobberOffset = 0;
 };
 
+// A write discovered while following the relevant uses of a newly encountered
+// pointer definition. Pointer is the operand through which the instruction
+// accesses the tracked storage, and TargetOffset is relative to that operand.
+struct PointerClobberCandidate {
+  llvm::Instruction *I = nullptr;
+  llvm::Value *Pointer = nullptr;
+  int64_t TargetOffset = 0;
+};
+
 class PointerClobberAnalysis {
 public:
   virtual ~PointerClobberAnalysis() = default;
 
-  virtual PointerClobberResult resolve(llvm::Value *Ptr,
-                                       llvm::Instruction &UseBoundary,
-                                       int64_t TargetOffset) = 0;
+  virtual PointerClobberResult
+  resolve(llvm::Value *Ptr, llvm::Instruction &UseBoundary,
+          int64_t TargetOffset,
+          llvm::ArrayRef<PointerClobberCandidate> Candidates = {}) = 0;
 };
 
 } // namespace proteus
