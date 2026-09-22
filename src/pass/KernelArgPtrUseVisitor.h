@@ -67,6 +67,9 @@ inline std::optional<uint64_t> getTypeStoreSize(const DataLayout &DL,
 
 struct LambdaPtrUseAnalysis {
   Value *DominatingWrite = nullptr;
+  // The write selected by MemorySSA. When the backwards analysis continues
+  // through DominatingWrite, this is its actual downstream use boundary.
+  Instruction *ClobberingInstruction = nullptr;
   int64_t Offset = 0;
   int64_t EnclosingObjectOffsetCorrection = 0;
   // Sometimes instructions like ptrtoint --> inttoptr change the layout of
@@ -129,6 +132,10 @@ private:
   DataLayout DL;
   std::shared_ptr<PointerClobberAnalysis> Clobbers;
   Instruction *UseBoundary = nullptr;
+  Value *ClobberQueryPointer = nullptr;
+  int64_t ClobberQueryOffset = 0;
+  SmallVector<PointerClobberCandidate, 8> ClobberCandidates;
+  SmallPtrSet<Instruction *, 8> SeenClobberCandidates;
   SmallVector<UseEdge> WorkList;
   // The visitor pattern is always setting LastUse to the back of the
   // edge at the front of the worklist (the def that brought us to the
@@ -146,7 +153,8 @@ public:
       Value *PtrBegin, Value *SeenUse, CallBase *LambdaCB, const DataLayout &Dl,
       int64_t TargetOff,
       std::shared_ptr<PointerClobberAnalysis> ClobberAnalysis = nullptr)
-      : TrackedBase(PtrBegin), DL(Dl), Clobbers(std::move(ClobberAnalysis)) {
+      : TrackedBase(PtrBegin), DL(Dl), Clobbers(std::move(ClobberAnalysis)),
+        ClobberQueryPointer(PtrBegin), ClobberQueryOffset(TargetOff) {
     UseBoundary = dyn_cast_or_null<Instruction>(LambdaCB);
     auto *StartInstruction = dyn_cast<Instruction>(PtrBegin);
     if (!UseBoundary || !StartInstruction ||
@@ -191,58 +199,81 @@ public:
           << " in offset tracking map, this is an internal compiler bug\n");
   }
 
-  // Ask MemorySSA to select the final write reaching this procedure-local use.
-  // If the resolver understands the write, finish immediately. Otherwise seed
-  // the visitor with only the selected instruction, rather than all users of
-  // the pointer (which have no meaningful ordering).
-  bool resolveSelectedClobber(Value *Ptr) {
-    auto *PtrInstruction = dyn_cast<Instruction>(Ptr);
+  void addClobberCandidate(Instruction &I, Value *Pointer,
+                           int64_t TargetOffset) {
+    if (!SeenClobberCandidates.insert(&I).second)
+      return;
+    ClobberCandidates.push_back({&I, Pointer, TargetOffset});
+    DEBUG(Logger::logs("proteus-pass")
+          << "    [PTR use analysis]: Collected possible clobber " << I
+          << "\n");
+  }
+
+  // Candidate collection is complete before this query runs. MemorySSA may
+  // select only an instruction reached through the definition's relevant-use
+  // graph; traversal order therefore cannot choose a writer.
+  void resolveCollectedClobber() {
+    if (ClobberCandidates.empty()) {
+      AnalysisFailed = true;
+      return;
+    }
+
+    auto *PtrInstruction = dyn_cast_or_null<Instruction>(ClobberQueryPointer);
     if (!Clobbers || !UseBoundary || !PtrInstruction ||
-        UseBoundary->getFunction() != PtrInstruction->getFunction())
-      return false;
+        UseBoundary->getFunction() != PtrInstruction->getFunction()) {
+      AnalysisFailed = true;
+      return;
+    }
 
     PointerClobberResult Clobber =
-        Clobbers->resolve(Ptr, *UseBoundary, ValueOffsetMap.lookup(Ptr));
+        Clobbers->resolve(ClobberQueryPointer, *UseBoundary, ClobberQueryOffset,
+                          ClobberCandidates);
     if (Clobber.Kind == PointerClobberKind::Value) {
       Result = {.DominatingWrite = Clobber.V,
+                .ClobberingInstruction = Clobber.ClobberingInstruction,
                 .Offset = Clobber.Offset,
                 .EnclosingObjectOffsetCorrection = CoordinateCorrection,
                 .ChangedRCLayout = Clobber.ChangedRCLayout};
       AnalysisSuccess = Clobber.V != nullptr;
       AnalysisFailed = !AnalysisSuccess;
-      return true;
+      return;
     }
     if (Clobber.Kind == PointerClobberKind::Ambiguous) {
       AnalysisFailed = true;
       AnalysisSuccess = false;
-      return true;
+      return;
     }
-    if (!Clobber.ClobberingInstruction || !Clobber.ClobberPointer)
-      return false;
+    auto *MT = dyn_cast_or_null<MemTransferInst>(Clobber.ClobberingInstruction);
+    if (!MT || !Clobber.ClobberPointer) {
+      AnalysisFailed = true;
+      AnalysisSuccess = false;
+      return;
+    }
 
-    ValueOffsetMap[Clobber.ClobberPointer] = Clobber.ClobberOffset;
-    pushBack(Clobber.ClobberingInstruction, Clobber.ClobberPointer);
-    return true;
+    int64_t DstOff = 0, SrcOff = 0;
+    Value *DstBase =
+        GetPointerBaseWithConstantOffset(MT->getRawDest(), DstOff, DL);
+    Value *SrcBase =
+        GetPointerBaseWithConstantOffset(MT->getRawSource(), SrcOff, DL);
+    if (!DstBase || !SrcBase) {
+      AnalysisFailed = true;
+      return;
+    }
+    Result = {.DominatingWrite = SrcBase,
+              .ClobberingInstruction = Clobber.ClobberingInstruction,
+              .Offset = DstOff - SrcOff + CoordinateCorrection,
+              .EnclosingObjectOffsetCorrection = CoordinateCorrection,
+              .ChangedRCLayout = std::nullopt};
+    AnalysisSuccess = true;
+    AnalysisFailed = false;
   }
 
-  // WorkList is LIFO.  Enqueue possible writers last so they are inspected
-  // before an older store reached through a GEP.  Otherwise a memcpy/memmove
-  // call can be skipped merely because the initializer happens to appear
-  // earlier in Value::users().
   void pushPointerUsers(Value *V) {
-    SmallVector<User *, 4> PossibleWriters;
     for (User *Usr : V->users()) {
       if (Seen.contains(Usr))
         continue;
-      auto *CB = dyn_cast<CallBase>(Usr);
-      if (CB && !isa<DbgInfoIntrinsic>(CB) && !CB->onlyReadsMemory()) {
-        PossibleWriters.push_back(Usr);
-        continue;
-      }
       pushBack(Usr, V);
     }
-    for (User *Usr : PossibleWriters)
-      pushBack(Usr, V);
   }
 
   void visitStoreInst(StoreInst &SI) {
@@ -277,21 +308,14 @@ public:
     DEBUG(Logger::logs("proteus-pass")
           << "    Found PTRstore applicable to offset " << ValueOffsetMap[&SI]
           << " Store size = " << *StoreSize << " ; " << SI << "\n");
-    AnalysisFailed = false;
-    AnalysisSuccess = true;
-    Result = {.DominatingWrite = SI.getValueOperand(),
-              .Offset = Offset + CoordinateCorrection,
-              .EnclosingObjectOffsetCorrection = CoordinateCorrection,
-              .ChangedRCLayout = std::nullopt};
+    addClobberCandidate(SI, StoreBase, ValueOffsetMap[StoreBase]);
   }
 
   void visitLoadInst(LoadInst &LI) {
     if (!LI.getType()->isPointerTy()) {
       DEBUG(Logger::logs("proteus-pass")
-            << "    [PTR use analysis]: Expected a pointer load, got " << LI
+            << "    [PTR use analysis]: Ignoring non-pointer read " << LI
             << "\n");
-      AnalysisFailed = true;
-      AnalysisSuccess = false;
       return;
     }
     if (!ValueOffsetMap.contains(LI.getPointerOperand())) {
@@ -312,22 +336,18 @@ public:
         return;
     }
 
-    Function *F = CB.getCalledFunction();
-    if (!F || F->isDeclaration()) {
-      DEBUG(Logger::logs("proteus-pass")
-            << "    [PTR use analysis]: Cannot trace indirect or declaration "
-               "call "
-            << CB << "\n");
-      AnalysisFailed = true;
-      AnalysisSuccess = false;
-      return;
-    }
-
     Value *DefBeforeCB = getLastDef();
     if (!DefBeforeCB || !ValueOffsetMap.contains(DefBeforeCB)) {
       offsetValueMapFailure(DefBeforeCB ? DefBeforeCB : TrackedBase);
       return;
     }
+
+    if (!CB.onlyReadsMemory())
+      addClobberCandidate(CB, DefBeforeCB, ValueOffsetMap[DefBeforeCB]);
+
+    Function *F = CB.getCalledFunction();
+    if (!F || F->isDeclaration())
+      return;
 
     bool FoundArg = false;
     for (size_t ArgI = 0; ArgI < F->arg_size(); ++ArgI) {
@@ -351,8 +371,9 @@ public:
             << "    [PTR use analysis]: Call does not pass the tracked "
                "pointer on any callee argument: "
             << CB << "\n");
-      AnalysisFailed = true;
-      AnalysisSuccess = false;
+      // This use does not forward the tracked pointer into the callee. It can
+      // still be a candidate through aliasing, which MemorySSA will decide.
+      return;
     }
   }
 
@@ -384,8 +405,9 @@ public:
     if (!Def && ValueOffsetMap.contains(&GEP)) {
       ValueOffsetMap[GEPBase] = ValueOffsetMap[&GEP] + GEPOffset;
       CoordinateCorrection -= GEPOffset;
-      if (!resolveSelectedClobber(GEPBase))
-        pushPointerUsers(GEPBase);
+      ClobberQueryPointer = GEPBase;
+      ClobberQueryOffset = ValueOffsetMap[GEPBase];
+      pushPointerUsers(GEPBase);
       return;
     }
 
@@ -435,8 +457,7 @@ public:
       return;
     }
 
-    if (!resolveSelectedClobber(&Alloca))
-      pushPointerUsers(&Alloca);
+    pushPointerUsers(&Alloca);
   }
 
   // TODO(bowen) come up with a unit test for an analysis starting with
@@ -448,8 +469,7 @@ public:
       ValueOffsetMap[BC.getOperand(0)] = Offset;
     // AddrSpaceCast does not change the offset we track.
     ValueOffsetMap[&BC] = ValueOffsetMap[BC.getOperand(0)];
-    if (!resolveSelectedClobber(&BC))
-      pushPointerUsers(&BC);
+    pushPointerUsers(&BC);
   }
 
   void visitAddrSpaceCastInst(AddrSpaceCastInst &ASC) {
@@ -467,8 +487,7 @@ public:
           << "    [PTR use analysis]: Setting offset " << ASC << " = "
           << ValueOffsetMap[&ASC]);
 
-    if (!resolveSelectedClobber(&ASC))
-      pushPointerUsers(&ASC);
+    pushPointerUsers(&ASC);
   }
 
   void visitMemIntrinsic(MemIntrinsic &I) {
@@ -483,14 +502,7 @@ public:
       if (Len &&
           !offsetCoveredByRange(ValueOffsetMap[Def], 0, Len->getZExtValue()))
         return;
-      // A covering memset destroys the tracked provenance, and a dynamic
-      // length cannot be proven not to cover it.
-      DEBUG(Logger::logs("proteus-pass")
-            << "    [PTR use analysis]: Memset may overwrite the tracked "
-               "byte: "
-            << I << "\n");
-      AnalysisFailed = true;
-      AnalysisSuccess = false;
+      addClobberCandidate(I, Def, ValueOffsetMap[Def]);
       return;
     }
 
@@ -509,52 +521,26 @@ public:
 
     auto *Len = dyn_cast<ConstantInt>(MT->getLength());
     if (!Len) {
-      // We cannot prove that a dynamic-sized transfer defines the tracked byte.
-      DEBUG(Logger::logs("proteus-pass")
-            << "    [PTR use analysis]: Dynamic-length transfer cannot prove "
-               "provenance for the tracked byte: "
-            << I << "\n");
-      AnalysisFailed = true;
-      AnalysisSuccess = false;
+      addClobberCandidate(I, Def, ValueOffsetMap[Def]);
       return;
     }
     if (!offsetCoveredByRange(ValueOffsetMap[Def], 0, Len->getZExtValue()))
       return;
-
-    int64_t DstOff = 0, SrcOff = 0;
-    Value *DstBase =
-        GetPointerBaseWithConstantOffset(MT->getRawDest(), DstOff, DL);
-    Value *SrcBase =
-        GetPointerBaseWithConstantOffset(MT->getRawSource(), SrcOff, DL);
-    if (!DstBase || !SrcBase) {
-      DEBUG(Logger::logs("proteus-pass")
-            << "  [PTR use analysis]: Failure due to nullptr dst/src " << "\n");
-      AnalysisFailed = true;
-      return;
-    }
-
-    DEBUG(Logger::logs("proteus-pass")
-          << "  [PTR use analysis]: Completed instrinsic analysis " << "\n");
-    // LambdaArgVisitor applies Result.Offset by subtracting it from its
-    // current, destination-relative offset.  The transfer contributes the
-    // difference between destination and source bases. CoordinateCorrection
-    // additionally translates an interior pointer to an enclosing-object
-    // clobber when that was required to select this transfer.
-    int64_t OffsetCorrection = DstOff - SrcOff + CoordinateCorrection;
-    AnalysisSuccess = true;
-    AnalysisFailed = false;
-    Result = {.DominatingWrite = SrcBase,
-              .Offset = OffsetCorrection,
-              .EnclosingObjectOffsetCorrection = CoordinateCorrection,
-              .ChangedRCLayout = std::nullopt};
+    addClobberCandidate(I, Def, ValueOffsetMap[Def]);
   }
 
   void visitInstruction(Instruction &I) {
-    DEBUG(Logger::logs("proteus-pass")
-          << "    [PTR use analysis]: Unhandled instruction "
-          << I.getOpcodeName() << ": " << I << "\n");
-    AnalysisFailed = true;
-    AnalysisSuccess = false;
+    // Non-memory terminal uses (comparisons, returns, debug operations) cannot
+    // clobber the tracked storage. Pointer-producing or memory-writing uses
+    // would hide part of the relevant-use graph, so reject those
+    // conservatively.
+    if (I.getType()->isPointerTy() || I.mayWriteToMemory()) {
+      DEBUG(Logger::logs("proteus-pass")
+            << "    [PTR use analysis]: Unsupported relevant use "
+            << I.getOpcodeName() << ": " << I << "\n");
+      AnalysisFailed = true;
+      AnalysisSuccess = false;
+    }
   }
 };
 
@@ -569,7 +555,7 @@ runDominatingUseVisitor(const DataLayout &DL, Value *ValueNeedingAnalysis,
   LambdaInstUseVisitor Visitor(ValueNeedingAnalysis, SeenUse, LambdaCB, DL,
                                TargetOffset, std::move(Clobbers));
   // Analysis loop
-  while (!Visitor.empty() && !Visitor.success() && !Visitor.failed()) {
+  while (!Visitor.empty() && !Visitor.failed()) {
     auto *V = Visitor.popBack().CurVal;
     // Prevent loops/infinite recursion
     if (Visitor.seen(V))
@@ -583,6 +569,8 @@ runDominatingUseVisitor(const DataLayout &DL, Value *ValueNeedingAnalysis,
     else
       continue;
   }
+  if (!Visitor.failed())
+    Visitor.resolveCollectedClobber();
   if (!Visitor.success() || Visitor.failed()) {
     DEBUG(
         Logger::logs("proteus-pass")
