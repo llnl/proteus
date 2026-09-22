@@ -423,8 +423,8 @@ class PointerClobberResolver final : public PointerClobberAnalysis {
             << *I << "\n");
       if (auto *SI = dyn_cast<StoreInst>(I)) {
         auto StoreSize = getTypeStoreSize(DL, SI->getValueOperand()->getType());
-        auto RelativeOffset = getTrackedOffsetFrom(
-            SI->getPointerOperand(), TrackedPtr, TargetOffset);
+        auto RelativeOffset = getTrackedOffsetFrom(SI->getPointerOperand(),
+                                                   TrackedPtr, TargetOffset);
         if (RelativeOffset && StoreSize &&
             offsetCoveredByRange(*RelativeOffset, 0, *StoreSize)) {
           DEBUG(Logger::logs("proteus-pass")
@@ -442,6 +442,9 @@ class PointerClobberResolver final : public PointerClobberAnalysis {
             if (Stored)
               Result = {PointerClobberKind::Value, Stored,
                         TargetOffset - *RelativeOffset, std::nullopt};
+            Result.ClobberingInstruction = SI;
+            Result.ClobberPointer = SI->getPointerOperand();
+            Result.ClobberOffset = *RelativeOffset;
           }
         } else {
           DEBUG(Logger::logs("proteus-pass")
@@ -565,9 +568,9 @@ class PointerClobberResolver final : public PointerClobberAnalysis {
           CalleeState.get().getWalker()->getClobberingMemoryAccess(
               ExitState, CalleeLocation);
       SmallPtrSet<MemoryAccess *, 16> CalleeActive;
-      PointerClobberResult AtReturn = resolveGeneralAccess(
-          CalleeState, Clobber, CalleeLocation, Formal, CalleeTargetOffset,
-          CalleeActive);
+      PointerClobberResult AtReturn =
+          resolveGeneralAccess(CalleeState, Clobber, CalleeLocation, Formal,
+                               CalleeTargetOffset, CalleeActive);
 
       if (AtReturn.Kind == PointerClobberKind::Unknown &&
           !AtReturn.ClobberingInstruction)
@@ -577,8 +580,7 @@ class PointerClobberResolver final : public PointerClobberAnalysis {
             CallerState.get().getWalker()->getClobberingMemoryAccess(
                 CallDef.getDefiningAccess(), CallerLocation);
         AtReturn = resolveGeneralAccess(CallerState, Previous, CallerLocation,
-                                        TrackedPtr, TargetOffset,
-                                        CallerActive);
+                                        TrackedPtr, TargetOffset, CallerActive);
       } else if (AtReturn.Kind == PointerClobberKind::Value) {
         if (auto *A = dyn_cast<Argument>(AtReturn.V))
           if (A->getParent() == Callee)
@@ -658,8 +660,9 @@ class PointerClobberResolver final : public PointerClobberAnalysis {
 public:
   explicit PointerClobberResolver(const DataLayout &DL) : DL(DL) {}
 
-  PointerClobberResult resolve(Value *Ptr, Instruction &UseBoundary,
-                               int64_t TargetOffset) override {
+  PointerClobberResult
+  resolve(Value *Ptr, Instruction &UseBoundary, int64_t TargetOffset,
+          ArrayRef<PointerClobberCandidate> Candidates = {}) override {
     if (!Ptr || !Ptr->getType()->isPointerTy())
       return {PointerClobberKind::Unknown};
 
@@ -680,8 +683,22 @@ public:
     MemoryAccess *Clobber =
         MSSA.getWalker()->getClobberingMemoryAccess(Before, *Location);
     SmallPtrSet<MemoryAccess *, 16> Active;
-    return resolveGeneralAccess(State, Clobber, *Location, Ptr, TargetOffset,
-                                Active);
+    PointerClobberResult Result = resolveGeneralAccess(
+        State, Clobber, *Location, Ptr, TargetOffset, Active);
+    if (Candidates.empty() || Result.Kind == PointerClobberKind::Ambiguous)
+      return Result;
+
+    if (!Result.ClobberingInstruction)
+      return {PointerClobberKind::Unknown};
+    for (const PointerClobberCandidate &Candidate : Candidates)
+      if (Candidate.I == Result.ClobberingInstruction)
+        return Result;
+
+    DEBUG(Logger::logs("proteus-pass")
+          << "[PTR clobber analysis]: MemorySSA selected an instruction not "
+             "present in the collected relevant-use set: "
+          << *Result.ClobberingInstruction << "\n");
+    return {PointerClobberKind::Unknown};
   }
 };
 
@@ -689,23 +706,6 @@ inline std::optional<LambdaPtrUseAnalysis>
 getDominatingUse(const DataLayout &DL, Value *ValueNeedingAnalysis,
                  Value *SeenUse, int64_t TargetOffset, CallBase *LambdaCB,
                  const std::shared_ptr<PointerClobberAnalysis> &Clobbers) {
-  Instruction *UseBoundary = dyn_cast_or_null<Instruction>(LambdaCB);
-  auto *StartInstruction = dyn_cast<Instruction>(ValueNeedingAnalysis);
-  if (!UseBoundary || !StartInstruction ||
-      UseBoundary->getFunction() != StartInstruction->getFunction())
-    UseBoundary = dyn_cast<Instruction>(SeenUse);
-  if (Clobbers && UseBoundary && StartInstruction &&
-      UseBoundary->getFunction() == StartInstruction->getFunction()) {
-    PointerClobberResult Clobber =
-        Clobbers->resolve(ValueNeedingAnalysis, *UseBoundary, TargetOffset);
-    if (Clobber.Kind == PointerClobberKind::Value)
-      return LambdaPtrUseAnalysis{.DominatingWrite = Clobber.V,
-                                  .Offset = Clobber.Offset,
-                                  .ChangedRCLayout = Clobber.ChangedRCLayout};
-    if (Clobber.Kind == PointerClobberKind::Ambiguous)
-      return std::nullopt;
-  }
-
   return runDominatingUseVisitor(DL, ValueNeedingAnalysis, SeenUse,
                                  TargetOffset, LambdaCB, Clobbers);
 }
@@ -933,7 +933,9 @@ public:
           AnalysisSuccess = false;
           return;
         }
-        WorkList.push_back({Res->DominatingWrite, &LI});
+        WorkList.push_back(
+            {Res->DominatingWrite,
+             Res->ClobberingInstruction ? Res->ClobberingInstruction : &LI});
         Offset -= Res->EnclosingObjectOffsetCorrection;
         return;
       }
@@ -965,7 +967,9 @@ public:
         AnalysisSuccess = false;
         return;
       }
-      WorkList.push_back({Res->DominatingWrite, &LI});
+      WorkList.push_back({Res->DominatingWrite, Res->ClobberingInstruction
+                                                    ? Res->ClobberingInstruction
+                                                    : &LI});
       return;
     }
 
@@ -1031,7 +1035,10 @@ public:
     if (!Res)
       return;
 
-    WorkList.push_back({Res->DominatingWrite, &Alloca});
+    WorkList.push_back(
+        {Res->DominatingWrite, Res->ClobberingInstruction
+                                   ? Res->ClobberingInstruction
+                                   : static_cast<Instruction *>(&Alloca)});
     // Res->Offset converts the current allocation-relative byte offset into
     // the coordinate system of DominatingWrite. For a field store it removes
     // the field displacement; for a memory transfer it translates destination
@@ -1044,7 +1051,9 @@ public:
                                 Clobbers);
     if (!Res)
       return;
-    WorkList.push_back({Res->DominatingWrite, &BC});
+    WorkList.push_back({Res->DominatingWrite, Res->ClobberingInstruction
+                                                  ? Res->ClobberingInstruction
+                                                  : &BC});
     // Res->Offset converts the current cast-relative byte offset into the
     // coordinate system of DominatingWrite.
     Offset -= Res->Offset;
@@ -1057,7 +1066,9 @@ public:
     if (!Res)
       return;
 
-    WorkList.push_back({Res->DominatingWrite, &ASC});
+    WorkList.push_back({Res->DominatingWrite, Res->ClobberingInstruction
+                                                  ? Res->ClobberingInstruction
+                                                  : &ASC});
     // Res->Offset converts the current cast-relative byte offset into the
     // coordinate system of DominatingWrite.
     Offset -= Res->Offset;
