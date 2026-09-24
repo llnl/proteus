@@ -208,12 +208,130 @@ class PointerClobberResolver final : public PointerClobberAnalysis {
   const DataLayout &DL;
   DenseMap<Function *, std::unique_ptr<FunctionMemorySSAState>> States;
   SmallPtrSet<LoadInst *, 8> ResolvingOrigins;
+  SmallPtrSet<CallBase *, 8> ResolvingCallOrigins;
 
   FunctionMemorySSAState &getState(Function &F) {
     auto &State = States[&F];
     if (!State)
       State = std::make_unique<FunctionMemorySSAState>(F);
     return *State;
+  }
+
+  std::optional<std::pair<Value *, int64_t>>
+  getReturnedPointerOrigin(Value *V, CallBase &RootCall,
+                           SmallPtrSetImpl<Value *> &Active,
+                           bool &IsAmbiguous) {
+    if (!V || !V->getType()->isPointerTy() || !Active.insert(V).second) {
+      IsAmbiguous = true;
+      return std::nullopt;
+    }
+
+    int64_t LocalOffset = 0;
+    Value *Base = GetPointerBaseWithConstantOffset(V, LocalOffset, DL);
+    std::optional<std::pair<Value *, int64_t>> Result;
+
+    if (auto *A = dyn_cast_or_null<Argument>(Base)) {
+      Function *RootCallee = RootCall.getCalledFunction();
+      if (RootCallee && A->getParent() == RootCallee &&
+          A->getArgNo() < RootCall.arg_size())
+        Result = {{RootCall.getArgOperand(A->getArgNo()), LocalOffset}};
+    } else if (auto *LI = dyn_cast_or_null<LoadInst>(Base)) {
+      SmallPtrSet<Value *, 8> VisitedLoads;
+      Value *Origin = getPointerLoadOrigin(DL, LI, VisitedLoads);
+      if (Origin && Origin != LI) {
+        Result =
+            getReturnedPointerOrigin(Origin, RootCall, Active, IsAmbiguous);
+        if (Result)
+          Result->second += LocalOffset;
+      }
+    } else if (auto *CB = dyn_cast_or_null<CallBase>(Base)) {
+      bool NestedAmbiguous = false;
+      auto Origin = getCallReturnOrigin(*CB, &NestedAmbiguous);
+      if (Origin) {
+        Result = getReturnedPointerOrigin(Origin->first, RootCall, Active,
+                                          IsAmbiguous);
+        if (Result)
+          Result->second += LocalOffset + Origin->second;
+      } else if (NestedAmbiguous) {
+        IsAmbiguous = true;
+      }
+    } else if (auto *Select = dyn_cast_or_null<SelectInst>(Base)) {
+      auto TrueOrigin = getReturnedPointerOrigin(Select->getTrueValue(),
+                                                 RootCall, Active, IsAmbiguous);
+      auto FalseOrigin = getReturnedPointerOrigin(
+          Select->getFalseValue(), RootCall, Active, IsAmbiguous);
+      if (TrueOrigin && FalseOrigin && *TrueOrigin == *FalseOrigin) {
+        Result = TrueOrigin;
+        Result->second += LocalOffset;
+      } else {
+        IsAmbiguous = true;
+      }
+    } else if (auto *Phi = dyn_cast_or_null<PHINode>(Base)) {
+      for (Value *Incoming : Phi->incoming_values()) {
+        auto IncomingOrigin =
+            getReturnedPointerOrigin(Incoming, RootCall, Active, IsAmbiguous);
+        if (!IncomingOrigin) {
+          IsAmbiguous = true;
+          Result.reset();
+          break;
+        }
+        if (!Result)
+          Result = IncomingOrigin;
+        else if (*Result != *IncomingOrigin) {
+          IsAmbiguous = true;
+          Result.reset();
+          break;
+        }
+      }
+      if (Result)
+        Result->second += LocalOffset;
+    }
+
+    Active.erase(V);
+    if (!Result)
+      IsAmbiguous = true;
+    return Result;
+  }
+
+  std::optional<std::pair<Value *, int64_t>>
+  getCallReturnOrigin(CallBase &CB, bool *IsAmbiguous = nullptr) {
+    Function *Callee = CB.getCalledFunction();
+    if (!Callee || Callee->isDeclaration() ||
+        !ResolvingCallOrigins.insert(&CB).second)
+      return std::nullopt;
+
+    std::optional<std::pair<Value *, int64_t>> Result;
+    bool SawReturn = false;
+    bool Valid = true;
+    for (BasicBlock &BB : *Callee) {
+      auto *Ret = dyn_cast<ReturnInst>(BB.getTerminator());
+      if (!Ret || !Ret->getReturnValue())
+        continue;
+
+      SawReturn = true;
+      bool ReturnAmbiguous = false;
+      SmallPtrSet<Value *, 16> Active;
+      auto Candidate = getReturnedPointerOrigin(Ret->getReturnValue(), CB,
+                                                Active, ReturnAmbiguous);
+      if (!Candidate) {
+        Valid = false;
+        if (IsAmbiguous)
+          *IsAmbiguous = true;
+        break;
+      }
+
+      if (!Result)
+        Result = Candidate;
+      else if (*Result != *Candidate) {
+        Valid = false;
+        if (IsAmbiguous)
+          *IsAmbiguous = true;
+        break;
+      }
+    }
+
+    ResolvingCallOrigins.erase(&CB);
+    return SawReturn && Valid ? Result : std::nullopt;
   }
 
   Value *getPointerOrigin(Value *V) {
@@ -232,6 +350,11 @@ class PointerClobberResolver final : public PointerClobberAnalysis {
           return LI;
       }
     }
+    if (auto *CB = dyn_cast<CallBase>(V)) {
+      auto Origin = getCallReturnOrigin(*CB);
+      if (Origin && Origin->second == 0)
+        return getPointerOrigin(Origin->first);
+    }
     SmallPtrSet<Value *, 8> Visited;
     return getPointerLoadOrigin(DL, V, Visited);
   }
@@ -243,8 +366,10 @@ class PointerClobberResolver final : public PointerClobberAnalysis {
            isSamePointerAddress(DL, CandidateOrigin, TrackedOrigin);
   }
 
-  std::optional<int64_t> getTrackedOffsetFrom(Value *Candidate, Value *Tracked,
-                                              int64_t TargetOffset) {
+  std::optional<int64_t>
+  getTrackedOffsetFrom(Value *Candidate, Value *Tracked, int64_t TargetOffset,
+                       bool *HasAmbiguousCallOrigin = nullptr) {
+    bool AmbiguousCallOrigin = false;
     auto GetOriginAndOffset = [&](Value *V) {
       int64_t TotalOffset = 0;
       SmallPtrSet<Value *, 8> Visited;
@@ -252,6 +377,13 @@ class PointerClobberResolver final : public PointerClobberAnalysis {
         int64_t StepOffset = 0;
         Value *Base = GetPointerBaseWithConstantOffset(V, StepOffset, DL);
         TotalOffset += StepOffset;
+        if (auto *CB = dyn_cast_or_null<CallBase>(Base)) {
+          if (auto Origin = getCallReturnOrigin(*CB, &AmbiguousCallOrigin)) {
+            TotalOffset += Origin->second;
+            V = Origin->first;
+            continue;
+          }
+        }
         Value *Origin = getPointerOrigin(Base);
         if (!Origin || Origin == Base)
           return std::pair<Value *, int64_t>{Base, TotalOffset};
@@ -262,6 +394,8 @@ class PointerClobberResolver final : public PointerClobberAnalysis {
 
     auto [CandidateRoot, CandidateOffset] = GetOriginAndOffset(Candidate);
     auto [TrackedRoot, TrackedOffset] = GetOriginAndOffset(Tracked);
+    if (HasAmbiguousCallOrigin)
+      *HasAmbiguousCallOrigin = AmbiguousCallOrigin;
     if (!CandidateRoot || CandidateRoot != TrackedRoot)
       return std::nullopt;
     return TrackedOffset + TargetOffset - CandidateOffset;
@@ -535,8 +669,11 @@ class PointerClobberResolver final : public PointerClobberAnalysis {
       Value *Actual = CB.getArgOperand(I);
       if (!Actual->getType()->isPointerTy())
         continue;
-      auto RelativeOffset =
-          getTrackedOffsetFrom(Actual, TrackedPtr, TargetOffset);
+      bool HasAmbiguousCallOrigin = false;
+      auto RelativeOffset = getTrackedOffsetFrom(
+          Actual, TrackedPtr, TargetOffset, &HasAmbiguousCallOrigin);
+      if (HasAmbiguousCallOrigin)
+        return {PointerClobberKind::Unknown};
       if (!RelativeOffset)
         continue;
       if (TrackedArg != Callee->arg_size())
