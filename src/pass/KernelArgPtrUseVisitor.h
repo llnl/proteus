@@ -136,6 +136,7 @@ private:
   int64_t ClobberQueryOffset = 0;
   SmallVector<PointerClobberCandidate, 8> ClobberCandidates;
   SmallPtrSet<Instruction *, 8> SeenClobberCandidates;
+  DenseMap<Function *, SmallVector<CallBase *, 2>> CallersByCallee;
   SmallVector<UseEdge> WorkList;
   // The visitor pattern is always setting LastUse to the back of the
   // edge at the front of the worklist (the def that brought us to the
@@ -276,6 +277,41 @@ public:
     }
   }
 
+  void propagatePointerMerge(Value &Merged, ArrayRef<Value *> Incoming) {
+    std::optional<int64_t> MergedOffset;
+    for (Value *V : Incoming) {
+      auto It = ValueOffsetMap.find(V);
+      if (It == ValueOffsetMap.end()) {
+        DEBUG(Logger::logs("proteus-pass")
+              << "    [PTR use analysis]: Pointer merge has an untracked "
+                 "incoming value: "
+              << Merged << "\n");
+        AnalysisFailed = true;
+        AnalysisSuccess = false;
+        return;
+      }
+      if (!MergedOffset)
+        MergedOffset = It->second;
+      else if (*MergedOffset != It->second) {
+        DEBUG(Logger::logs("proteus-pass")
+              << "    [PTR use analysis]: Pointer merge combines different "
+                 "tracked offsets: "
+              << Merged << "\n");
+        AnalysisFailed = true;
+        AnalysisSuccess = false;
+        return;
+      }
+    }
+
+    if (!MergedOffset) {
+      AnalysisFailed = true;
+      AnalysisSuccess = false;
+      return;
+    }
+    ValueOffsetMap[&Merged] = *MergedOffset;
+    pushPointerUsers(&Merged);
+  }
+
   void visitStoreInst(StoreInst &SI) {
     Value *Stored = SI.getValueOperand();
     Value *StoreBase = SI.getPointerOperand();
@@ -357,6 +393,7 @@ public:
         continue;
 
       FoundArg = true;
+      CallersByCallee[F].push_back(&CB);
       Argument *ArgToTrack = F->getArg(ArgI);
       ValueOffsetMap[ArgToTrack] = ValueOffsetMap[DefBeforeCB];
       DEBUG(Logger::logs("proteus-pass")
@@ -375,6 +412,34 @@ public:
       // still be a candidate through aliasing, which MemorySSA will decide.
       return;
     }
+  }
+
+  void visitReturnInst(ReturnInst &RI) {
+    Value *Returned = RI.getReturnValue();
+    if (!Returned || Returned != Def || !Returned->getType()->isPointerTy() ||
+        !ValueOffsetMap.contains(Returned))
+      return;
+
+    auto It = CallersByCallee.find(RI.getFunction());
+    if (It == CallersByCallee.end())
+      return;
+
+    for (CallBase *Caller : It->second) {
+      if (!Caller->getType()->isPointerTy())
+        continue;
+      ValueOffsetMap[Caller] = ValueOffsetMap[Returned];
+      pushPointerUsers(Caller);
+    }
+  }
+
+  void visitSelectInst(SelectInst &SI) {
+    SmallVector<Value *, 2> Incoming{SI.getTrueValue(), SI.getFalseValue()};
+    propagatePointerMerge(SI, Incoming);
+  }
+
+  void visitPHINode(PHINode &Phi) {
+    SmallVector<Value *, 4> Incoming(Phi.incoming_values());
+    propagatePointerMerge(Phi, Incoming);
   }
 
   void visitGetElementPtrInst(GetElementPtrInst &GEP) {
