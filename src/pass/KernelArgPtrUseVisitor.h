@@ -329,7 +329,7 @@ public:
   void visitCallBase(CallBase &CB) {
     // Lifetime markers describe the validity of an allocation, not a write to
     // its contents.  Following their declaration as if it were an ordinary
-    // callee makes an otherwise valid search fail before reaching a store.
+    // callee makes an otherwise valid search fail b.efore reaching a store.
     if (auto *II = dyn_cast<IntrinsicInst>(&CB)) {
       if (II->getIntrinsicID() == Intrinsic::lifetime_start ||
           II->getIntrinsicID() == Intrinsic::lifetime_end)
