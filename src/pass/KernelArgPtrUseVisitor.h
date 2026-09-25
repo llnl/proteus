@@ -46,25 +46,6 @@ bool needsDefUseAnalysis(Value *Val) {
          isa<BitCastInst>(Val) || isa<IntToPtrInst>(Val);
 }
 
-inline bool offsetCoveredByRange(int64_t TargetOffset, int64_t RangeOffset,
-                                 uint64_t RangeSize) {
-  DEBUG(Logger::logs("proteus-pass")
-        << "    [PTR use analysis]: Target Offset = " << TargetOffset << "\n");
-  DEBUG(Logger::logs("proteus-pass")
-        << "    [PTR use analysis]: Range Offset = " << RangeOffset << "\n");
-  DEBUG(Logger::logs("proteus-pass")
-        << "    [PTR use analysis]: Range Size = " << RangeSize << "\n");
-  return TargetOffset >= RangeOffset &&
-         static_cast<uint64_t>(TargetOffset - RangeOffset) < RangeSize;
-}
-
-inline std::optional<uint64_t> getTypeStoreSize(const DataLayout &DL,
-                                                Type *Ty) {
-  if (!Ty || !Ty->isSized())
-    return std::nullopt;
-  return static_cast<uint64_t>(DL.getTypeStoreSize(Ty));
-}
-
 struct LambdaPtrUseAnalysis {
   Value *DominatingWrite = nullptr;
   // The write selected by MemorySSA. When the backwards analysis continues
@@ -94,24 +75,8 @@ inline std::optional<LambdaPtrUseAnalysis> runDominatingUseVisitor(
     int64_t TargetOffset, CallBase *LambdaCB = nullptr,
     std::shared_ptr<PointerClobberAnalysis> Clobbers = nullptr);
 
-inline std::optional<MemoryLocation>
-getTrackedPointerLocation(const DataLayout &DL, Value *Ptr) {
-  if (!Ptr || !Ptr->getType()->isPointerTy())
-    return std::nullopt;
-
-  Type *PointeeTy = nullptr;
-  if (auto *AI = dyn_cast<AllocaInst>(Ptr))
-    PointeeTy = AI->getAllocatedType();
-
-  if (!PointeeTy || !PointeeTy->isSized())
-    return MemoryLocation::getBeforeOrAfter(Ptr);
-
-  return MemoryLocation(Ptr,
-                        LocationSize::precise(DL.getTypeStoreSize(PointeeTy)));
-}
-
-// Given a newly allocated ptr encountered in def-use analysis beginning at a
-// Lambda callsite, we need to determine which definition dominates that ptr.
+// Given a newly allocated pointer encountered in def-use analysis beginning at
+// a lambda callsite, determine which definition dominates that pointer.
 class LambdaInstUseVisitor : public InstVisitor<LambdaInstUseVisitor> {
 private:
   DominatorTree DTree;
@@ -131,11 +96,15 @@ private:
   LambdaPtrUseAnalysis Result;
   DataLayout DL;
   std::shared_ptr<PointerClobberAnalysis> Clobbers;
+  // The instruction that consumes the value derived from PtrBegin, and thus
+  // the point before which we ask MemorySSA which collected candidate is the
+  // reaching clobber. This is normally the lambda call. If PtrBegin belongs to
+  // another function, SeenUse is the local consumer on the backwards-analysis
+  // edge that brought us to PtrBegin and becomes the boundary instead.
   Instruction *UseBoundary = nullptr;
   Value *ClobberQueryPointer = nullptr;
   int64_t ClobberQueryOffset = 0;
-  SmallVector<PointerClobberCandidate, 8> ClobberCandidates;
-  SmallPtrSet<Instruction *, 8> SeenClobberCandidates;
+  PointerClobberCandidateMap ClobberCandidates;
   DenseMap<Function *, SmallVector<CallBase *, 2>> CallersByCallee;
   SmallVector<UseEdge> WorkList;
   // The visitor pattern is always setting LastUse to the back of the
@@ -202,9 +171,11 @@ public:
 
   void addClobberCandidate(Instruction &I, Value *Pointer,
                            int64_t TargetOffset) {
-    if (!SeenClobberCandidates.insert(&I).second)
+    if (!ClobberCandidates
+             .try_emplace(
+                 &I, PointerClobberCandidate{&I, Pointer, TargetOffset})
+             .second)
       return;
-    ClobberCandidates.push_back({&I, Pointer, TargetOffset});
     DEBUG(Logger::logs("proteus-pass")
           << "    [PTR use analysis]: Collected possible clobber " << I
           << "\n");
@@ -228,7 +199,7 @@ public:
 
     PointerClobberResult Clobber =
         Clobbers->resolve(ClobberQueryPointer, *UseBoundary, ClobberQueryOffset,
-                          ClobberCandidates);
+                          &ClobberCandidates);
     if (Clobber.Kind == PointerClobberKind::Value) {
       Result = {.DominatingWrite = Clobber.V,
                 .ClobberingInstruction = Clobber.ClobberingInstruction,
