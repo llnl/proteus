@@ -429,6 +429,7 @@ int main() {
 // CHECK: different call branch clobber 349
 // CHECK: [LambdaSpec] Replacing slot 0 with i32 367
 // CHECK: local after call clobber 367
-// CHECK: [LambdaSpec] Replacing slot 0 with i32 379
+// CHECK: [KernelConfig] ID:{{.*}}kernelUnrelatedCallOverwrite
+// CHECK-NOT: [LambdaSpec]
 // CHECK: unrelated call clobber 379
 // clang-format on
