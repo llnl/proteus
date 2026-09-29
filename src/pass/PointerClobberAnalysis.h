@@ -11,6 +11,7 @@
 #include <llvm/ADT/SmallVector.h>
 #include <llvm/Analysis/AssumptionCache.h>
 #include <llvm/Analysis/BasicAliasAnalysis.h>
+#include <llvm/Analysis/CaptureTracking.h>
 #include <llvm/Analysis/MemoryLocation.h>
 #include <llvm/Analysis/MemorySSA.h>
 #include <llvm/Analysis/TargetLibraryInfo.h>
@@ -253,6 +254,7 @@ public:
 
   MemorySSA &get() { return *MSSA; }
   AAResults &getAA() { return AA; }
+  DominatorTree &getDT() { return DT; }
 };
 
 // Resolve the pointer definition reaching a pointer-valued load.  MemorySSA
@@ -273,7 +275,11 @@ class PointerClobberResolver final : public PointerClobberAnalysis {
   }
 
   static PointerClobberResult unresolvedClobber(Instruction &I) {
-    PointerClobberResult Result{PointerClobberKind::Unknown};
+    // MemorySSA selected I as the reaching clobber, but this analysis cannot
+    // model its effect.  This is a fatal ambiguity, not an invitation to use
+    // an older definition.  Unknown is reserved for supported instructions
+    // (currently memory transfers) that LambdaInstUseVisitor can interpret.
+    PointerClobberResult Result{PointerClobberKind::Ambiguous};
     Result.ClobberingInstruction = &I;
     return Result;
   }
@@ -491,15 +497,17 @@ class PointerClobberResolver final : public PointerClobberAnalysis {
     return LHS;
   }
 
-  PointerClobberResult resolveAccess(FunctionMemorySSAState &State,
-                                     MemoryAccess *Access,
-                                     const MemoryLocation &Location,
-                                     Value *TrackedPtr, int64_t TargetOffset,
-                                     SmallPtrSetImpl<MemoryAccess *> &Active) {
+  PointerClobberResult
+  resolveAccess(FunctionMemorySSAState &State, MemoryAccess *Access,
+                const MemoryLocation &Location, Value *TrackedPtr,
+                int64_t TargetOffset, SmallPtrSetImpl<MemoryAccess *> &Active,
+                const PointerClobberCandidateMap *Candidates) {
     MemorySSA &MSSA = State.get();
-    DEBUG(if (Access) Logger::logs("proteus-pass")
+    if (Access) {
+      DEBUG(Logger::logs("proteus-pass")
               << "[PTR clobber analysis]: Examining MemorySSA access "
               << *Access << "\n";)
+    }
     if (!Access || MSSA.isLiveOnEntryDef(Access)) {
       DEBUG(Logger::logs("proteus-pass")
             << "[PTR clobber analysis]: Reached live-on-entry without finding "
@@ -522,8 +530,9 @@ class PointerClobberResolver final : public PointerClobberAnalysis {
       for (unsigned I = 0; I < Phi->getNumIncomingValues(); ++I) {
         MemoryAccess *Clobber = MSSA.getWalker()->getClobberingMemoryAccess(
             Phi->getIncomingValue(I), Location);
-        Result = merge(Result, resolveAccess(State, Clobber, Location,
-                                             TrackedPtr, TargetOffset, Active));
+        Result =
+            merge(Result, resolveAccess(State, Clobber, Location, TrackedPtr,
+                                        TargetOffset, Active, Candidates));
       }
     } else if (auto *Def = dyn_cast<MemoryDef>(Access)) {
       Instruction *I = Def->getMemoryInst();
@@ -563,7 +572,7 @@ class PointerClobberResolver final : public PointerClobberAnalysis {
           MemoryAccess *Previous = MSSA.getWalker()->getClobberingMemoryAccess(
               Def->getDefiningAccess(), Location);
           Result = resolveAccess(State, Previous, Location, TrackedPtr,
-                                 TargetOffset, Active);
+                                 TargetOffset, Active, Candidates);
         }
       } else if (auto *CB = dyn_cast<CallBase>(I)) {
         if (auto *MI = dyn_cast<MemIntrinsic>(CB)) {
@@ -576,7 +585,7 @@ class PointerClobberResolver final : public PointerClobberAnalysis {
                 MSSA.getWalker()->getClobberingMemoryAccess(
                     Def->getDefiningAccess(), Location);
             Result = resolveAccess(State, Previous, Location, TrackedPtr,
-                                   TargetOffset, Active);
+                                   TargetOffset, Active, Candidates);
           } else if (auto *Length = dyn_cast<ConstantInt>(MI->getLength())) {
             if (!offsetCoveredByRange(*RelativeOffset, 0,
                                       Length->getZExtValue())) {
@@ -584,7 +593,7 @@ class PointerClobberResolver final : public PointerClobberAnalysis {
                   MSSA.getWalker()->getClobberingMemoryAccess(
                       Def->getDefiningAccess(), Location);
               Result = resolveAccess(State, Previous, Location, TrackedPtr,
-                                     TargetOffset, Active);
+                                     TargetOffset, Active, Candidates);
             } else if (isa<MemSetInst>(MI)) {
               Result = {PointerClobberKind::Ambiguous};
             } else {
@@ -600,7 +609,7 @@ class PointerClobberResolver final : public PointerClobberAnalysis {
           }
         } else {
           Result = resolveCall(State, *Def, *CB, Location, TrackedPtr,
-                               TargetOffset, Active);
+                               TargetOffset, Active, Candidates);
         }
         DEBUG({
           auto &OS = Logger::logs("proteus-pass");
@@ -630,46 +639,85 @@ class PointerClobberResolver final : public PointerClobberAnalysis {
     return Result;
   }
 
+  /// Candidates is passed whenever the CallBase boundary is explicitly known,
+  /// for example when a LambdaInstUseVisitor finds a CallBase use of TrackedPtr.
+  /// In this case, resolveCall can easily identify which TrackedArg corresponds.
   PointerClobberResult
   resolveCall(FunctionMemorySSAState &CallerState, MemoryDef &CallDef,
               CallBase &CB, const MemoryLocation &CallerLocation,
               Value *TrackedPtr, int64_t TargetOffset,
-              SmallPtrSetImpl<MemoryAccess *> &CallerActive) {
+              SmallPtrSetImpl<MemoryAccess *> &CallerActive,
+              const PointerClobberCandidateMap *Candidates) {
     Function *Callee = CB.getCalledFunction();
     if (!Callee || Callee->isDeclaration())
       return unresolvedClobber(CB);
 
     unsigned TrackedArg = Callee->arg_size();
     int64_t CalleeTargetOffset = 0;
-    for (unsigned I = 0; I < CB.arg_size() && I < Callee->arg_size(); ++I) {
-      Value *Actual = CB.getArgOperand(I);
-      if (!Actual->getType()->isPointerTy())
-        continue;
-      bool HasAmbiguousCallOrigin = false;
-      auto RelativeOffset = getTrackedOffsetFrom(
-          Actual, TrackedPtr, TargetOffset, &HasAmbiguousCallOrigin);
-      if (HasAmbiguousCallOrigin)
-        return unresolvedClobber(CB);
-      if (!RelativeOffset)
-        continue;
-      if (TrackedArg != Callee->arg_size())
-        return {PointerClobberKind::Ambiguous};
-      TrackedArg = I;
-      CalleeTargetOffset = *RelativeOffset;
+    bool HasCandidate = false;
+    bool HasKnownUseEdge = false;
+    if (Candidates) {
+      auto Candidate = Candidates->find(&CB);
+      if (Candidate != Candidates->end()) {
+        HasCandidate = true;
+        if (!Candidate->second.Pointer)
+          return unresolvedClobber(CB);
+        for (unsigned I = 0; I < CB.arg_size() && I < Callee->arg_size(); ++I) {
+          if (CB.getArgOperand(I) != Candidate->second.Pointer)
+            continue;
+          if (HasKnownUseEdge)
+            return {PointerClobberKind::Ambiguous};
+          HasKnownUseEdge = true;
+          TrackedArg = I;
+          CalleeTargetOffset = Candidate->second.TargetOffset;
+        }
+      }
+    }
+    if (HasCandidate && !HasKnownUseEdge)
+      return unresolvedClobber(CB);
+
+    // Candidate-free queries originate directly from LambdaArgVisitor and do
+    // not have the def-use edge that led to this call. Recover the formal from
+    // pointer provenance only for that path. LambdaInstUseVisitor candidates
+    // carry the exact SSA value used by the call and bypass this
+    // reconstruction.
+    if (!HasCandidate) {
+      for (unsigned I = 0; I < CB.arg_size() && I < Callee->arg_size(); ++I) {
+        Value *Actual = CB.getArgOperand(I);
+        if (!Actual->getType()->isPointerTy())
+          continue;
+        bool HasAmbiguousCallOrigin = false;
+        auto RelativeOffset = getTrackedOffsetFrom(
+            Actual, TrackedPtr, TargetOffset, &HasAmbiguousCallOrigin);
+        if (HasAmbiguousCallOrigin)
+          return unresolvedClobber(CB);
+        if (!RelativeOffset)
+          continue;
+        if (TrackedArg != Callee->arg_size())
+          return {PointerClobberKind::Ambiguous};
+        TrackedArg = I;
+        CalleeTargetOffset = *RelativeOffset;
+      }
     }
     if (TrackedArg == Callee->arg_size()) {
-      // MemorySSA selected this call for CallerLocation. Only bypass it when
-      // alias analysis proves that it cannot modify the queried bytes. Failure
-      // to map the location to a formal argument is otherwise an unsupported
-      // clobber, not evidence that the call is harmless.
+      // MemorySSA selected this call for CallerLocation. Failure to map the
+      // location to a formal argument is not evidence that the call is
+      // harmless. Bypass it only when analysis proves that the call cannot
+      // modify the location: either AA reports NoModRef, or the location is a
+      // local allocation whose address has not escaped before the call.
       ModRefInfo MRI = CallerState.getAA().getModRefInfo(&CB, CallerLocation);
-      if (isModSet(MRI))
+      Value *Underlying = getUnderlyingObject(TrackedPtr);
+      bool IsUncapturedLocal =
+          isa<AllocaInst>(Underlying) &&
+          !PointerMayBeCapturedBefore(Underlying, true, true, &CB,
+                                      &CallerState.getDT(), true);
+      if (isModSet(MRI) && !IsUncapturedLocal)
         return unresolvedClobber(CB);
       MemoryAccess *Previous =
           CallerState.get().getWalker()->getClobberingMemoryAccess(
               CallDef.getDefiningAccess(), CallerLocation);
       return resolveAccess(CallerState, Previous, CallerLocation, TrackedPtr,
-                           TargetOffset, CallerActive);
+                           TargetOffset, CallerActive, Candidates);
     }
 
     FunctionMemorySSAState &CalleeState = getState(*Callee);
@@ -688,16 +736,18 @@ class PointerClobberResolver final : public PointerClobberAnalysis {
           CalleeState.get().getWalker()->getClobberingMemoryAccess(
               ExitState, CalleeLocation);
       SmallPtrSet<MemoryAccess *, 16> CalleeActive;
+      // Potentially recursive analysis of the clobber
       PointerClobberResult AtReturn =
           resolveAccess(CalleeState, Clobber, CalleeLocation, Formal,
-                        CalleeTargetOffset, CalleeActive);
+                        CalleeTargetOffset, CalleeActive, Candidates);
 
       if (AtReturn.Kind == PointerClobberKind::Incoming) {
         MemoryAccess *Previous =
             CallerState.get().getWalker()->getClobberingMemoryAccess(
                 CallDef.getDefiningAccess(), CallerLocation);
-        AtReturn = resolveAccess(CallerState, Previous, CallerLocation,
-                                 TrackedPtr, TargetOffset, CallerActive);
+        AtReturn =
+            resolveAccess(CallerState, Previous, CallerLocation, TrackedPtr,
+                          TargetOffset, CallerActive, Candidates);
       } else if (AtReturn.Kind == PointerClobberKind::Value) {
         if (auto *A = dyn_cast<Argument>(AtReturn.V))
           if (A->getParent() == Callee)
@@ -742,8 +792,8 @@ public:
     MemoryAccess *Clobber =
         MSSA.getWalker()->getClobberingMemoryAccess(Before, *Location);
     SmallPtrSet<MemoryAccess *, 16> Active;
-    PointerClobberResult Result =
-        resolveAccess(State, Clobber, *Location, Ptr, TargetOffset, Active);
+    PointerClobberResult Result = resolveAccess(
+        State, Clobber, *Location, Ptr, TargetOffset, Active, Candidates);
     if (!Candidates || Candidates->empty() ||
         Result.Kind == PointerClobberKind::Ambiguous)
       return Result;
