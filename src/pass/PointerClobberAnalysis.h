@@ -505,8 +505,8 @@ class PointerClobberResolver final : public PointerClobberAnalysis {
     MemorySSA &MSSA = State.get();
     if (Access) {
       DEBUG(Logger::logs("proteus-pass")
-              << "[PTR clobber analysis]: Examining MemorySSA access "
-              << *Access << "\n";)
+                << "[PTR clobber analysis]: Examining MemorySSA access "
+                << *Access << "\n";)
     }
     if (!Access || MSSA.isLiveOnEntryDef(Access)) {
       DEBUG(Logger::logs("proteus-pass")
@@ -640,8 +640,9 @@ class PointerClobberResolver final : public PointerClobberAnalysis {
   }
 
   /// Candidates is passed whenever the CallBase boundary is explicitly known,
-  /// for example when a LambdaInstUseVisitor finds a CallBase use of TrackedPtr.
-  /// In this case, resolveCall can easily identify which TrackedArg corresponds.
+  /// for example when a LambdaInstUseVisitor finds a CallBase use of
+  /// TrackedPtr. In this case, resolveCall can easily identify which TrackedArg
+  /// corresponds.
   PointerClobberResult
   resolveCall(FunctionMemorySSAState &CallerState, MemoryDef &CallDef,
               CallBase &CB, const MemoryLocation &CallerLocation,
