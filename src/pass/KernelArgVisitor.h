@@ -53,12 +53,126 @@ inline int64_t getValueIndicesOffset(const DataLayout &DL, Type *AggTy,
   return DL.getIndexedOffsetInType(AggTy, GEPIndices);
 }
 
-inline std::optional<LambdaPtrUseAnalysis>
-getDominatingUse(const DataLayout &DL, Value *ValueNeedingAnalysis,
-                 Value *SeenUse, int64_t TargetOffset, CallBase *LambdaCB,
-                 const std::shared_ptr<PointerClobberAnalysis> &Clobbers) {
-  return runDominatingUseVisitor(DL, ValueNeedingAnalysis, SeenUse,
-                                 TargetOffset, LambdaCB, Clobbers);
+struct ReachingPointerStores {
+  SmallVector<Value *, 4> Values;
+  bool Complete = true;
+};
+
+// Return whether LHS and RHS name exactly the same byte address after peeling
+// constant-offset pointer arithmetic and casts.
+inline bool isSamePointerAddress(const DataLayout &DL, Value *LHS, Value *RHS) {
+  int64_t LHSOffset = 0;
+  int64_t RHSOffset = 0;
+  Value *LHSBase = GetPointerBaseWithConstantOffset(LHS, LHSOffset, DL);
+  Value *RHSBase = GetPointerBaseWithConstantOffset(RHS, RHSOffset, DL);
+  return LHSBase && RHSBase && LHSBase == RHSBase && LHSOffset == RHSOffset;
+}
+
+// Collect the closest pointer-valued store to Address on every CFG path that
+// reaches Before. A path with no store, or a revisited block (such as a loop),
+// marks the result incomplete so callers conservatively decline rather than
+// infer a store that is not guaranteed to reach the load.
+inline void collectReachingPointerStores(const DataLayout &DL, BasicBlock *BB,
+                                         Instruction *Before, Value *Address,
+                                         SmallPtrSetImpl<BasicBlock *> &Visited,
+                                         ReachingPointerStores &Result) {
+  if (!Visited.insert(BB).second) {
+    Result.Complete = false;
+    return;
+  }
+
+  for (Instruction *I = Before ? Before->getPrevNode() : BB->getTerminator(); I;
+       I = I->getPrevNode()) {
+    auto *SI = dyn_cast<StoreInst>(I);
+    if (SI && SI->getValueOperand()->getType()->isPointerTy() &&
+        isSamePointerAddress(DL, SI->getPointerOperand(), Address)) {
+      Result.Values.push_back(SI->getValueOperand());
+      return;
+    }
+  }
+
+  if (pred_empty(BB)) {
+    Result.Complete = false;
+    return;
+  }
+  for (BasicBlock *Pred : predecessors(BB))
+    collectReachingPointerStores(DL, Pred, nullptr, Address, Visited, Result);
+}
+
+// Resolve pointer spills by walking backwards from the load through the CFG.
+// This finds the nearest store on every incoming path instead of depending on
+// the arbitrary order in which Value::users() happens to enumerate writes.
+// The result is complete only when every incoming path contributes a store.
+inline ReachingPointerStores getReachingPointerStores(const DataLayout &DL,
+                                                      LoadInst &LI) {
+  ReachingPointerStores Result;
+  SmallPtrSet<BasicBlock *, 8> Visited;
+  collectReachingPointerStores(DL, LI.getParent(), &LI, LI.getPointerOperand(),
+                               Visited, Result);
+  return Result;
+}
+
+inline Value *getPointerLoadOrigin(const DataLayout &DL, Value *V,
+                                   SmallPtrSetImpl<Value *> &Visited);
+
+// Return one source pointer when every reaching store has the same origin.
+// Nested pointer-spill loads are recursively resolved; distinct origins or
+// cycles are ambiguous and return nullptr.
+inline Value *getUniqueReachingPointer(const DataLayout &DL,
+                                       const ReachingPointerStores &Stores,
+                                       SmallPtrSetImpl<Value *> &Visited) {
+  if (!Stores.Complete || Stores.Values.empty())
+    return nullptr;
+
+  Value *First = getPointerLoadOrigin(DL, Stores.Values.front(), Visited);
+  if (!First)
+    return nullptr;
+  for (Value *V : drop_begin(Stores.Values)) {
+    Value *Origin = getPointerLoadOrigin(DL, V, Visited);
+    if (Origin != First)
+      return nullptr;
+  }
+  return First;
+}
+
+// Resolve a pointer value through nested pointer-spill loads. Non-load pointer
+// values are already origins. Visited prevents cyclic spill graphs from being
+// mistaken for a unique source.
+inline Value *getPointerLoadOrigin(const DataLayout &DL, Value *V,
+                                   SmallPtrSetImpl<Value *> &Visited) {
+  auto *LI = dyn_cast<LoadInst>(V);
+  if (!LI || !LI->getType()->isPointerTy())
+    return V;
+  if (!Visited.insert(V).second)
+    return nullptr;
+
+  ReachingPointerStores Stores = getReachingPointerStores(DL, *LI);
+  return getUniqueReachingPointer(DL, Stores, Visited);
+}
+
+// Report ambiguity only for complete reaching-store sets. Incomplete sets can
+// still be handled by ordinary backward memory-use analysis.
+inline bool hasAmbiguousReachingPointers(const DataLayout &DL,
+                                         const ReachingPointerStores &Stores) {
+  if (!Stores.Complete || Stores.Values.empty())
+    return false;
+  SmallPtrSet<Value *, 8> Visited;
+  return !getUniqueReachingPointer(DL, Stores, Visited);
+}
+
+// A compiler spill is a temporary local slot the compiler uses to save an SSA
+// pointer value (for example, `alloca ptr`, followed by `store ptr` and a
+// later `load ptr`).  A pointer-valued load is not necessarily such a spill:
+// it can instead read an ordinary pointer field from a closure/context
+// aggregate.  The reaching-store recovery below is only valid for a local
+// `alloca ptr` slot; aggregate fields must be traced backwards through their
+// address.
+inline bool isPointerSpillLoad(const LoadInst &LI) {
+  if (!LI.getType()->isPointerTy())
+    return false;
+  const Value *Storage = getUnderlyingObject(LI.getPointerOperand());
+  auto *Slot = dyn_cast_or_null<AllocaInst>(Storage);
+  return Slot && Slot->getAllocatedType()->isPointerTy();
 }
 
 struct LambdaKernelArgAnalysis {
@@ -88,7 +202,7 @@ class LambdaArgVisitor : public InstVisitor<LambdaArgVisitor> {
 private:
   CallBase *LambdaCB;
   const DataLayout &DL;
-  std::shared_ptr<PointerClobberAnalysis> Clobbers;
+  std::shared_ptr<MemorySSAClobberOracle> ClobberOracle;
   SmallVector<WorkItem> WorkList;
   SmallDenseSet<Value *> Seen;
 
@@ -104,8 +218,8 @@ private:
   // Constructor used for cloning and merging branches of phi node analysis
   LambdaArgVisitor(Value *Start, Value *LastSeen, CallBase *LambdaCBArg,
                    int64_t Off, const DataLayout &Dl,
-                   std::shared_ptr<PointerClobberAnalysis> ClobberResolver)
-      : LambdaCB(LambdaCBArg), DL(Dl), Clobbers(std::move(ClobberResolver)),
+                   std::shared_ptr<MemorySSAClobberOracle> Oracle)
+      : LambdaCB(LambdaCBArg), DL(Dl), ClobberOracle(std::move(Oracle)),
         Offset(Off) {
     WorkList.push_back({Start, LastSeen});
   }
@@ -155,7 +269,7 @@ private:
   cloneAndAnalyze(Value *Start, Value *MemoryAnalysisPtrUse,
                   int64_t StartOffset) {
     LambdaArgVisitor Visitor(Start, MemoryAnalysisPtrUse, LambdaCB, StartOffset,
-                             DL, Clobbers);
+                             DL, ClobberOracle);
     while (!Visitor.empty() && !Visitor.success() && !Visitor.failed()) {
       auto [V, AccessedFrom] = Visitor.back();
       Visitor.MemoryAnalysisPtrUse = AccessedFrom;
@@ -186,7 +300,7 @@ private:
       return std::nullopt;
     LambdaArgVisitor Visitor(RetInstOpt.value()->getReturnValue(),
                              MemoryAnalysisPtrUse, LambdaCB, StartOffset, DL,
-                             Clobbers);
+                             ClobberOracle);
     while (!Visitor.empty() && !Visitor.success() && !Visitor.failed()) {
       auto [V, AccessedFrom] = Visitor.back();
       DEBUG(Logger::logs("proteus-pass")
@@ -224,7 +338,7 @@ private:
 public:
   LambdaArgVisitor(CallBase *LambdaCB, Module &M)
       : LambdaCB(LambdaCB), DL(M.getDataLayout()),
-        Clobbers(std::make_shared<PointerClobberResolver>(DL)), Offset(0) {
+        ClobberOracle(std::make_shared<MemorySSAClobberOracle>()), Offset(0) {
     auto *ClosurePtr = LambdaCB->getArgOperand(0);
     WorkList.push_back({ClosurePtr, LambdaCB});
   }
@@ -260,78 +374,56 @@ public:
 
   void visitLoadInst(LoadInst &LI) {
     DEBUG(Logger::logs("proteus-pass") << "Load inst analysis \n")
-    PointerClobberResult Clobber;
-    if (isa<AllocaInst>(getUnderlyingObject(LI.getPointerOperand()))) {
-      Clobber = Clobbers->resolve(LI.getPointerOperand(), LI, 0);
-      if (Clobber.Kind == PointerClobberKind::Value) {
-        WorkList.push_back({Clobber.V, &LI});
-        return;
-      }
-      if (Clobber.Kind == PointerClobberKind::Ambiguous) {
-        DEBUG(Logger::logs("proteus-pass")
-              << "[Lambda arg analysis]: MemorySSA found ambiguous pointer "
-                 "clobbers for "
-              << LI << "\n");
-        AnalysisFailed = true;
-        AnalysisSuccess = false;
-        return;
-      }
-      if (Clobber.ClobberingInstruction) {
-        auto Res = runDominatingUseVisitor(DL, LI.getPointerOperand(), &LI, 0,
-                                           nullptr, Clobbers);
-        if (!Res) {
-          AnalysisFailed = true;
-          AnalysisSuccess = false;
-          return;
-        }
-        WorkList.push_back(
-            {Res->DominatingWrite,
-             Res->ClobberingInstruction ? Res->ClobberingInstruction : &LI});
-        Offset -= Res->EnclosingObjectOffsetCorrection;
-        return;
-      }
+    MemorySSAClobber Clobber = ClobberOracle->query(LI);
+    if (Clobber.Kind == MemorySSAClobberKind::LiveOnEntry) {
       DEBUG(Logger::logs("proteus-pass")
-            << "[Lambda arg analysis]: MemorySSA could not resolve the "
-               "reaching pointer clobber for "
-            << LI << "\n");
-      AnalysisFailed = true;
-      AnalysisSuccess = false;
-      return;
-    }
-    // Loading a pointer from a spill slot does not change the offset within
-    // the pointee.  Resolve the pointer-sized store at offset zero in the slot,
-    // then continue with the original pointee-relative Offset.
-    if (isPointerSpillLoad(LI)) {
-      ReachingPointerStores Stores = getReachingPointerStores(DL, LI);
-      SmallPtrSet<Value *, 8> Visited;
-      if (Value *StoredPointer =
-              getUniqueReachingPointer(DL, Stores, Visited)) {
-        WorkList.push_back({StoredPointer, &LI});
-        return;
-      }
-      if (hasAmbiguousReachingPointers(DL, Stores)) {
-        DEBUG(Logger::logs("proteus-pass")
-              << "[Lambda arg analysis]: Pointer spill load has ambiguous "
-                 "reaching stores: "
-              << LI << "\n");
-        AnalysisFailed = true;
-        AnalysisSuccess = false;
-        return;
-      }
-      auto Res = getDominatingUse(DL, LI.getPointerOperand(), &LI, 0, LambdaCB,
-                                  Clobbers);
-      if (!Res) {
-        AnalysisFailed = true;
-        AnalysisSuccess = false;
-        return;
-      }
-      WorkList.push_back({Res->DominatingWrite, Res->ClobberingInstruction
-                                                    ? Res->ClobberingInstruction
-                                                    : &LI});
+            << "[Lambda arg analysis]: Load reads live-on-entry memory; "
+               "continuing from its address\n");
+      WorkList.push_back({LI.getPointerOperand(), &LI});
       return;
     }
 
-    WorkList.push_back({LI.getPointerOperand(), &LI});
+    if (Clobber.Kind == MemorySSAClobberKind::Definition) {
+      auto *Store = dyn_cast_or_null<StoreInst>(Clobber.Instruction);
+      bool IsExactStore = Store && !Store->isAtomic() &&
+                          Store->getValueOperand()->getType() == LI.getType() &&
+                          isSamePointerAddress(DL, Store->getPointerOperand(),
+                                               LI.getPointerOperand());
+      if (IsExactStore) {
+        DEBUG(Logger::logs("proteus-pass")
+              << "[Lambda arg analysis]: MemorySSA selected exact store "
+              << *Store << "\n");
+        WorkList.push_back({Store->getValueOperand(), Store});
+        return;
+      }
+
+      DEBUG({
+        auto &OS = Logger::logs("proteus-pass");
+        OS << "[Lambda arg analysis]: MemorySSA selected an unsupported "
+              "definition for load "
+           << LI << ": ";
+        if (Clobber.Instruction)
+          OS << *Clobber.Instruction;
+        else
+        OS << "<no instruction>";
+        OS << "\n";
+      });
+    } else if (Clobber.Kind == MemorySSAClobberKind::Phi) {
+      DEBUG(Logger::logs("proteus-pass")
+            << "[Lambda arg analysis]: MemorySSA selected a MemoryPhi for "
+            << LI << "\n");
+    } else {
+      DEBUG(Logger::logs("proteus-pass")
+            << "[Lambda arg analysis]: MemorySSA clobber query failed for "
+            << LI << "\n");
+    }
+
+    // The oracle selected a potentially clobbering access that this first,
+    // deliberately narrow implementation cannot interpret. Never fall back
+    // to the use visitor here: doing so could skip the selected write and
+    // recover a stale initializer.
+    AnalysisFailed = true;
+    AnalysisSuccess = false;
   }
 
   void visitGetElementPtrInst(GetElementPtrInst &GEP) {
@@ -388,15 +480,12 @@ public:
 
   // todo: these three methods need to be changed to find a dominating store
   void visitAllocaInst(AllocaInst &Alloca) {
-    auto Res = getDominatingUse(DL, &Alloca, MemoryAnalysisPtrUse, Offset,
-                                LambdaCB, Clobbers);
+    auto Res =
+        getDominatingUse(DL, &Alloca, MemoryAnalysisPtrUse, Offset, LambdaCB);
     if (!Res)
       return;
 
-    WorkList.push_back(
-        {Res->DominatingWrite, Res->ClobberingInstruction
-                                   ? Res->ClobberingInstruction
-                                   : static_cast<Instruction *>(&Alloca)});
+    WorkList.push_back({Res->DominatingWrite, &Alloca});
     // Res->Offset converts the current allocation-relative byte offset into
     // the coordinate system of DominatingWrite. For a field store it removes
     // the field displacement; for a memory transfer it translates destination
@@ -405,13 +494,11 @@ public:
   }
 
   void visitBitCastInst(BitCastInst &BC) {
-    auto Res = getDominatingUse(DL, &BC, MemoryAnalysisPtrUse, Offset, LambdaCB,
-                                Clobbers);
+    auto Res =
+        getDominatingUse(DL, &BC, MemoryAnalysisPtrUse, Offset, LambdaCB);
     if (!Res)
       return;
-    WorkList.push_back({Res->DominatingWrite, Res->ClobberingInstruction
-                                                  ? Res->ClobberingInstruction
-                                                  : &BC});
+    WorkList.push_back({Res->DominatingWrite, &BC});
     // Res->Offset converts the current cast-relative byte offset into the
     // coordinate system of DominatingWrite.
     Offset -= Res->Offset;
@@ -419,14 +506,12 @@ public:
 
   void visitAddrSpaceCastInst(AddrSpaceCastInst &ASC) {
     WorkList.push_back({ASC.getPointerOperand(), &ASC});
-    auto Res = getDominatingUse(DL, &ASC, MemoryAnalysisPtrUse, Offset,
-                                LambdaCB, Clobbers);
+    auto Res =
+        getDominatingUse(DL, &ASC, MemoryAnalysisPtrUse, Offset, LambdaCB);
     if (!Res)
       return;
 
-    WorkList.push_back({Res->DominatingWrite, Res->ClobberingInstruction
-                                                  ? Res->ClobberingInstruction
-                                                  : &ASC});
+    WorkList.push_back({Res->DominatingWrite, &ASC});
     // Res->Offset converts the current cast-relative byte offset into the
     // coordinate system of DominatingWrite.
     Offset -= Res->Offset;
@@ -510,38 +595,15 @@ public:
       return;
     }
 
-    SmallVector<CallBase *, 2> Callers;
     for (User *U : F->users()) {
       auto *CB = dyn_cast<CallBase>(U);
-      if (!CB || CB->getCalledFunction() != F || ArgNum >= CB->arg_size()) {
-        DEBUG(Logger::logs("proteus-pass")
-              << "[Lambda arg analysis]: Function has an unsupported caller "
-                 "use: "
-              << *U << "\n");
-        AnalysisFailed = true;
-        AnalysisSuccess = false;
-        return;
-      }
-      Callers.push_back(CB);
-    }
-
-    // Without a call-context stack, following more than one caller makes the
-    // result depend on Value::users() traversal order. Decline instead of
-    // selecting whichever kernel argument happens to be visited first.
-    if (Callers.size() != 1) {
+      if (!CB)
+        continue;
       DEBUG(Logger::logs("proteus-pass")
-            << "[Lambda arg analysis]: Expected exactly one direct caller of "
-            << F->getName() << ", found " << Callers.size() << "\n");
-      AnalysisFailed = true;
-      AnalysisSuccess = false;
-      return;
+            << "Analysis crossed interprocedural boundary at "
+            << *CB->getArgOperand(ArgNum) << "\n");
+      WorkList.push_back({CB->getArgOperand(ArgNum), CB});
     }
-
-    CallBase *Caller = Callers.front();
-    DEBUG(Logger::logs("proteus-pass")
-          << "Analysis crossed interprocedural boundary at "
-          << *Caller->getArgOperand(ArgNum) << "\n");
-    WorkList.push_back({Caller->getArgOperand(ArgNum), Caller});
   }
 
   void visitInstruction(Instruction &I) {
