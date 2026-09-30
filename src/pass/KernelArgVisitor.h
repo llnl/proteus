@@ -510,15 +510,38 @@ public:
       return;
     }
 
+    SmallVector<CallBase *, 2> Callers;
     for (User *U : F->users()) {
       auto *CB = dyn_cast<CallBase>(U);
-      if (!CB)
-        continue;
-      DEBUG(Logger::logs("proteus-pass")
-            << "Analysis crossed interprocedural boundary at "
-            << *CB->getArgOperand(ArgNum) << "\n");
-      WorkList.push_back({CB->getArgOperand(ArgNum), CB});
+      if (!CB || CB->getCalledFunction() != F || ArgNum >= CB->arg_size()) {
+        DEBUG(Logger::logs("proteus-pass")
+              << "[Lambda arg analysis]: Function has an unsupported caller "
+                 "use: "
+              << *U << "\n");
+        AnalysisFailed = true;
+        AnalysisSuccess = false;
+        return;
+      }
+      Callers.push_back(CB);
     }
+
+    // Without a call-context stack, following more than one caller makes the
+    // result depend on Value::users() traversal order. Decline instead of
+    // selecting whichever kernel argument happens to be visited first.
+    if (Callers.size() != 1) {
+      DEBUG(Logger::logs("proteus-pass")
+            << "[Lambda arg analysis]: Expected exactly one direct caller of "
+            << F->getName() << ", found " << Callers.size() << "\n");
+      AnalysisFailed = true;
+      AnalysisSuccess = false;
+      return;
+    }
+
+    CallBase *Caller = Callers.front();
+    DEBUG(Logger::logs("proteus-pass")
+          << "Analysis crossed interprocedural boundary at "
+          << *Caller->getArgOperand(ArgNum) << "\n");
+    WorkList.push_back({Caller->getArgOperand(ArgNum), Caller});
   }
 
   void visitInstruction(Instruction &I) {
