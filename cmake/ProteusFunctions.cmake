@@ -9,12 +9,16 @@ function(add_proteus target)
             "-fplugin=$<TARGET_FILE:ProteusPass>"
             "-fpass-plugin=$<TARGET_FILE:ProteusPass>"
             "SHELL:-Xclang -mllvm -Xclang -force-proteus-jit-annotate-all"
+            "-fplugin=\$<TARGET_FILE:ProteusASTChecker>"
         )
     else()
         target_compile_options(${target} PRIVATE
             "-fpass-plugin=\$<TARGET_FILE:ProteusPass>"
+            "-fplugin=\$<TARGET_FILE:ProteusASTChecker>"
         )
     endif()
+
+    add_dependencies(${target} ProteusPass ProteusASTChecker)
 
     target_link_options(${target} PRIVATE
         "SHELL:\$<\$<LINK_LANGUAGE:HIP>:-Xoffload-linker --load-pass-plugin=\$<TARGET_FILE:ProteusPassOffload>>")

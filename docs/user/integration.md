@@ -36,6 +36,7 @@ linking flags, for example:
 
 ```bash
 CXXFLAGS += -I<install_path>/include \
+    -fplugin=<install_path>/<libdir>/libProteusASTChecker.so \
     -fpass-plugin=<install_path>/<libdir>/libProteusPass.so
 
 LDFLAGS += -L<install_path>/<libdir> \
@@ -43,8 +44,10 @@ LDFLAGS += -L<install_path>/<libdir> \
     -lproteus $(llvm-config --libs) -lclang-cpp
 ```
 
-If you don't use code annotations, you can omit the `-fpass-plugin` option,
-since the LLVM pass is only needed for processing annotations.
+The frontend checker loaded by `-fplugin` diagnoses unsupported uses of
+`proteus::register_lambda` and `proteus::jit_variable` before LLVM IR is
+emitted. If you don't use code annotations or these lambda APIs, you can omit
+both plugin options.
 
 !!! note
     The example above is the simplest case and is closest to a host-only build.

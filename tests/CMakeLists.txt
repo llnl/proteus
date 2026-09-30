@@ -59,7 +59,7 @@ function(proteus_attach_pass_plugin_rebuild_dep target)
     add_custom_command(
         OUTPUT "${proteus_pass_stamp}"
         COMMAND ${CMAKE_COMMAND} -E touch "${proteus_pass_stamp}"
-        DEPENDS ProteusPass
+        DEPENDS ProteusPass ProteusASTChecker
         VERBATIM
     )
 
@@ -70,10 +70,13 @@ function(proteus_attach_pass_plugin_rebuild_dep target)
         ${target}
         PUBLIC
         -fpass-plugin=$<TARGET_FILE:ProteusPass>
+        -fplugin=$<TARGET_FILE:ProteusASTChecker>
     )
+    add_dependencies(${target} ProteusASTChecker)
 endfunction()
 
 add_subdirectory(cpu)
+add_subdirectory(ast)
 
 if(PROTEUS_ENABLE_HIP OR PROTEUS_ENABLE_CUDA)
     add_subdirectory(gpu)
