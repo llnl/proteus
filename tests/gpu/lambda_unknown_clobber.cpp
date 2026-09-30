@@ -5,6 +5,7 @@
 // RUN: PROTEUS_CACHE_DIR="%t.$$.proteus" PROTEUS_TRACE_OUTPUT="specialization" %build/lambda_unknown_clobber.%ext 2 | %FILECHECK --check-prefix=INDIRECT %s
 // RUN: PROTEUS_CACHE_DIR="%t.$$.proteus" PROTEUS_TRACE_OUTPUT="specialization" %build/lambda_unknown_clobber.%ext 3 | %FILECHECK --check-prefix=ATOMIC %s
 // RUN: PROTEUS_CACHE_DIR="%t.$$.proteus" PROTEUS_TRACE_OUTPUT="specialization" %build/lambda_unknown_clobber.%ext 4 | %FILECHECK --check-prefix=CMPXCHG %s
+// RUN: PROTEUS_CACHE_DIR="%t.$$.proteus" PROTEUS_TRACE_OUTPUT="specialization" %build/lambda_unknown_clobber.%ext 5 | %FILECHECK --check-prefix=SELECTED-STORE %s
 // RUN: rm -rf "%t.$$.proteus"
 // clang-format on
 
@@ -126,6 +127,26 @@ kernelCompareExchangeClobber(F Initial, F Replacement, bool DoExchange) {
   invokeAfterCompareExchange(&Initial, &Replacement, DoExchange);
 }
 
+// The destination of this store is a runtime-selected pointer. MemorySSA can
+// select the store as the reaching definition even when the custom provenance
+// matcher cannot reduce Destination to Slot. Because Destination may alias
+// Slot, the analysis must not walk past the store to Initial's stale value.
+template <typename F>
+__device__ __attribute__((noinline, optnone)) static void
+invokeAfterSelectedStore(F *Initial, F *Replacement, bool SelectSlot) {
+  F *Slot = Initial;
+  F *Other = Initial;
+  F **Destination = SelectSlot ? &Slot : &Other;
+  *Destination = Replacement;
+  (*Slot)();
+}
+
+template <typename F>
+__global__ __attribute__((annotate("jit"))) static void
+kernelSelectedStoreClobber(F Initial, F Replacement, bool SelectSlot) {
+  invokeAfterSelectedStore(&Initial, &Replacement, SelectSlot);
+}
+
 #define MAKE_BODY(Name, Message)                                               \
   static auto Name(int Value) {                                                \
     return proteus::register_lambda(                                           \
@@ -139,6 +160,7 @@ MAKE_BODY(makeOpaqueCallBody, "opaque call clobber")
 MAKE_BODY(makeIndirectCallBody, "indirect call clobber")
 MAKE_BODY(makeAtomicBody, "atomic clobber")
 MAKE_BODY(makeCompareExchangeBody, "cmpxchg clobber")
+MAKE_BODY(makeSelectedStoreBody, "selected-store clobber")
 
 int main(int argc, char **argv) {
   if (argc != 2)
@@ -159,10 +181,14 @@ int main(int argc, char **argv) {
     auto Initial = makeAtomicBody(727);
     auto Replacement = makeAtomicBody(733);
     kernelAtomicClobber<<<1, 1>>>(Initial, Replacement, false);
-  } else {
+  } else if (argv[1][0] == '4') {
     auto Initial = makeCompareExchangeBody(739);
     auto Replacement = makeCompareExchangeBody(743);
     kernelCompareExchangeClobber<<<1, 1>>>(Initial, Replacement, false);
+  } else {
+    auto Initial = makeSelectedStoreBody(751);
+    auto Replacement = makeSelectedStoreBody(757);
+    kernelSelectedStoreClobber<<<1, 1>>>(Initial, Replacement, true);
   }
   gpuErrCheck(gpuDeviceSynchronize());
   return 0;
@@ -184,4 +210,7 @@ int main(int argc, char **argv) {
 // CMPXCHG: [KernelConfig] ID:{{.*}}kernelCompareExchangeClobber
 // CMPXCHG-NOT: [LambdaSpec]
 // CMPXCHG: cmpxchg clobber 739
+// SELECTED-STORE: [KernelConfig] ID:{{.*}}kernelSelectedStoreClobber
+// SELECTED-STORE-NOT: [LambdaSpec]
+// SELECTED-STORE: selected-store clobber 757
 // clang-format on
