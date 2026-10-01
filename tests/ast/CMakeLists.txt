@@ -8,6 +8,7 @@ config.environment = os.environ.copy()
 config.suffixes = ['.cpp']
 config.test_source_root = '${CMAKE_CURRENT_SOURCE_DIR}'
 config.test_exec_root = '${CMAKE_CURRENT_BINARY_DIR}'
+config.substitutions.append(('%not', '${LLVM_TOOLS_BINARY_DIR}/not'))
 config.substitutions.append(('%clang', '${LLVM_TOOLS_BINARY_DIR}/clang++'))
 config.substitutions.append(('%plugin', '$<TARGET_FILE:ProteusASTChecker>'))
 config.substitutions.append(('%proteus_include', '${PROJECT_SOURCE_DIR}/include'))

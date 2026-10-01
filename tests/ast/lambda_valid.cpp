@@ -18,8 +18,7 @@ template <int Offset> void direct_template(int Value) {
 
 void valid(int Value, int *Pointer) {
   register_indirectly(
-      [X = proteus::jit_variable(Value),
-       P = proteus::jit_variable(Pointer)] {
+      [X = proteus::jit_variable(Value), P = proteus::jit_variable(Pointer)] {
         *P = X;
         return *P;
       });

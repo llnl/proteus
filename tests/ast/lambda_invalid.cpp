@@ -1,5 +1,5 @@
 // clang-format off
-// RUN: not %clang -std=c++17 -fsyntax-only -I%proteus_include -fplugin=%plugin %s 2>&1 | %FILECHECK %s
+// RUN: %not %clang -std=c++17 -fsyntax-only -I%proteus_include -fplugin=%plugin %s 2>&1 | %FILECHECK %s
 
 #include <proteus/JitInterface.h>
 
@@ -33,7 +33,8 @@ void unregistered(int Value) {
 void unsupported_type(short Value) {
   auto Lambda = proteus::register_lambda(
       [X = proteus::jit_variable(Value)] { return X; });
-  // CHECK-DAG: error: proteus::jit_variable does not support capture type 'short'
+  // CHECK-DAG: error: proteus::jit_variable does not support capture type
+  // 'short'
   (void)Lambda;
 }
 
@@ -47,8 +48,8 @@ void mutate_capture(int Value) {
 void mutate_by_reference(int &Value) { ++Value; }
 
 void escape_capture(int Value) {
-  auto Lambda = proteus::register_lambda(
-      [X = proteus::jit_variable(Value)]() mutable {
+  auto Lambda =
+      proteus::register_lambda([X = proteus::jit_variable(Value)]() mutable {
         mutate_by_reference(X);
         int *Alias = &X;
         return *Alias;

@@ -75,7 +75,8 @@ bool directlyReferencesTarget(
   Expr = ignoreTransparentExprs(Expr);
   const auto *Reference = llvm::dyn_cast_or_null<clang::DeclRefExpr>(Expr);
   const auto *Variable =
-      Reference ? llvm::dyn_cast<clang::VarDecl>(Reference->getDecl()) : nullptr;
+      Reference ? llvm::dyn_cast<clang::VarDecl>(Reference->getDecl())
+                : nullptr;
   return Variable && Targets.contains(Variable->getCanonicalDecl());
 }
 
@@ -101,9 +102,8 @@ bool isMutablePointer(clang::QualType Type) {
 class CaptureMutationVisitor
     : public clang::RecursiveASTVisitor<CaptureMutationVisitor> {
 public:
-  CaptureMutationVisitor(
-      const llvm::DenseSet<const clang::VarDecl *> &Targets,
-      llvm::SmallVectorImpl<clang::SourceRange> &Mutations)
+  CaptureMutationVisitor(const llvm::DenseSet<const clang::VarDecl *> &Targets,
+                         llvm::SmallVectorImpl<clang::SourceRange> &Mutations)
       : Targets(Targets), Mutations(Mutations) {}
 
   bool VisitBinaryOperator(clang::BinaryOperator *Operator) {
@@ -218,9 +218,8 @@ public:
         if (Call && isProteusFunction(Call, "proteus::jit_variable")) {
           CaptureInitializers.try_emplace(Call, Lambda);
           CaptureTypes.try_emplace(Call, CaptureType);
-          JitCaptureVariables[Lambda].push_back(
-              llvm::cast<clang::VarDecl>(
-                  Capture.getCapturedVar()->getCanonicalDecl()));
+          JitCaptureVariables[Lambda].push_back(llvm::cast<clang::VarDecl>(
+              Capture.getCapturedVar()->getCanonicalDecl()));
         }
       }
     }
