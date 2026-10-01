@@ -20,6 +20,19 @@
 namespace proteus {
 using namespace llvm;
 
+SmallVector<ReturnInst *> getReturnInstructions(Function &F) {
+  SmallVector<ReturnInst *> Result;
+
+  for (BasicBlock &BB : F) {
+    for (Instruction &I : BB) {
+      if (auto *RI = dyn_cast<ReturnInst>(&I)) {
+        Result.push_back(RI);
+      }
+    }
+  }
+  return Result;
+}
+
 // Own the function analyses required by MemorySSA. The oracle is used by a
 // module pass, so these cannot be obtained from a FunctionAnalysisManager.
 // Their lifetimes must also extend beyond MemorySSA because it retains

@@ -195,7 +195,7 @@ struct FunctionAnalysis {
 
 struct WorkItem {
   Value *CurVal;
-  Value *Src;
+  Instruction *Src;
 };
 
 class LambdaArgVisitor : public InstVisitor<LambdaArgVisitor> {
@@ -216,7 +216,7 @@ private:
   bool AnalysisFailed = false;
 
   // Constructor used for cloning and merging branches of phi node analysis
-  LambdaArgVisitor(Value *Start, Value *LastSeen, CallBase *LambdaCBArg,
+  LambdaArgVisitor(Value *Start, Instruction *LastSeen, CallBase *LambdaCBArg,
                    int64_t Off, const DataLayout &Dl,
                    std::shared_ptr<MemorySSAClobberOracle> Oracle)
       : LambdaCB(LambdaCBArg), DL(Dl), ClobberOracle(std::move(Oracle)),
@@ -254,7 +254,7 @@ public:
   // which is where the LambdaArgVisitor continues its analysis.
   // This pointer identifies which Ptr use the main analysis used
   // to discover the Ptr needing analysis, so as to prevent cycles.
-  Value *MemoryAnalysisPtrUse = nullptr;
+  Instruction *MemoryAnalysisPtrUse = nullptr;
   auto back() { return WorkList.back(); }
   void popBack() { WorkList.pop_back(); }
   bool seen(Value *Val) { return Seen.contains(Val); }
@@ -266,7 +266,7 @@ public:
 
 private:
   inline std::optional<LambdaKernelArgAnalysis>
-  cloneAndAnalyze(Value *Start, Value *MemoryAnalysisPtrUse,
+  cloneAndAnalyze(Value *Start, Instruction *MemoryAnalysisPtrUse,
                   int64_t StartOffset) {
     LambdaArgVisitor Visitor(Start, MemoryAnalysisPtrUse, LambdaCB, StartOffset,
                              DL, ClobberOracle);
@@ -405,7 +405,7 @@ public:
         if (Clobber.Instruction)
           OS << *Clobber.Instruction;
         else
-        OS << "<no instruction>";
+          OS << "<no instruction>";
         OS << "\n";
       });
     } else if (Clobber.Kind == MemorySSAClobberKind::Phi) {
@@ -480,8 +480,8 @@ public:
 
   // todo: these three methods need to be changed to find a dominating store
   void visitAllocaInst(AllocaInst &Alloca) {
-    auto Res =
-        getDominatingUse(DL, &Alloca, MemoryAnalysisPtrUse, Offset, LambdaCB);
+    auto Res = getDominatingUse(DL, &Alloca, MemoryAnalysisPtrUse, Offset,
+                                LambdaCB, ClobberOracle);
     if (!Res)
       return;
 
@@ -494,8 +494,8 @@ public:
   }
 
   void visitBitCastInst(BitCastInst &BC) {
-    auto Res =
-        getDominatingUse(DL, &BC, MemoryAnalysisPtrUse, Offset, LambdaCB);
+    auto Res = getDominatingUse(DL, &BC, MemoryAnalysisPtrUse, Offset, LambdaCB,
+                                ClobberOracle);
     if (!Res)
       return;
     WorkList.push_back({Res->DominatingWrite, &BC});
@@ -506,8 +506,8 @@ public:
 
   void visitAddrSpaceCastInst(AddrSpaceCastInst &ASC) {
     WorkList.push_back({ASC.getPointerOperand(), &ASC});
-    auto Res =
-        getDominatingUse(DL, &ASC, MemoryAnalysisPtrUse, Offset, LambdaCB);
+    auto Res = getDominatingUse(DL, &ASC, MemoryAnalysisPtrUse, Offset,
+                                LambdaCB, ClobberOracle);
     if (!Res)
       return;
 
