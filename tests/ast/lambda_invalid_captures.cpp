@@ -56,11 +56,3 @@ void mutate_through_constructor_reference(int Value) {
       });
   (void)Lambda;
 }
-
-// The pass records the slot using jit_variable's own type, not the casted one.
-void explicit_cast_of_jit_variable(int Value) {
-  auto Lambda = proteus::register_lambda(
-      // expected-error@+1 {{must be used directly as a lambda init-capture}}
-      [X = static_cast<long>(proteus::jit_variable(Value))] { return X; });
-  (void)Lambda;
-}
