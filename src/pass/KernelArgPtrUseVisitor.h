@@ -8,6 +8,7 @@
 #include "proteus/impl/RuntimeConstantTypeHelpers.h"
 #include <llvm/Analysis/PtrUseVisitor.h>
 #include <llvm/Analysis/ValueTracking.h>
+#include <algorithm>
 
 #include <llvm/ADT/DenseMap.h>
 #include <llvm/ADT/DenseSet.h>
@@ -74,16 +75,51 @@ struct LambdaPtrUseAnalysis {
 };
 
 struct ClobberQuery {
+  // This is the current function the analysis in examining.
   Function *Frame = nullptr;
+  // This is the ptr argument, alloca, bitcast, addrspacecast defined ptr that triggered the
+  // analysis. E.G. %1 in the example below
+  // %1 = alloca ptr
+  // %2 = getelementptr %1, 0, 1
+  // store %0, %2
+  // call lambda(%1)
   Value *TrackedPtr = nullptr;
+  // This is the instruction at which we care about the value of the TrackedPtr.  Above,
+  // it would be call lambda(%1)
   Instruction *UseBoundary = nullptr;
-  int64_t TargetOffset = 0;
+  int64_t OffsetOfWriteToBasePtr = 0;
+  uint64_t SizeOfWriteToBasePtr = 0;
 
   bool operator==(const ClobberQuery &Other) const {
     return Frame == Other.Frame && TrackedPtr == Other.TrackedPtr &&
            UseBoundary == Other.UseBoundary &&
-           TargetOffset == Other.TargetOffset;
+           OffsetOfWriteToBasePtr == Other.OffsetOfWriteToBasePtr;
   }
+};
+
+// struct CallBaseCandidate {
+//   CallBase *CB;
+//   int64_t ArgContainingPtr;
+// };
+
+// struct MemIntrinsicCandidate {
+//   MemIntrinsic *MI;
+//   Value *SrcPtr;
+
+// };
+
+// struct StoreCandidate {
+//   StoreInst *SI;
+
+// };
+
+// Whenever the analysis encounters a CallBase, MemIntrinsic, or Store
+// one of these structs in generated, combining the context of the ClobberQuery
+// with the Instruction itself.
+struct UseDefWriteCandidate {
+  // std::variant<StoreCandidate, MemIntrinsicCandidate, CallBaseCandidate> WriteCandidate;
+  Instruction *WriteCandidate;
+  ClobberQuery ClobberInfo;
 };
 
 struct ClobberQueryDenseMapInfo {
@@ -101,7 +137,7 @@ struct ClobberQueryDenseMapInfo {
 
   static unsigned getHashValue(const ClobberQuery &Query) {
     return static_cast<unsigned>(hash_combine(
-        Query.Frame, Query.TrackedPtr, Query.UseBoundary, Query.TargetOffset));
+        Query.Frame, Query.TrackedPtr, Query.UseBoundary, Query.OffsetOfWriteToBasePtr));
   }
 
   static bool isEqual(const ClobberQuery &LHS, const ClobberQuery &RHS) {
@@ -109,9 +145,11 @@ struct ClobberQueryDenseMapInfo {
   }
 };
 
-// We track use-edges in our analysis, but call them clobbers because
-// each one is a potential clobber.
-struct PotentialClobber {
+// The basic unit of work on this analysis is a use--an edge connecting two
+// values. We also track their parent function and the useboundary pertaining
+// to them.  This use boundary could be an alloca ptr that triggered this analysis
+// or it could be a ReturnInst in a called function.
+struct UseAnalysisWorkItem {
   Value *CurVal = nullptr;
   // this is the use-edge, and potentially different from the use boundary
   // below.  For example, the use boundary could be a lambda CB but the
@@ -125,6 +163,7 @@ struct PotentialClobber {
   // the example above it would be call lambda(%1)
   Instruction *UseBoundary = nullptr;
   Function *Frame = nullptr;
+  Value *TrackedBase = nullptr;
 };
 
 inline std::optional<MemoryLocation>
@@ -162,20 +201,195 @@ private:
   Value *TrackedBase = nullptr;
   LambdaPtrUseAnalysis Result;
   DataLayout DL;
-  SmallVector<PotentialClobber> WorkList;
-  PotentialClobber Current;
+  SmallVector<UseAnalysisWorkItem> WorkList;
+  DenseMap<CallBase *, SmallVector<UseAnalysisWorkItem, 4>>
+      DeferredCallBaseWorkItems;
+  UseAnalysisWorkItem Current;
+  SmallVector<UseDefWriteCandidate> PotentialClobbers;
   // The visitor pattern is always setting LastUse to the back of the
   // edge at the front of the worklist (the def that brought us to the
   // current use).
   Value *Def = nullptr;
   SmallDenseSet<Value *> Seen;
+
   bool AnalysisSuccess = false;
   bool AnalysisFailed = false;
-  // This vector contains all the potentially clobbering instructions for
-  // the pointer who's write we are tracking in question.
-  SmallVector<Instruction *> ClobberCandidates;
 
 public:
+// Data about offset comes from the use-def graph traversal, but information about clobbering
+// comes from the MemorySSA IR.  This phase of the analysis attempts to reconcile the results
+// of the two
+inline Value *resolveCollectedClobbers() {
+  if (PotentialClobbers.empty()) {
+    AnalysisFailed = true;
+    AnalysisSuccess = false;
+    DEBUG(Logger::logs("proteus-pass") << "Analysis failed to produce any write candidates\n");
+    return nullptr;
+  }
+  MemorySSAClobber SSAResult;
+  if (PotentialClobbers.size() == 1) {
+    auto &Candidate = PotentialClobbers.front();
+    if (auto *SI = dyn_cast<StoreInst>(Candidate.WriteCandidate))
+      SSAResult = ClobberOracle->query(MemoryLocation::get(SI),
+                                       *Candidate.ClobberInfo.UseBoundary);
+    else
+      SSAResult = queryMemorySSA(Candidate.ClobberInfo);
+  } else {
+    SSAResult = queryMemorySSA(PotentialClobbers.begin()->ClobberInfo);
+  }
+  auto *ClobberingInst = SSAResult.Instruction;
+  if (!ClobberingInst) {
+    DEBUG(Logger::logs("proteus-pass")
+          << "MemorySSA did not identify a clobbering instruction\n");
+    AnalysisFailed = true;
+    AnalysisSuccess = false;
+    return nullptr;
+  }
+  if (PotentialClobbers.size() == 1) {
+    // check if the clobber is identical to the write from the analysis, if not
+    // we are in trouble
+    if (PotentialClobbers[0].WriteCandidate != ClobberingInst) {
+      DEBUG(Logger::logs("proteus-pass") << "Analysis found write at " << *PotentialClobbers[0].WriteCandidate <<
+    "\nBut MemorySSA found " << *ClobberingInst);
+      AnalysisFailed = true;
+      AnalysisSuccess = false;
+      return nullptr;
+    }
+    return PotentialClobbers[0].WriteCandidate;
+  }
+  // We check that all the potential clobbers share a TrackedPtr, Frame, and UseBoundary.
+  // This shape is baked into the analysis, because MemorySSA queries must occur within
+  // the same procedure. We do a sanity check here and fail if it doesn't hold true (internal
+  // compiler error).
+  bool AllTrackedPointersSame = std::all_of(PotentialClobbers.begin(), PotentialClobbers.end(), [&](const UseDefWriteCandidate& Q) {
+    return Q.ClobberInfo.TrackedPtr == PotentialClobbers[0].ClobberInfo.TrackedPtr
+      && Q.ClobberInfo.Frame == PotentialClobbers[0].ClobberInfo.Frame
+      && Q.ClobberInfo.UseBoundary == PotentialClobbers[0].ClobberInfo.UseBoundary;
+  });
+
+  if (!AllTrackedPointersSame) {
+    clobberCandidatesFailure();
+    return nullptr;
+  }
+  auto *ClobberingStoreOrNull = dyn_cast<StoreInst>(ClobberingInst);
+
+  bool AreAllStores = PotentialClobbers.size() > 1 && ClobberingInst && ClobberingStoreOrNull &&
+    std::all_of(PotentialClobbers.begin(), PotentialClobbers.end(), [&](const UseDefWriteCandidate& Q) {
+      return dyn_cast<StoreInst>(Q.WriteCandidate);
+    });
+  if (!AreAllStores) {
+    DEBUG(Logger::logs("proteus-pass") << "Detected mixed StoreInst/CallBase/MemIntrinsics in list of candidate clobbers:\n");
+    int CandidateIdx = 0;
+    for (auto& Candidate : PotentialClobbers) {
+      ++CandidateIdx;
+      DEBUG(Logger::logs("proteus-pass") << "Candidate " << CandidateIdx << " = " << *Candidate.WriteCandidate);
+    }
+
+    AnalysisFailed = true;
+    AnalysisSuccess = false;
+    return nullptr;
+  }
+  // clang-format off
+  // four possible cases for stores to the aggregate:
+  // Stores = all stores INCLUSIVE of the clobbering store
+  // all stores have same base ptr, distinct offsets:
+  //     return the base ptr with 0 offset from analysis
+  // one store has different base ptr, distinct offsets:
+  //     means one slot in the lambda was written to from someplace else,
+  //     lambda is filled from heterogenous sources, fail
+  // all stores have same base ptr, share offsets:
+  //     the clobber should be the definitive answer for this case,
+  //     analysis should return that
+  // one store has different base ptr, some offsets shared:
+  //     fail
+  // clang-format on
+  int64_t ClobberingOffset = 0;
+  auto *ClobberingBasePtr = GetPointerBaseWithConstantOffset(ClobberingStoreOrNull->getValueOperand(), ClobberingOffset, DL);
+  SmallDenseMap<int64_t, SmallVector<std::pair<Value*, StoreInst*>>> OffsetToBasePtrStoreMap;
+  SmallDenseMap<StoreInst*, SmallVector<std::pair<Value*, int64_t>>> StoreInstToOffsetBasePtrMap;
+  OffsetToBasePtrStoreMap[ClobberingOffset].push_back({ClobberingBasePtr, ClobberingStoreOrNull});
+  // These two booleans create the axes of cases.
+  bool StoresHaveSameBasePtr = std::all_of(PotentialClobbers.begin(), PotentialClobbers.end(), [&](const UseDefWriteCandidate& Q) {
+    auto *SI = dyn_cast<StoreInst>(Q.WriteCandidate);
+    auto* ValueOp = SI->getValueOperand();
+    int64_t ValueOffset = 0;
+    auto *SIValueBasePtr = GetPointerBaseWithConstantOffset(ValueOp, ValueOffset, DL);
+    OffsetToBasePtrStoreMap[ValueOffset].push_back({SIValueBasePtr, SI});
+    StoreInstToOffsetBasePtrMap[SI].push_back({SIValueBasePtr, ValueOffset});
+    return SIValueBasePtr == ClobberingBasePtr;
+  });
+
+  bool StoresHaveDifferentOffsets = std::all_of(OffsetToBasePtrStoreMap.begin(), OffsetToBasePtrStoreMap.end(), [&](const auto &It) {
+    return It.second.size() ==1;
+  });
+  // This is the easiest possible case: basically we've found the LLVM IR shape where we load a bunch
+  // of values in to the aggregate pointer representing lambda storage. The Clobbering analysis just
+  // picks the last write to an element in the aggregate lambda storage.
+  if (StoresHaveDifferentOffsets && StoresHaveSameBasePtr) {
+    return ClobberingStoreOrNull;
+  }
+  // We can still conservatively pass in this case: if there are two writes to the same field in the lambda
+  // but we know one of them clobbers, we can still return the common base ptr as the source of truth for
+  // the lambda.
+  if (!StoresHaveDifferentOffsets && StoresHaveSameBasePtr) {
+    for (const auto &Entry : OffsetToBasePtrStoreMap) {
+      const auto &CurVec = Entry.second;
+      if (CurVec.size() == 1)
+        continue;
+      auto It = std::find_if(CurVec.begin(), CurVec.end(), [&](std::pair<Value*, StoreInst*> Arg) {
+        return Arg.second == ClobberingStoreOrNull;
+      });
+      if (It != CurVec.end())
+        return ClobberingStoreOrNull;
+    }
+  }
+  // What we can't have is a data occupying slots in the lambda pointer coming in from miscellaneous sources.
+  if (!StoresHaveSameBasePtr) {
+    DEBUG(Logger::logs("proteus-pass") << "Ptr use analysis error: found heterogenous data sources in lambda storage slots. This is illegal and should be detected by the frontend. \n");
+  }
+
+
+// ; Function Attrs: convergent mustprogress norecurse nounwind
+// define protected amdgpu_kernel void @_ZN17MockRajaInterface13globalWrapperIZN17MockMfemInterface6forallIN7proteus6detail20LambdaFunctorWrapperILm6894195003319168199EZ14integralKernelILi3ELi4EEvdiiEUliiE_EEEEviiOT_EUliE_EEvS9_m(ptr addrspace(4) noundef byref(%class.anon.1) align 8 %0, i64 noundef %1) #3 comdat !dbg !1989 !proteus.jit !1805 {
+//   %3 = alloca %class.anon.1, align 8, addrspace(5)
+//   %4 = alloca %"struct.MockRajaInterface::Privatizer.4", align 8, addrspace(5)
+//   %5 = addrspacecast ptr addrspace(5) %3 to ptr
+//   %6 = addrspacecast ptr addrspace(5) %4 to ptr
+//   call void @llvm.memcpy.p0.p4.i64(ptr align 8 %5, ptr addrspace(4) align 8 %0, i64 24, i1 false)
+//     #dbg_declare(ptr addrspace(5) %3, !1993, !DIExpression(DIOpArg(0, ptr addrspace(5)), DIOpDeref(%class.anon.1)), !1999)
+//     #dbg_value(i64 %1, !1994, !DIExpression(DIOpArg(0, i64)), !2000)
+//   call void @llvm.lifetime.start.p5(i64 24, ptr addrspace(5) %4) #14, !dbg !2001
+//     #dbg_declare(ptr addrspace(5) %4, !1995, !DIExpression(DIOpArg(0, ptr addrspace(5)), DIOpDeref(%"struct.MockRajaInterface::Privatizer.4")), !2002)
+//   %7 = call %"struct.MockRajaInterface::Privatizer.4" @_ZN17MockRajaInterface15threadPrivatizeIZN17MockMfemInterface6forallIN7proteus6detail20LambdaFunctorWrapperILm6894195003319168199EZ14integralKernelILi3ELi4EEvdiiEUliiE_EEEEviiOT_EUliE_EENS_10PrivatizerIS9_EERKS9_(ptr noundef nonnull align 8 dereferenceable(24) %5) #16, !dbg !2003
+//   %8 = extractvalue %"struct.MockRajaInterface::Privatizer.4" %7, 0, !dbg !2003
+//   %9 = extractvalue %class.anon.1 %8, 0, !dbg !2003
+//   store i32 %9, ptr %6, align 8, !dbg !2003
+//   %10 = extractvalue %class.anon.1 %8, 1, 0, 0, !dbg !2003
+//   %11 = getelementptr inbounds %class.anon.1, ptr %6, i32 0, i32 1, i32 0, i32 0, !dbg !2003
+//   store i32 %10, ptr %11, align 8, !dbg !2003
+//   %12 = extractvalue %class.anon.1 %8, 1, 0, 1, !dbg !2003
+//   %13 = getelementptr inbounds %class.anon.1, ptr %6, i32 0, i32 1, i32 0, i32 1, !dbg !2003
+//   store i32 %12, ptr %13, align 4, !dbg !2003
+//   %14 = extractvalue %class.anon.1 %8, 1, 0, 2, !dbg !2003
+//   %15 = getelementptr inbounds %class.anon.1, ptr %6, i32 0, i32 1, i32 0, i32 2, !dbg !2003
+//   store double %14, ptr %15, align 8, !dbg !2003
+    // todo: In the shape above, we have multiple stores to the same closureptr.
+    // Problem: SSA selects the store double %14, ptr %15, align 8, but all are valid
+    // In this case, its easy to check the StoreInst's valueptr's GetPointerBaseWithConstantOffset
+    // And verify we are just copying values from one aggregate into another.
+    // If two candidates have a different base ptr but same offset into TrackedPtr, and one clobbers the other,
+    // just trust the one that clobbers.
+    //
+    // In general: all candidates will be StoreInst, CallBase, or MemIntrinsic
+    // We might have TrackedPtr = %6
+    // %10 = getelementptr inbounds %class.anon.1, ptr %6, i32 0, i32 0, i32 0, i32 0
+    // %11 = getelementptr inbounds %class.anon.1, ptr %6, i32 0, i32 1, i32 0, i32 0
+    // store int32 %9, ptr %10 align 8
+    // call void writeslot(%11)
+    // Here we need to check that the CB is writing from the same fundamental ptr as the store but across
+    // the interprocedural boundary, or at least reject this shape
+  return nullptr;
+}
   // Constructor used whenever a NeedsDefUseAnalysis Value is encountered. We
   // need to track where the calling LambdaArgVisitor came in from, so that our
   // analysis does not
@@ -186,7 +400,7 @@ public:
       : ClobberOracle(std::move(Oracle)), TrackedBase(PtrBegin), DL(Dl) {
     ClobberQuery Query{SeenUse->getFunction(), PtrBegin, SeenUse, TargetOff};
     queryMemorySSA(Query);
-    WorkList.push_back({PtrBegin, nullptr, SeenUse, SeenUse->getFunction()});
+    WorkList.push_back({PtrBegin, nullptr, SeenUse, SeenUse->getFunction(), PtrBegin});
     // A pointer-transform on the backwards provenance path may also have an
     // earlier store as a user.  Visit that transform so those writes remain
     // visible, but stop before re-entering the lambda invocation itself.
@@ -214,8 +428,154 @@ public:
 
   // Keep track of Function frame
   void pushBack(Value *NextVal, Value *CurVal, Function *Frame,
-                Instruction *UseBoundary) {
-    WorkList.push_back({NextVal, CurVal, UseBoundary, Frame});
+                Instruction *UseBoundary, Value *TrackedBase) {
+    WorkList.push_back({NextVal, CurVal, UseBoundary, Frame, TrackedBase});
+  }
+
+  bool cacheCallBaseWorkItems(CallBase &CB, Value *DefBeforeCB) {
+    Function *CalledFunction = CB.getCalledFunction();
+    if (!CalledFunction || CalledFunction->isDeclaration()) {
+      DEBUG(Logger::logs("proteus-pass")
+            << "    [PTR use analysis]: Cannot trace indirect or declaration "
+               "call "
+            << CB << "\n");
+      return false;
+    }
+
+    const auto ReturnInstVec = proteus::getReturnInstructions(*CalledFunction);
+    if (ReturnInstVec.size() != 1) {
+      DEBUG(Logger::logs("proteus-pass")
+            << "    [PTR use analysis]: Call " << CB
+            << "\nContains multiple ReturnInsts\n");
+      return false;
+    }
+
+    if (!DefBeforeCB || !ValueOffsetMap.contains(DefBeforeCB)) {
+      offsetValueMapFailure(DefBeforeCB ? DefBeforeCB : TrackedBase);
+      return false;
+    }
+
+    auto &Deferred = DeferredCallBaseWorkItems[&CB];
+    bool FoundArg = false;
+    for (size_t ArgI = 0; ArgI < CalledFunction->arg_size(); ++ArgI) {
+      if (CB.getArgOperand(ArgI) != DefBeforeCB)
+        continue;
+
+      FoundArg = true;
+      Argument *ArgToTrack = CalledFunction->getArg(ArgI);
+      ValueOffsetMap[ArgToTrack] = ValueOffsetMap[DefBeforeCB];
+      for (User *Usr : ArgToTrack->users())
+        Deferred.push_back(
+            {Usr, ArgToTrack, ReturnInstVec.front(), CalledFunction, ArgToTrack});
+    }
+
+    if (!FoundArg)
+      DEBUG(Logger::logs("proteus-pass")
+            << "    [PTR use analysis]: Call does not pass the tracked pointer "
+               "on any callee argument: "
+            << CB << "\n");
+    return FoundArg;
+  }
+
+  void continueFromResolvedClobber(Value *Resolved) {
+    DEBUG({
+      auto &OS = Logger::logs("proteus-pass");
+      OS << "    [PTR use analysis]: Resolving collected clobbers; candidates="
+         << PotentialClobbers.size();
+      if (Resolved)
+        OS << "; selected=" << *Resolved;
+      else
+        OS << "; selected=<none>";
+      OS << "\n";
+    });
+
+    auto *ResolvedInst = dyn_cast_or_null<Instruction>(Resolved);
+    if (!ResolvedInst) {
+      DEBUG(Logger::logs("proteus-pass")
+            << "    [PTR use analysis]: Resolution phase failed: selected "
+               "clobber is not an instruction\n");
+      AnalysisFailed = true;
+      AnalysisSuccess = false;
+      return;
+    }
+
+    auto CandidateIt = llvm::find_if(PotentialClobbers,
+                                     [ResolvedInst](const auto &Candidate) {
+                                       return Candidate.WriteCandidate ==
+                                              ResolvedInst;
+                                     });
+    if (CandidateIt == PotentialClobbers.end()) {
+      DEBUG(Logger::logs("proteus-pass")
+            << "    [PTR use analysis]: Resolution phase failed: MemorySSA "
+               "selection is absent from collected candidates: "
+            << *ResolvedInst << "\n");
+      AnalysisFailed = true;
+      AnalysisSuccess = false;
+      return;
+    }
+
+    if (auto *SI = dyn_cast<StoreInst>(ResolvedInst)) {
+      DEBUG(Logger::logs("proteus-pass")
+            << "    [PTR use analysis]: Exiting visitor with value from "
+               "resolved store: "
+            << *SI << "; offset="
+            << CandidateIt->ClobberInfo.OffsetOfWriteToBasePtr << "\n");
+      Result = {.DominatingWrite = SI->getValueOperand(),
+                .Offset = CandidateIt->ClobberInfo.OffsetOfWriteToBasePtr,
+                .ChangedRCLayout = std::nullopt};
+      AnalysisFailed = false;
+      AnalysisSuccess = true;
+      return;
+    }
+
+    if (auto *MT = dyn_cast<MemTransferInst>(ResolvedInst)) {
+      DEBUG(Logger::logs("proteus-pass")
+            << "    [PTR use analysis]: Exiting visitor with source from "
+               "resolved memory transfer: "
+            << *MT << "; offset-correction="
+            << CandidateIt->ClobberInfo.OffsetOfWriteToBasePtr << "\n");
+      Result = {.DominatingWrite = MT->getRawSource(),
+                .Offset = CandidateIt->ClobberInfo.OffsetOfWriteToBasePtr,
+                .ChangedRCLayout = std::nullopt};
+      AnalysisFailed = false;
+      AnalysisSuccess = true;
+      return;
+    }
+
+    auto *CB = dyn_cast<CallBase>(ResolvedInst);
+    auto Deferred = CB ? DeferredCallBaseWorkItems.find(CB)
+                       : DeferredCallBaseWorkItems.end();
+    if (!CB || Deferred == DeferredCallBaseWorkItems.end() ||
+        Deferred->second.empty()) {
+      DEBUG({
+        auto &OS = Logger::logs("proteus-pass");
+        OS << "    [PTR use analysis]: Resolution phase failed: selected "
+              "clobber cannot resume interprocedural traversal: "
+           << *ResolvedInst;
+        if (CB)
+          OS << "; cached-work-items="
+             << (Deferred == DeferredCallBaseWorkItems.end()
+                     ? 0
+                     : Deferred->second.size());
+        OS << "\n";
+      });
+      AnalysisFailed = true;
+      AnalysisSuccess = false;
+      return;
+    }
+
+    DEBUG(Logger::logs("proteus-pass")
+          << "    [PTR use analysis]: Resuming visitor across selected call "
+             "into "
+          << CB->getCalledFunction()->getName()
+          << "; deferred-work-items=" << Deferred->second.size() << "\n");
+    PotentialClobbers.clear();
+    WorkList.append(Deferred->second.begin(), Deferred->second.end());
+    DeferredCallBaseWorkItems.erase(Deferred);
+  }
+
+  void resolveCollectedClobbersAndContinue() {
+    continueFromResolvedClobber(resolveCollectedClobbers());
   }
 
   MemorySSAClobber queryMemorySSA(const ClobberQuery &Query) {
@@ -237,8 +597,9 @@ public:
     return Result;
   }
 
-  bool isSelectedClobber(Instruction &Candidate) {
-    ClobberQuery Query{Current.Frame, TrackedBase, Current.UseBoundary};
+  bool isSelectedClobber(Instruction &Candidate, Function *Frame,
+                         Instruction *UseBoundary) {
+    ClobberQuery Query{Frame, TrackedBase, UseBoundary};
     MemorySSAClobber Clobber = queryMemorySSA(Query);
     bool Selected = Clobber.Kind == MemorySSAClobberKind::Definition &&
                     Clobber.Instruction == &Candidate;
@@ -261,6 +622,14 @@ public:
           << " in offset tracking map, this is an internal compiler bug\n");
   }
 
+  void clobberCandidatesFailure() {
+    AnalysisFailed = true;
+    AnalysisSuccess = false;
+    DEBUG(Logger::logs("proteus-pass")
+          << "    [PTR use analysis]: Analysis failed due to frame/tracked ptr mismatch"
+          << " in Clobber candidates map\n");
+  }
+
   // WorkList is LIFO.  Enqueue possible writers last so they are inspected
   // before an older store reached through a GEP.  Otherwise a memcpy/memmove
   // call can be skipped merely because the initializer happens to appear
@@ -277,10 +646,10 @@ public:
       }
       // All these users don't cross an interprocedural boundary (only CB does),
       // so just copy UseBoundary/Frame data
-      pushBack(Usr, V, Current.Frame, Current.UseBoundary);
+      pushBack(Usr, V, Current.Frame, Current.UseBoundary, Current.TrackedBase);
     }
     for (User *Usr : PossibleWriters)
-      pushBack(Usr, V, Current.Frame, Current.UseBoundary);
+      pushBack(Usr, V, Current.Frame, Current.UseBoundary, Current.TrackedBase);
   }
 
   void visitStoreInst(StoreInst &SI) {
@@ -299,7 +668,8 @@ public:
       ValueOffsetMap[StoreBase] = ValueOffsetMap[Stored];
       for (User *Usr : StoreBase->users())
         if (Usr != &SI && !Seen.contains(Usr))
-          pushBack(Usr, StoreBase, Current.Frame, Current.UseBoundary);
+          pushBack(Usr, StoreBase, Current.Frame, Current.UseBoundary,
+                   Current.TrackedBase);
       return;
     }
 
@@ -312,8 +682,8 @@ public:
     // Def-use traversal discovers every store through the tracked pointer.
     // Only the MemorySSA definition reaching the use boundary can provide the
     // value consumed there; older and non-reaching stores are not candidates.
-    if (!isSelectedClobber(SI))
-      return;
+    // if (!isSelectedClobber(SI, Current.Frame, Current.UseBoundary))
+    //   return;
 
     if (!StoreSize ||
         !offsetCoveredByRange(ValueOffsetMap[StoreBase], 0, *StoreSize))
@@ -321,11 +691,14 @@ public:
     DEBUG(Logger::logs("proteus-pass")
           << "    Found PTRstore applicable to offset " << ValueOffsetMap[&SI]
           << " Store size = " << *StoreSize << " ; " << SI << "\n");
-    AnalysisFailed = false;
-    AnalysisSuccess = true;
-    Result = {.DominatingWrite = SI.getValueOperand(),
-              .Offset = Offset,
-              .ChangedRCLayout = std::nullopt};
+    PotentialClobbers.push_back(UseDefWriteCandidate {
+      .WriteCandidate = &SI,
+      .ClobberInfo = {.Frame = Current.Frame,
+                      .TrackedPtr = Current.TrackedBase,
+                      .UseBoundary = Current.UseBoundary,
+                      .OffsetOfWriteToBasePtr = Offset,
+                      },
+    });
   }
 
   void visitLoadInst(LoadInst &LI) {
@@ -355,61 +728,19 @@ public:
         return;
     }
 
-    if (!isSelectedClobber(CB))
-      return;
-
-    Function *CalledFunction = CB.getCalledFunction();
-    if (!CalledFunction || CalledFunction->isDeclaration()) {
-      DEBUG(Logger::logs("proteus-pass")
-            << "    [PTR use analysis]: Cannot trace indirect or declaration "
-               "call "
-            << CB << "\n");
-      AnalysisFailed = true;
-      AnalysisSuccess = false;
-      return;
-    }
-
     Value *DefBeforeCB = getLastDef();
-    if (!DefBeforeCB || !ValueOffsetMap.contains(DefBeforeCB)) {
-      offsetValueMapFailure(DefBeforeCB ? DefBeforeCB : TrackedBase);
-      return;
-    }
-
-    const auto ReturnInstVec = proteus::getReturnInstructions(*CalledFunction);
-    if (ReturnInstVec.size() != 1) {
-      DEBUG(Logger::logs("proteus-pass")
-            << "    [PTR use analysis]: Call " << CB
-            << "\nContains multiple ReturnInsts" << "\n");
+    if (!cacheCallBaseWorkItems(CB, DefBeforeCB)) {
       AnalysisFailed = true;
       AnalysisSuccess = false;
       return;
     }
-    auto *Return = ReturnInstVec.front();
-    bool FoundArg = false;
-    for (size_t ArgI = 0; ArgI < CalledFunction->arg_size(); ++ArgI) {
-      DEBUG(Logger::logs("proteus-pass") << "    ARG " << ArgI << " VAL "
-                                         << *CB.getArgOperand(ArgI) << "\n");
-      if (CB.getArgOperand(ArgI) != DefBeforeCB)
-        continue;
 
-      FoundArg = true;
-      Argument *ArgToTrack = CalledFunction->getArg(ArgI);
-      ValueOffsetMap[ArgToTrack] = ValueOffsetMap[DefBeforeCB];
-      DEBUG(Logger::logs("proteus-pass")
-            << "    Looking at uses of " << *ArgToTrack << "\n");
-
-      for (User *Usr : ArgToTrack->users())
-        pushBack(Usr, ArgToTrack, CalledFunction, Return);
-    }
-
-    if (!FoundArg) {
-      DEBUG(Logger::logs("proteus-pass")
-            << "    [PTR use analysis]: Call does not pass the tracked "
-               "pointer on any callee argument: "
-            << CB << "\n");
-      AnalysisFailed = true;
-      AnalysisSuccess = false;
-    }
+    PotentialClobbers.push_back(
+        {.WriteCandidate = &CB,
+         .ClobberInfo = {.Frame = Current.Frame,
+                         .TrackedPtr = Current.TrackedBase,
+                         .UseBoundary = Current.UseBoundary,
+                         .OffsetOfWriteToBasePtr = Offset}});
   }
 
   void visitGetElementPtrInst(GetElementPtrInst &GEP) {
@@ -520,7 +851,7 @@ public:
 
     // As with stores, the def-use walk can encounter memory writes that do not
     // reach the use boundary.  Interpret only MemorySSA's selected definition.
-    if (!isSelectedClobber(I))
+    if (!isSelectedClobber(I, Current.Frame, Current.UseBoundary))
       return;
 
     if (auto *MS = dyn_cast<MemSetInst>(&I)) {
@@ -577,7 +908,7 @@ public:
     }
 
     DEBUG(Logger::logs("proteus-pass")
-          << "  [PTR use analysis]: Completed instrinsic analysis " << "\n");
+          << "  [PTR use analysis]: Completed intrinsic analysis " << "\n");
     // LambdaArgVisitor applies Result.Offset by subtracting it from its
     // current, destination-relative offset.  The value carried across a
     // transfer is therefore the difference between the destination and
@@ -585,11 +916,14 @@ public:
     // copying a field at byte 8 into a field at byte 24 needs a correction of
     // 16, so the caller turns 24 into 8.
     int64_t OffsetCorrection = DstOff - SrcOff;
-    AnalysisSuccess = true;
-    AnalysisFailed = false;
-    Result = {.DominatingWrite = SrcBase,
-              .Offset = OffsetCorrection,
-              .ChangedRCLayout = std::nullopt};
+    PotentialClobbers.push_back({
+    .WriteCandidate = &I,
+    .ClobberInfo = {.Frame = Current.Frame,
+                   .TrackedPtr = Current.TrackedBase,
+                   .UseBoundary = Current.UseBoundary,
+                   .OffsetOfWriteToBasePtr = OffsetCorrection,
+                   .SizeOfWriteToBasePtr = Len->getZExtValue()
+                  }});
   }
 
   void visitInstruction(Instruction &I) {
@@ -612,28 +946,32 @@ getDominatingUse(const DataLayout &DL, Value *ValueNeedingAnalysis,
   LambdaInstUseVisitor Visitor(ValueNeedingAnalysis, UseofPtr, LambdaCB, DL,
                                TargetOffset, std::move(ClobberOracle));
   // Analysis loop
-  while (!Visitor.empty() && !Visitor.success() && !Visitor.failed()) {
-    auto CurWorkItem = Visitor.popBack();
-    auto *V = CurWorkItem.CurVal;
-    // Prevent loops/infinite recursion
-    if (Visitor.seen(V))
-      continue;
-    Visitor.markAsSeen(V);
+  while (!Visitor.success() && !Visitor.failed()) {
+    while (!Visitor.empty() && !Visitor.success() && !Visitor.failed()) {
+      auto CurWorkItem = Visitor.popBack();
+      auto *V = CurWorkItem.CurVal;
+      // Prevent loops/infinite recursion
+      if (Visitor.seen(V))
+        continue;
+      Visitor.markAsSeen(V);
 
-    // Analyze the instruction
-    if (auto *I = dyn_cast<Instruction>(V)) {
-      if (auto *LastI = dyn_cast_or_null<Instruction>(CurWorkItem.LastVal);
-          LastI && LastI->getFunction() != I->getFunction())
+      // Analyze the instruction
+      if (auto *I = dyn_cast<Instruction>(V)) {
+        if (auto *LastI = dyn_cast_or_null<Instruction>(CurWorkItem.LastVal);
+            LastI && LastI->getFunction() != I->getFunction())
+          DEBUG(Logger::logs("proteus-pass")
+                << "    Crossing interprocedural boundary from  "
+                << LastI->getFunction()->getName() << " ----> "
+                << I->getFunction()->getName() << "\n"
+                << "At value " << *I << "\n");
         DEBUG(Logger::logs("proteus-pass")
-              << "    Crossing interprocedural boundary from  "
-              << LastI->getFunction()->getName() << " ----> "
-              << I->getFunction()->getName() << "\n"
-              << "At value " << *I << "\n");
-      DEBUG(Logger::logs("proteus-pass")
-            << "  [PTR use analysis]: Visiting ptr use " << *V << "\n");
-      Visitor.visit(*I);
-    } else
-      continue;
+              << "  [PTR use analysis]: Visiting ptr use " << *V << "\n");
+        Visitor.visit(*I);
+      }
+    }
+
+    if (!Visitor.success() && !Visitor.failed())
+      Visitor.resolveCollectedClobbersAndContinue();
   }
   if (!Visitor.success() || Visitor.failed()) {
     DEBUG(
