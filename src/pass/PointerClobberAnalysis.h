@@ -5,9 +5,11 @@
 #include <llvm/ADT/SmallPtrSet.h>
 #include <llvm/Analysis/AssumptionCache.h>
 #include <llvm/Analysis/BasicAliasAnalysis.h>
+#include <llvm/Analysis/CaptureTracking.h>
 #include <llvm/Analysis/MemoryLocation.h>
 #include <llvm/Analysis/MemorySSA.h>
 #include <llvm/Analysis/TargetLibraryInfo.h>
+#include <llvm/Analysis/ValueTracking.h>
 #include <llvm/IR/CFG.h>
 #include <llvm/IR/Dominators.h>
 #include <llvm/IR/Function.h>
@@ -56,6 +58,38 @@ public:
   }
 
   MemorySSA &getMemorySSA() { return *MSSA; }
+
+  bool callCannotModifyTrackedLocal(CallBase &CB,
+                                    const MemoryLocation &Location) {
+    // Respect any precise memory effects already understood by alias analysis.
+    if (!isModSet(AA.getModRefInfo(&CB, Location)))
+      return true;
+
+    // This additional proof is valid only for function-local allocations. A
+    // call cannot access such an allocation unless its address escaped earlier
+    // or an alias is supplied by the call itself.
+    const Value *Object = getUnderlyingObject(Location.Ptr);
+    auto *Alloca = dyn_cast<AllocaInst>(Object);
+    if (!Alloca || CB.hasOperandBundles())
+      return false;
+
+    // `nocapture` would not be enough here: a callee may modify a pointer
+    // argument without retaining it. Require every pointer argument to be
+    // disjoint from the tracked location.
+    for (const Use &Arg : CB.args()) {
+      Value *Actual = Arg.get();
+      if (!Actual->getType()->isPointerTy())
+        continue;
+      if (!AA.isNoAlias(MemoryLocation::getBeforeOrAfter(Actual), Location))
+        return false;
+    }
+
+    // The current call is excluded because its operands were checked above.
+    // Any earlier capture could have made the allocation reachable indirectly.
+    return !PointerMayBeCapturedBefore(Alloca, /*ReturnCaptures=*/true,
+                                       /*StoreCaptures=*/true, &CB, &DT,
+                                       /*IncludeI=*/false);
+  }
 };
 
 enum class MemorySSAClobberKind {
@@ -128,8 +162,20 @@ public:
     if (!Before)
       return {};
 
-    MemoryAccess *Clobber =
-        MSSA.getWalker()->getClobberingMemoryAccess(Before, Location);
+    MemorySSAWalker *Walker = MSSA.getWalker();
+    MemoryAccess *Clobber = Walker->getClobberingMemoryAccess(Before, Location);
+
+    // MemorySSA must conservatively model calls whose memory effects have not
+    // yet been inferred. Skip such a call only when we can prove that this
+    // particular local allocation was unavailable to it, then continue the
+    // clobber walk from the state immediately preceding the call.
+    while (auto *Def = dyn_cast_or_null<MemoryDef>(Clobber)) {
+      auto *CB = dyn_cast_or_null<CallBase>(Def->getMemoryInst());
+      if (!CB || !State.callCannotModifyTrackedLocal(*CB, Location))
+        break;
+      Clobber = Walker->getClobberingMemoryAccess(Def->getDefiningAccess(),
+                                                  Location);
+    }
     if (!Clobber)
       return {};
     if (MSSA.isLiveOnEntryDef(Clobber))
