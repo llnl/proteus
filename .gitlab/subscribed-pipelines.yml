@@ -7,8 +7,8 @@
 
 # The template job to test whether a machine is up.
 # Expects CI_MACHINE defined to machine name.
-# It passes when the machine is down so the sub-pipelines still start and
-# report the down machine as a failed GitHub check.
+# It fails so that "Retry failed jobs" re-runs the check and then creates the
+# skipped sub-pipelines with the machine's current state.
 .machine-check:
   stage: prerequisites
   tags: [shell, oslic]
@@ -51,14 +51,10 @@
 
       if [ "$NODES_UP" -eq 0 ]; then
         echo -e "\e[31mMachine ${CI_MACHINE} is down (${NODES_UP} nodes up)\e[0m"
-        echo "MACHINE_DOWN=true" > machine.env
-      else
-        echo -e "\e[32m${CI_MACHINE} is available (${NODES_UP} nodes up)\e[0m"
-        echo "MACHINE_DOWN=false" > machine.env
+        exit 1
       fi
-  artifacts:
-    reports:
-      dotenv: machine.env
+
+      echo -e "\e[32m${CI_MACHINE} is available (${NODES_UP} nodes up)\e[0m"
 
 .pipeline-trigger-rules:
   rules:

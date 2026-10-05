@@ -9,28 +9,6 @@
 workflow:
   name: "${CI_MACHINE}-${PIPELINE_KIND}"
 
-# The parent up-check sets MACHINE_DOWN. Fail the sub-pipeline right away so
-# GitHub shows which machine is down, and skip release_resources, which would
-# otherwise wait forever for the down machine's runner. This file is included
-# before the shared pipeline, whose release_resources does not set rules, so
-# these rules survive the merge.
-machine-down:
-  stage: is-machine-up
-  tags: [shell, oslic]
-  variables:
-    GIT_STRATEGY: none
-  rules:
-    - if: '$MACHINE_DOWN == "true"'
-  script:
-    - echo -e "\e[31mNo node available on ${CI_MACHINE}\e[0m"
-    - exit 1
-
-release_resources:
-  rules:
-    - if: '$MACHINE_DOWN == "true"'
-      when: never
-    - when: always
-
 # We define the following GitLab pipeline variables:
 variables:
 # In some pipelines we create only one allocation shared among jobs in
