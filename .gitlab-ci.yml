@@ -123,7 +123,6 @@ meta-only:
   interruptible: true
   variables:
     PIPELINE_KIND: build-and-test-llvm-${PROTEUS_CI_LLVM_VERSION}
-    MACHINE_DOWN: $MACHINE_DOWN
   parallel:
     matrix:
       - PROTEUS_CI_LLVM_VERSION: "19.1.7"
@@ -153,7 +152,6 @@ meta-only:
   interruptible: true
   variables:
     PIPELINE_KIND: build-and-test-rocm-${PROTEUS_CI_ROCM_VERSION}
-    MACHINE_DOWN: $MACHINE_DOWN
   parallel:
     matrix:
       - PROTEUS_CI_ROCM_VERSION: "6.4.3"
@@ -182,7 +180,6 @@ meta-only:
   interruptible: true
   variables:
     PIPELINE_KIND: test-integration
-    MACHINE_DOWN: $MACHINE_DOWN
   trigger:
     include:
       - local: '.gitlab/custom-jobs-and-variables.yml'
@@ -199,7 +196,6 @@ meta-only:
   interruptible: true
   variables:
     PIPELINE_KIND: test-spack
-    MACHINE_DOWN: $MACHINE_DOWN
   trigger:
     include:
       - local: '.gitlab/custom-jobs-and-variables.yml'
@@ -216,7 +212,6 @@ meta-only:
   interruptible: true
   variables:
     PIPELINE_KIND: run-benchmarks
-    MACHINE_DOWN: $MACHINE_DOWN
   trigger:
     include:
       - local: '.gitlab/custom-jobs-and-variables.yml'
