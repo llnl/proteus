@@ -289,6 +289,30 @@ inline Value *resolveCollectedClobbers() {
     AnalysisSuccess = false;
     return nullptr;
   }
+
+  // Multiple stores to one exact destination are successive definitions of
+  // the same bytes, not aggregate construction from heterogeneous sources.
+  // MemorySSA has already selected the definition reaching UseBoundary, so
+  // discard the shadowed stores before comparing source provenance.
+  int64_t ClobberingDestOffset = 0;
+  Value *ClobberingDestBase = GetPointerBaseWithConstantOffset(
+      ClobberingStoreOrNull->getPointerOperand(), ClobberingDestOffset, DL);
+  DEBUG(Logger::logs("proteus-pass") << "Computed base ptr " << *ClobberingDestBase << " and offset " << ClobberingDestOffset << " for instruction " << *ClobberingStoreOrNull <<"\n");
+  bool StoresHaveSameDestination = ClobberingDestBase &&
+      std::all_of(PotentialClobbers.begin(), PotentialClobbers.end(),
+                  [&](const UseDefWriteCandidate &Candidate) {
+                    // Note we have already exited if the cast below would be null
+                    auto *SI = cast<StoreInst>(Candidate.WriteCandidate);
+                    int64_t DestOffset = 0;
+                    Value *DestBase = GetPointerBaseWithConstantOffset(
+                        SI->getPointerOperand(), DestOffset, DL);
+                    DEBUG(Logger::logs("proteus-pass") << "Computed base ptr " << *DestBase << " and offset " << DestOffset << " for instruction " << *SI <<"\n");
+                    return DestBase == ClobberingDestBase &&
+                           DestOffset == ClobberingDestOffset;
+                  });
+  if (StoresHaveSameDestination)
+    return ClobberingStoreOrNull;
+
   // clang-format off
   // four possible cases for stores to the aggregate:
   // Stores = all stores INCLUSIVE of the clobbering store
@@ -346,6 +370,9 @@ inline Value *resolveCollectedClobbers() {
   // What we can't have is a data occupying slots in the lambda pointer coming in from miscellaneous sources.
   if (!StoresHaveSameBasePtr) {
     DEBUG(Logger::logs("proteus-pass") << "Ptr use analysis error: found heterogenous data sources in lambda storage slots. This is illegal and should be detected by the frontend. \n");
+    for (const auto& Clobber : PotentialClobbers) {
+      DEBUG(Logger::logs("proteus-pass") << "Candidate at offset = " << Clobber.ClobberInfo.OffsetOfWriteToBasePtr << " : " << *Clobber.WriteCandidate);
+    }
   }
 
 
@@ -655,7 +682,10 @@ inline Value *resolveCollectedClobbers() {
   void visitStoreInst(StoreInst &SI) {
     Value *Stored = SI.getValueOperand();
     Value *StoreBase = SI.getPointerOperand();
-
+    // This analysis tracks which write to the original pointer triggering this result,
+    // so a use that reads from the prior value is not valid here.
+    if (Stored == Current.LastVal)
+      return;
     // A pointer argument is commonly spilled in an unoptimized or optnone
     // callee before it is used.  Follow the slot's loads as carrying the same
     // pointee-relative offset instead of interpreting this as a write to the
@@ -704,10 +734,8 @@ inline Value *resolveCollectedClobbers() {
   void visitLoadInst(LoadInst &LI) {
     if (!LI.getType()->isPointerTy()) {
       DEBUG(Logger::logs("proteus-pass")
-            << "    [PTR use analysis]: Expected a pointer load, got " << LI
+            << "    [PTR use analysis]: Skipping tracking non-pointer load " << LI
             << "\n");
-      AnalysisFailed = true;
-      AnalysisSuccess = false;
       return;
     }
     if (!ValueOffsetMap.contains(LI.getPointerOperand())) {
@@ -849,11 +877,6 @@ inline Value *resolveCollectedClobbers() {
     if (Def != I.getRawDest())
       return;
 
-    // As with stores, the def-use walk can encounter memory writes that do not
-    // reach the use boundary.  Interpret only MemorySSA's selected definition.
-    if (!isSelectedClobber(I, Current.Frame, Current.UseBoundary))
-      return;
-
     if (auto *MS = dyn_cast<MemSetInst>(&I)) {
       if (!ValueOffsetMap.contains(Def)) {
         offsetValueMapFailure(Def);
@@ -912,7 +935,7 @@ inline Value *resolveCollectedClobbers() {
     // LambdaArgVisitor applies Result.Offset by subtracting it from its
     // current, destination-relative offset.  The value carried across a
     // transfer is therefore the difference between the destination and
-    // source bases, rather than the source's absolute offset.  For example,
+  // source bases, rather than the source's absolute offset.  For example,
     // copying a field at byte 8 into a field at byte 24 needs a correction of
     // 16, so the caller turns 24 into 8.
     int64_t OffsetCorrection = DstOff - SrcOff;

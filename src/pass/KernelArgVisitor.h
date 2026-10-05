@@ -384,31 +384,48 @@ public:
     }
 
     if (Clobber.Kind == MemorySSAClobberKind::Definition) {
-      auto *Store = dyn_cast_or_null<StoreInst>(Clobber.Instruction);
-      bool IsExactStore = Store && !Store->isAtomic() &&
-                          Store->getValueOperand()->getType() == LI.getType() &&
-                          isSamePointerAddress(DL, Store->getPointerOperand(),
-                                               LI.getPointerOperand());
-      if (IsExactStore) {
-        DEBUG(Logger::logs("proteus-pass")
-              << "[Lambda arg analysis]: MemorySSA selected exact store "
-              << *Store << "\n");
-        WorkList.push_back({Store->getValueOperand(), Store});
+      int64_t AddressOffset = 0;
+      Value *AddressBase = GetPointerBaseWithConstantOffset(
+          LI.getPointerOperand(), AddressOffset, DL);
+      if (!AddressBase) {
+        AnalysisFailed = true;
+        AnalysisSuccess = false;
         return;
       }
 
+      // MemorySSA tells us which memory definition reaches this load, but a
+      // definition may be a store, memory transfer, or a call that writes the
+      // tracked storage.  Let LambdaInstUseVisitor interpret that definition
+      // and cross any required call boundary.  Start at the underlying object
+      // so the forward use walk can see every pointer expression used to
+      // reach the selected write.
+      int64_t TargetOffset = Offset + AddressOffset;
       DEBUG({
         auto &OS = Logger::logs("proteus-pass");
-        OS << "[Lambda arg analysis]: MemorySSA selected an unsupported "
-              "definition for load "
-           << LI << ": ";
+        OS << "[Lambda arg analysis]: Resolving load definition from base "
+           << *AddressBase << " at byte offset " << TargetOffset
+           << "; MemorySSA selected ";
         if (Clobber.Instruction)
           OS << *Clobber.Instruction;
         else
           OS << "<no instruction>";
         OS << "\n";
       });
-    } else if (Clobber.Kind == MemorySSAClobberKind::Phi) {
+
+      auto Res = getDominatingUse(DL, AddressBase, &LI, TargetOffset,
+                                  LambdaCB, ClobberOracle);
+      if (!Res) {
+        AnalysisFailed = true;
+        AnalysisSuccess = false;
+        return;
+      }
+
+      WorkList.push_back({Res->DominatingWrite, &LI});
+      Offset = TargetOffset - Res->Offset;
+      return;
+    }
+
+    if (Clobber.Kind == MemorySSAClobberKind::Phi) {
       DEBUG(Logger::logs("proteus-pass")
             << "[Lambda arg analysis]: MemorySSA selected a MemoryPhi for "
             << LI << "\n");
@@ -418,10 +435,7 @@ public:
             << LI << "\n");
     }
 
-    // The oracle selected a potentially clobbering access that this first,
-    // deliberately narrow implementation cannot interpret. Never fall back
-    // to the use visitor here: doing so could skip the selected write and
-    // recover a stale initializer.
+    // Unknown and MemoryPhi results cannot identify one reaching value.
     AnalysisFailed = true;
     AnalysisSuccess = false;
   }
@@ -595,15 +609,28 @@ public:
       return;
     }
 
-    for (User *U : F->users()) {
-      auto *CB = dyn_cast<CallBase>(U);
-      if (!CB)
-        continue;
+    SmallVector<CallBase *, 2> CallSites;
+    for (User *U : F->users())
+      if (auto *CB = dyn_cast<CallBase>(U); CB && ArgNum < CB->arg_size())
+        CallSites.push_back(CB);
+
+    // This visitor does not carry call context. Following more than one
+    // caller would let worklist order choose which actual argument supplies
+    // the lambda, so reject that shape conservatively.
+    if (CallSites.size() != 1) {
       DEBUG(Logger::logs("proteus-pass")
-            << "Analysis crossed interprocedural boundary at "
-            << *CB->getArgOperand(ArgNum) << "\n");
-      WorkList.push_back({CB->getArgOperand(ArgNum), CB});
+            << "[Lambda arg analysis]: Expected one caller for argument "
+            << A << "; found " << CallSites.size() << "\n");
+      AnalysisFailed = true;
+      AnalysisSuccess = false;
+      return;
     }
+
+    CallBase *CB = CallSites.front();
+    DEBUG(Logger::logs("proteus-pass")
+          << "Analysis crossed interprocedural boundary at "
+          << *CB->getArgOperand(ArgNum) << "\n");
+    WorkList.push_back({CB->getArgOperand(ArgNum), CB});
   }
 
   void visitInstruction(Instruction &I) {
