@@ -275,16 +275,18 @@ CREATE_GPU_TEST(lambda_call_shapes lambda_call_shapes.cpp)
 CREATE_GPU_TEST(lambda_memory_intrinsic_shapes lambda_memory_intrinsic_shapes.cpp)
 CREATE_GPU_TEST(lambda_pointer_field_load lambda_pointer_field_load.cpp)
 CREATE_GPU_TEST(lambda_clobber_shapes lambda_clobber_shapes.cpp)
-CREATE_GPU_TEST(lambda_clobber_adversarial lambda_clobber_adversarial.cpp)
-CREATE_GPU_TEST(lambda_uncaptured_call_clobber
-                lambda_uncaptured_call_clobber.cpp)
+CREATE_GPU_TEST(lambda_portability_aggregate_shapes
+                lambda_portability_aggregate_shapes.cpp)
+CREATE_GPU_TEST(lambda_slot_selection_supported
+                lambda_slot_selection_supported.cpp)
+CREATE_GPU_TEST(lambda_unsupported_memory_shapes
+                lambda_unsupported_memory_shapes.cpp)
+CREATE_GPU_TEST(lambda_slot_selection_unsupported
+                lambda_slot_selection_unsupported.cpp)
 CREATE_GPU_TEST(lambda_multiple_callers lambda_multiple_callers.cpp)
 CREATE_GPU_TEST(lambda_unknown_clobber lambda_unknown_clobber.cpp)
 CREATE_GPU_TEST_RDC(lambda_declaration_clobber lambda_declaration_clobber.cpp
                     lambda_unknown_clobber_decl.cpp)
-CREATE_GPU_TEST(lambda_inst_visitor_adversarial lambda_inst_visitor_adversarial.cpp)
-CREATE_GPU_TEST(lambda_inst_visitor_call_context
-                lambda_inst_visitor_call_context.cpp)
 CREATE_GPU_TEST(lambda_inst_visitor_call_clobber lambda_inst_visitor_call_clobber.cpp)
 CREATE_PROTEUS_GPU_SHARED_LIBRARY(lambda_factory_so_tu1 lambda_factory_tu1.cpp)
 CREATE_PROTEUS_GPU_SHARED_LIBRARY(lambda_factory_so_tu2 lambda_factory_tu2.cpp)

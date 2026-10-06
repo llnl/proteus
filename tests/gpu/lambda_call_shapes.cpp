@@ -147,7 +147,8 @@ int main() {
 // CHECK: [KernelConfig] ID:{{.*}}kernelMultipleReturns
 // CHECK-NOT: [LambdaSpec]
 // CHECK: multiple returns 163
-// CHECK: [LambdaSpec] Replacing slot 0 with i32 173
+// CHECK: [KernelConfig] ID:{{.*}}kernelSameReturns
+// CHECK-NOT: [LambdaSpec]
 // CHECK: same returns 173
 // CHECK: [KernelConfig] ID:{{.*}}kernelIndirectCall
 // CHECK-NOT: [LambdaSpec]
