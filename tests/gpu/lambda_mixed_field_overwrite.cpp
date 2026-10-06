@@ -13,8 +13,6 @@
 #include "gpu_common.h"
 #include <proteus/JitInterface.h>
 
-
-
 template <typename F>
 __device__ __attribute__((noinline, optnone)) static void
 overwriteThirdCapture(F *Body, int Replacement) {
