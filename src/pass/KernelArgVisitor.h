@@ -399,7 +399,10 @@ public:
       // and cross any required call boundary.  Start at the underlying object
       // so the forward use walk can see every pointer expression used to
       // reach the selected write.
-      int64_t TargetOffset = Offset + AddressOffset;
+      int64_t OriginalOffset = Offset;
+      int64_t TargetOffset = AddressOffset;
+      if (!LI.getType()->isPointerTy())
+        TargetOffset += OriginalOffset;
       DEBUG({
         auto &OS = Logger::logs("proteus-pass");
         OS << "[Lambda arg analysis]: Resolving load definition from base "
@@ -412,16 +415,16 @@ public:
         OS << "\n";
       });
 
-      auto Res = getDominatingUse(DL, AddressBase, &LI, TargetOffset,
-                                  LambdaCB, ClobberOracle);
+      auto Res = getDominatingUse(DL, AddressBase, &LI, TargetOffset, LambdaCB,
+                                  ClobberOracle);
       if (!Res) {
         AnalysisFailed = true;
         AnalysisSuccess = false;
         return;
       }
 
-      WorkList.push_back({Res->DominatingWrite, &LI});
-      Offset = TargetOffset - Res->Offset;
+      WorkList.push_back({Res->DominatingWrite, Res->WriteBoundary});
+      Offset = OriginalOffset + AddressOffset - Res->Offset;
       return;
     }
 
@@ -448,7 +451,7 @@ public:
       return;
     }
     Offset += StepOffset.getSExtValue();
-    WorkList.push_back({GEP.getPointerOperand(), &GEP});
+    WorkList.push_back({GEP.getPointerOperand(), MemoryAnalysisPtrUse});
   }
 
   void visitExtractValueInst(ExtractValueInst &EVI) {
@@ -499,7 +502,7 @@ public:
     if (!Res)
       return;
 
-    WorkList.push_back({Res->DominatingWrite, &Alloca});
+    WorkList.push_back({Res->DominatingWrite, Res->WriteBoundary});
     // Res->Offset converts the current allocation-relative byte offset into
     // the coordinate system of DominatingWrite. For a field store it removes
     // the field displacement; for a memory transfer it translates destination
@@ -512,20 +515,27 @@ public:
                                 ClobberOracle);
     if (!Res)
       return;
-    WorkList.push_back({Res->DominatingWrite, &BC});
+    WorkList.push_back({Res->DominatingWrite, Res->WriteBoundary});
     // Res->Offset converts the current cast-relative byte offset into the
     // coordinate system of DominatingWrite.
     Offset -= Res->Offset;
   }
 
   void visitAddrSpaceCastInst(AddrSpaceCastInst &ASC) {
-    WorkList.push_back({ASC.getPointerOperand(), &ASC});
+    // An address-space cast of an SSA argument does not load through the
+    // pointer. Continue along the direct use-def edge; there is no memory
+    // definition for MemorySSA to resolve.
+    if (isa<Argument>(ASC.getPointerOperand())) {
+      WorkList.push_back({ASC.getPointerOperand(), &ASC});
+      return;
+    }
+
     auto Res = getDominatingUse(DL, &ASC, MemoryAnalysisPtrUse, Offset,
                                 LambdaCB, ClobberOracle);
     if (!Res)
       return;
 
-    WorkList.push_back({Res->DominatingWrite, &ASC});
+    WorkList.push_back({Res->DominatingWrite, Res->WriteBoundary});
     // Res->Offset converts the current cast-relative byte offset into the
     // coordinate system of DominatingWrite.
     Offset -= Res->Offset;
@@ -619,8 +629,8 @@ public:
     // the lambda, so reject that shape conservatively.
     if (CallSites.size() != 1) {
       DEBUG(Logger::logs("proteus-pass")
-            << "[Lambda arg analysis]: Expected one caller for argument "
-            << A << "; found " << CallSites.size() << "\n");
+            << "[Lambda arg analysis]: Expected one caller for argument " << A
+            << "; found " << CallSites.size() << "\n");
       AnalysisFailed = true;
       AnalysisSuccess = false;
       return;
