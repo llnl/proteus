@@ -9,6 +9,7 @@
 #include <llvm/Analysis/MemoryLocation.h>
 #include <llvm/Analysis/MemorySSA.h>
 #include <llvm/Analysis/TargetLibraryInfo.h>
+#include <llvm/Analysis/TypeBasedAliasAnalysis.h>
 #include <llvm/Analysis/ValueTracking.h>
 #include <llvm/IR/CFG.h>
 #include <llvm/IR/Dominators.h>
@@ -46,6 +47,7 @@ class FunctionMemorySSAState {
   TargetLibraryInfo TLI;
   AAResults AA;
   BasicAAResult BAA;
+  TypeBasedAAResult TBAA;
   std::unique_ptr<MemorySSA> MSSA;
 
 public:
@@ -54,6 +56,7 @@ public:
         TLI(TLII, &F), AA(TLI),
         BAA(F.getParent()->getDataLayout(), F, TLI, AC, &DT) {
     AA.addAAResult(BAA);
+    AA.addAAResult(TBAA);
     MSSA = std::make_unique<MemorySSA>(F, &AA, &DT);
   }
 
@@ -173,8 +176,8 @@ public:
       auto *CB = dyn_cast_or_null<CallBase>(Def->getMemoryInst());
       if (!CB || !State.callCannotModifyTrackedLocal(*CB, Location))
         break;
-      Clobber = Walker->getClobberingMemoryAccess(Def->getDefiningAccess(),
-                                                  Location);
+      Clobber =
+          Walker->getClobberingMemoryAccess(Def->getDefiningAccess(), Location);
     }
     if (!Clobber)
       return {};

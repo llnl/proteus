@@ -406,7 +406,8 @@ int main() {
 // clang-format off
 // CHECK: [LambdaSpec] Replacing slot 0 with i32 233
 // CHECK: predecessor clobber 233
-// CHECK: [LambdaSpec] Replacing slot 0 with i32 239
+// CHECK: [KernelConfig] ID:{{.*}}kernelSameBranchOverwrite
+// CHECK-NOT: [LambdaSpec]
 // CHECK: same branch clobber 239
 // CHECK: [KernelConfig] ID:{{.*}}kernelDifferentBranchOverwrite
 // CHECK-NOT: [LambdaSpec]
@@ -415,14 +416,16 @@ int main() {
 // CHECK: nonoverlap clobber 263
 // CHECK: [LambdaSpec] Replacing slot 0 with i32 277
 // CHECK: call clobber 277
-// CHECK: [LambdaSpec] Replacing slot 0 with i32 283
+// CHECK: [KernelConfig] ID:{{.*}}kernelSameLoopOverwrite
+// CHECK-NOT: [LambdaSpec]
 // CHECK: same loop clobber 283
 // CHECK: [KernelConfig] ID:{{.*}}kernelAmbiguousLoopOverwrite
 // CHECK-NOT: [LambdaSpec]
 // CHECK: ambiguous loop clobber 307
 // CHECK: [LambdaSpec] Replacing slot 0 with i32 313
 // CHECK: nested call clobber 313
-// CHECK: [LambdaSpec] Replacing slot 0 with i32 331
+// CHECK: [KernelConfig] ID:{{.*}}kernelSameCallBranchOverwrite
+// CHECK-NOT: [LambdaSpec]
 // CHECK: same call branch clobber 331
 // CHECK: [KernelConfig] ID:{{.*}}kernelDifferentCallBranchOverwrite
 // CHECK-NOT: [LambdaSpec]
