@@ -99,6 +99,214 @@ bool isMutablePointer(clang::QualType Type) {
   return Type->isPointerType() && !Type->getPointeeType().isConstQualified();
 }
 
+const clang::VarDecl *getDirectReferencedVariable(const clang::Expr *Expr) {
+  Expr = ignoreTransparentExprs(Expr);
+  const auto *Reference = llvm::dyn_cast_or_null<clang::DeclRefExpr>(Expr);
+  return Reference ? llvm::dyn_cast<clang::VarDecl>(Reference->getDecl())
+                   : nullptr;
+}
+
+const clang::VarDecl *getAddressedVariable(const clang::Expr *Expr) {
+  Expr = ignoreTransparentExprs(Expr);
+  const auto *Operator = llvm::dyn_cast_or_null<clang::UnaryOperator>(Expr);
+  if (!Operator || Operator->getOpcode() != clang::UO_AddrOf)
+    return nullptr;
+  return getDirectReferencedVariable(Operator->getSubExpr());
+}
+
+bool isPointerToLambdaFunctorWrapper(clang::QualType Type,
+                                     unsigned MinimumDepth = 1) {
+  unsigned Depth = 0;
+  Type = Type.getNonReferenceType();
+  while (Type->isPointerType()) {
+    ++Depth;
+    Type = Type->getPointeeType();
+  }
+  return Depth >= MinimumDepth &&
+         isLambdaFunctorWrapper(getCanonicalRecord(Type));
+}
+
+class VariableReferenceVisitor
+    : public clang::RecursiveASTVisitor<VariableReferenceVisitor> {
+public:
+  explicit VariableReferenceVisitor(const clang::VarDecl *Target)
+      : Target(Target->getCanonicalDecl()) {}
+
+  bool VisitDeclRefExpr(clang::DeclRefExpr *Reference) {
+    const auto *Variable = llvm::dyn_cast<clang::VarDecl>(Reference->getDecl());
+    Found |= Variable && Variable->getCanonicalDecl() == Target;
+    return !Found;
+  }
+
+  bool found() const { return Found; }
+
+private:
+  const clang::VarDecl *Target;
+  bool Found = false;
+};
+
+bool referencesVariable(const clang::Stmt *Statement,
+                        const clang::VarDecl *Variable) {
+  VariableReferenceVisitor Visitor(Variable);
+  Visitor.TraverseStmt(const_cast<clang::Stmt *>(Statement));
+  return Visitor.found();
+}
+
+class GlobalReferenceVisitor
+    : public clang::RecursiveASTVisitor<GlobalReferenceVisitor> {
+public:
+  bool VisitDeclRefExpr(clang::DeclRefExpr *Reference) {
+    const auto *Variable = llvm::dyn_cast<clang::VarDecl>(Reference->getDecl());
+    Found |= Variable && Variable->hasGlobalStorage() &&
+             !llvm::isa<clang::ParmVarDecl>(Variable);
+    return !Found;
+  }
+
+  bool found() const { return Found; }
+
+private:
+  bool Found = false;
+};
+
+bool referencesGlobalStorage(const clang::Stmt *Statement) {
+  GlobalReferenceVisitor Visitor;
+  Visitor.TraverseStmt(const_cast<clang::Stmt *>(Statement));
+  return Visitor.found();
+}
+
+struct ParameterEffects {
+  bool Written = false;
+  bool Escaped = false;
+};
+
+class ParameterEffectVisitor
+    : public clang::RecursiveASTVisitor<ParameterEffectVisitor> {
+public:
+  ParameterEffectVisitor(const clang::ParmVarDecl *Parameter,
+                         ParameterEffects &Effects)
+      : Parameter(Parameter), Effects(Effects) {}
+
+  bool VisitBinaryOperator(clang::BinaryOperator *Operator) {
+    if (!Operator->isAssignmentOp())
+      return true;
+    if (referencesVariable(Operator->getLHS(), Parameter))
+      Effects.Written = true;
+    if (referencesVariable(Operator->getRHS(), Parameter) &&
+        referencesGlobalStorage(Operator->getLHS()))
+      Effects.Escaped = true;
+    return true;
+  }
+
+  bool VisitUnaryOperator(clang::UnaryOperator *Operator) {
+    if (Operator->isIncrementDecrementOp() &&
+        referencesVariable(Operator->getSubExpr(), Parameter))
+      Effects.Written = true;
+    return true;
+  }
+
+private:
+  const clang::ParmVarDecl *Parameter;
+  ParameterEffects &Effects;
+};
+
+ParameterEffects getParameterEffects(const clang::FunctionDecl *Function,
+                                     unsigned ParameterIndex) {
+  ParameterEffects Effects;
+  if (!Function || ParameterIndex >= Function->getNumParams())
+    return Effects;
+  if (const clang::FunctionDecl *Definition = Function->getDefinition()) {
+    ParameterEffectVisitor Visitor(Definition->getParamDecl(ParameterIndex),
+                                   Effects);
+    Visitor.TraverseStmt(Definition->getBody());
+  }
+  return Effects;
+}
+
+enum class StorageHazard : unsigned {
+  MultipleCallWrites,
+  TypeErasedSlot,
+  EscapedSlot,
+  MergedSlot,
+  AmbiguousField,
+};
+
+class FunctionStorageHazardVisitor
+    : public clang::RecursiveASTVisitor<FunctionStorageHazardVisitor> {
+public:
+  FunctionStorageHazardVisitor(clang::DiagnosticsEngine &Diagnostics,
+                               unsigned MultipleCallWrites,
+                               unsigned TypeErasedSlot, unsigned EscapedSlot,
+                               llvm::DenseSet<uint64_t> &Reported)
+      : Diagnostics(Diagnostics), MultipleCallWrites(MultipleCallWrites),
+        TypeErasedSlot(TypeErasedSlot), EscapedSlot(EscapedSlot),
+        Reported(Reported) {}
+
+  bool VisitCXXReinterpretCastExpr(clang::CXXReinterpretCastExpr *Cast) {
+    if (isPointerToLambdaFunctorWrapper(Cast->getType(), 2))
+      report(Cast->getExprLoc(), Cast->getSourceRange(),
+             StorageHazard::TypeErasedSlot, TypeErasedSlot);
+    return true;
+  }
+
+  bool VisitCallExpr(clang::CallExpr *Call) {
+    const clang::FunctionDecl *Callee = Call->getDirectCallee();
+    if (!Callee)
+      return true;
+    const unsigned Count = std::min(Call->getNumArgs(), Callee->getNumParams());
+    for (unsigned I = 0; I < Count; ++I) {
+      const clang::VarDecl *Variable = getAddressedVariable(Call->getArg(I));
+      if (!Variable || !isPointerToLambdaFunctorWrapper(Variable->getType()))
+        continue;
+
+      ParameterEffects Effects = getParameterEffects(Callee, I);
+      if (Effects.Written && ++CallWrites[Variable->getCanonicalDecl()] == 2)
+        report(Call->getExprLoc(), Call->getSourceRange(),
+               StorageHazard::MultipleCallWrites, MultipleCallWrites);
+      if (Effects.Escaped)
+        report(Call->getExprLoc(), Call->getSourceRange(),
+               StorageHazard::EscapedSlot, EscapedSlot);
+    }
+    return true;
+  }
+
+private:
+  void report(clang::SourceLocation Location, clang::SourceRange Range,
+              StorageHazard Hazard, unsigned Diagnostic) {
+    const uint64_t Key =
+        (static_cast<uint64_t>(Hazard) << 32) | Location.getRawEncoding();
+    if (Reported.insert(Key).second)
+      Diagnostics.Report(Location, Diagnostic) << Range;
+  }
+
+  clang::DiagnosticsEngine &Diagnostics;
+  unsigned MultipleCallWrites;
+  unsigned TypeErasedSlot;
+  unsigned EscapedSlot;
+  llvm::DenseSet<uint64_t> &Reported;
+  llvm::DenseMap<const clang::VarDecl *, unsigned> CallWrites;
+};
+
+class ReturnStorageHazardVisitor
+    : public clang::RecursiveASTVisitor<ReturnStorageHazardVisitor> {
+public:
+  bool VisitBinaryOperator(clang::BinaryOperator *Operator) {
+    if (!Operator->isAssignmentOp())
+      return true;
+    if (const clang::VarDecl *Variable =
+            getDirectReferencedVariable(Operator->getLHS()))
+      ++Assignments[Variable->getCanonicalDecl()];
+    return true;
+  }
+
+  bool VisitReturnStmt(clang::ReturnStmt *Return) {
+    Returns.push_back(Return);
+    return true;
+  }
+
+  llvm::DenseMap<const clang::VarDecl *, unsigned> Assignments;
+  llvm::SmallVector<clang::ReturnStmt *, 4> Returns;
+};
+
 class CaptureMutationVisitor
     : public clang::RecursiveASTVisitor<CaptureMutationVisitor> {
 public:
@@ -159,6 +367,12 @@ class LambdaVisitor : public clang::RecursiveASTVisitor<LambdaVisitor> {
 public:
   bool shouldVisitTemplateInstantiations() const { return true; }
 
+  bool VisitFunctionDecl(clang::FunctionDecl *Function) {
+    if (Function->hasBody())
+      Functions.push_back(Function);
+    return true;
+  }
+
   bool VisitLambdaExpr(clang::LambdaExpr *Lambda) {
     Lambdas.push_back(Lambda);
     return true;
@@ -184,6 +398,7 @@ public:
   }
 
   llvm::SmallVector<clang::LambdaExpr *, 16> Lambdas;
+  llvm::SmallVector<clang::FunctionDecl *, 32> Functions;
   llvm::SmallVector<clang::CallExpr *, 16> JitVariableCalls;
   llvm::SmallVector<clang::CallExpr *, 16> RegisterLambdaCalls;
   llvm::DenseSet<const clang::LambdaExpr *> DirectlyRegisteredLambdas;
@@ -246,6 +461,71 @@ public:
     const unsigned MutatedCapture = Diagnostics.getCustomDiagID(
         clang::DiagnosticsEngine::Error,
         "proteus::jit_variable capture must remain read-only");
+    const unsigned MultipleCallWrites = Diagnostics.getCustomDiagID(
+        clang::DiagnosticsEngine::Error,
+        "registered lambda pointer slot cannot be overwritten by multiple "
+        "function calls");
+    const unsigned TypeErasedSlot = Diagnostics.getCustomDiagID(
+        clang::DiagnosticsEngine::Error,
+        "registered lambda pointer slots cannot be accessed through "
+        "type-erased byte offsets");
+    const unsigned EscapedSlot = Diagnostics.getCustomDiagID(
+        clang::DiagnosticsEngine::Error,
+        "registered lambda pointer slot cannot escape to global storage");
+    const unsigned MergedSlot = Diagnostics.getCustomDiagID(
+        clang::DiagnosticsEngine::Error,
+        "registered lambda pointer slot cannot be selected from multiple "
+        "control-flow assignments");
+    const unsigned AmbiguousField = Diagnostics.getCustomDiagID(
+        clang::DiagnosticsEngine::Error,
+        "registered lambda pointer slot cannot be selected from different "
+        "aggregate fields at runtime");
+
+    llvm::DenseSet<uint64_t> ReportedStorageHazards;
+    for (clang::FunctionDecl *Function : Visitor.Functions) {
+      FunctionStorageHazardVisitor StorageVisitor(
+          Diagnostics, MultipleCallWrites, TypeErasedSlot, EscapedSlot,
+          ReportedStorageHazards);
+      StorageVisitor.TraverseStmt(Function->getBody());
+
+      if (!isPointerToLambdaFunctorWrapper(Function->getReturnType(), 2))
+        continue;
+
+      ReturnStorageHazardVisitor ReturnVisitor;
+      ReturnVisitor.TraverseStmt(Function->getBody());
+      llvm::DenseSet<const clang::ValueDecl *> ReturnedMembers;
+      for (clang::ReturnStmt *Return : ReturnVisitor.Returns) {
+        const clang::Expr *Returned = Return->getRetValue();
+        if (!Returned)
+          continue;
+        if (const clang::VarDecl *Variable =
+                getDirectReferencedVariable(Returned)) {
+          if (ReturnVisitor.Assignments.lookup(Variable->getCanonicalDecl()) >=
+              2)
+            reportStorageHazard(Diagnostics, ReportedStorageHazards,
+                                Return->getReturnLoc(),
+                                Return->getSourceRange(),
+                                StorageHazard::MergedSlot, MergedSlot);
+        }
+
+        Returned = ignoreTransparentExprs(Returned);
+        if (const auto *Address =
+                llvm::dyn_cast_or_null<clang::UnaryOperator>(Returned);
+            Address && Address->getOpcode() == clang::UO_AddrOf)
+          Returned = ignoreTransparentExprs(Address->getSubExpr());
+        const auto *Member =
+            llvm::dyn_cast_or_null<clang::MemberExpr>(Returned);
+        if (!Member)
+          continue;
+        const clang::ValueDecl *MemberDeclaration = Member->getMemberDecl();
+        if (!ReturnedMembers.empty() &&
+            !ReturnedMembers.contains(MemberDeclaration))
+          reportStorageHazard(Diagnostics, ReportedStorageHazards,
+                              Return->getReturnLoc(), Return->getSourceRange(),
+                              StorageHazard::AmbiguousField, AmbiguousField);
+        ReturnedMembers.insert(MemberDeclaration);
+      }
+    }
 
     for (const clang::CallExpr *Call : Visitor.RegisterLambdaCalls) {
       const clang::Expr *Argument = Call->getArg(0);
@@ -299,6 +579,17 @@ public:
   }
 
 private:
+  static void reportStorageHazard(clang::DiagnosticsEngine &Diagnostics,
+                                  llvm::DenseSet<uint64_t> &Reported,
+                                  clang::SourceLocation Location,
+                                  clang::SourceRange Range,
+                                  StorageHazard Hazard, unsigned Diagnostic) {
+    const uint64_t Key =
+        (static_cast<uint64_t>(Hazard) << 32) | Location.getRawEncoding();
+    if (Reported.insert(Key).second)
+      Diagnostics.Report(Location, Diagnostic) << Range;
+  }
+
   static bool isSupportedRuntimeConstantType(clang::QualType Type,
                                              clang::ASTContext &Context) {
     if (Type->isPointerType() || Type->isBooleanType() ||
