@@ -12,4 +12,4 @@ unrolling, constant propagation, and control-flow simplification that go beyond
 what static compilers can achieve.
 
 This site provides the user guide and  developers' manual for
-[Proteus](https://github.com/Olympus-HPC/proteus).
+[Proteus](https://github.com/LLNL/proteus).

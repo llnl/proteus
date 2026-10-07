@@ -5,6 +5,10 @@
 # SPDX-License-Identifier: (MIT)
 ###############################################################################
 
+# Hubcast names each child pipeline's GitHub check after the pipeline name.
+workflow:
+  name: "${CI_MACHINE}-${PIPELINE_KIND}"
+
 # We define the following GitLab pipeline variables:
 variables:
 # In some pipelines we create only one allocation shared among jobs in
@@ -60,9 +64,10 @@ variables:
   variables:
     JOB_TEMPLATE_CANNOT_BE_EMPTY: "True"
 
+# Remove only this job's clone; CI_BUILDS_DIR is shared with concurrent jobs.
 .remove-builds-dir:
   after_script:
-    - rm -rf ${CI_BUILDS_DIR}
+    - rm -rf ${CI_PROJECT_DIR}
 
 .clean-flux-allocation:
   after_script:

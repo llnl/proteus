@@ -4,7 +4,7 @@
 
 Add this repository:
 ```bash
-git clone https://github.com/Olympus-HPC/proteus.git
+git clone https://github.com/LLNL/proteus.git
 spack repo add proteus/packaging/spack/spack_repo/proteus
 ```
 

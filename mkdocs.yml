@@ -1,5 +1,5 @@
 site_name: Proteus
-site_url: https://olympus-hpc.github.io/proteus/
+site_url: https://software.llnl.gov/proteus/
 
 nav:
   - Home: index.md
@@ -26,7 +26,7 @@ nav:
     - Detecting HIP Assets: dev/runtime-hip-toolchain.md
     - Creating a PR: dev/pr.md
     - API Reference: dev/api.md
-repo_url: https://github.com/Olympus-HPC/proteus
+repo_url: https://github.com/LLNL/proteus
 theme:
   name: material
   features:

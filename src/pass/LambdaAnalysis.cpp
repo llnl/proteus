@@ -420,7 +420,7 @@ private:
     Function *F = CB->getCalledFunction();
     constexpr const char *ErrorMsg =
         "Error in Proteus JitInterface API.  Please report this bug at "
-        "https://github.com/Olympus-HPC/proteus.";
+        "https://github.com/LLNL/proteus.";
     if (!hasU64Metadata(F, "proteus.register_call_impl")) {
       return nullptr;
     }
@@ -456,7 +456,7 @@ private:
     SmallVector<Function *> RegisterFunctions;
     constexpr const char *ErrorMsg =
         "Error in Proteus JitInterface API.  Please report this bug at "
-        "https://github.com/Olympus-HPC/proteus.";
+        "https://github.com/LLNL/proteus.";
     findAnnotatedFunctions(M, "proteus.register_call", RegisterFunctions);
     if (RegisterFunctions.empty())
       DEBUG(Logger::logs("lambda-pass") << "No register func CBs found\n");
@@ -684,7 +684,7 @@ private:
     constexpr const char *ErrorMsg =
         "Error in LambdaAnalysis pass caused by unexpected Clang LLVM IR "
         "within LambdaFunctorWrapper.   Please report this bug at "
-        "https://github.com/Olympus-HPC/proteus.\n";
+        "https://github.com/LLNL/proteus.\n";
     if (LambdaStorageTypeToJitIndices.empty())
       return;
     DEBUG(Logger::logs("lambda-pass")
@@ -720,7 +720,7 @@ private:
       constexpr const char *InsertionErrorMsg =
           "Error in LambdaAnalysis pass caused by unexpected jit_variable "
           "analysis result.   Please report this bug at "
-          "https://github.com/Olympus-HPC/proteus.\n";
+          "https://github.com/LLNL/proteus.\n";
       IRBuilder<> Builder(LambdaCall);
       Value *LambdaStoragePtr =
           Builder.CreateStructGEP(FunctorStructType, Function->getArg(0), 0);

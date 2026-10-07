@@ -27,7 +27,7 @@ using JitDeviceImplT = proteus::JitEngineDeviceHIP;
 #endif
 
 // The ABI of __proteus_launch_kernel mirrors device-specific launchKernel and
-// depends on the host arch: https://github.com/Olympus-HPC/proteus/issues/47.
+// depends on the host arch: https://github.com/LLNL/proteus/issues/47.
 extern "C" proteus::DeviceTraits<JitDeviceImplT>::DeviceError_t
 __proteus_launch_kernel(void *Kernel, dim3 GridDim, dim3 BlockDim,
                         void **KernelArgs, uint64_t ShmemSize, void *Stream);

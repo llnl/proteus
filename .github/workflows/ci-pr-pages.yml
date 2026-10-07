@@ -115,19 +115,19 @@ jobs:
               "draft": false,
               "prerelease": false,
               "published_at": "2026-06-30T12:00:00Z",
-              "html_url": "https://github.com/Olympus-HPC/proteus/releases/tag/v0.2.0",
+              "html_url": "https://github.com/LLNL/proteus/releases/tag/v0.2.0",
               "assets": [
                 {
                   "name": "proteus_python_backend_host_llvm22-0.2.0-cp312-cp312-manylinux_2_28_x86_64.whl",
-                  "browser_download_url": "https://github.com/Olympus-HPC/proteus/releases/download/v0.2.0/proteus_python_backend_host_llvm22-0.2.0-cp312-cp312-manylinux_2_28_x86_64.whl"
+                  "browser_download_url": "https://github.com/LLNL/proteus/releases/download/v0.2.0/proteus_python_backend_host_llvm22-0.2.0-cp312-cp312-manylinux_2_28_x86_64.whl"
                 },
                 {
                   "name": "proteus_python_backend_cuda12_llvm22-0.2.0-cp312-cp312-manylinux_2_28_x86_64.whl",
-                  "browser_download_url": "https://github.com/Olympus-HPC/proteus/releases/download/v0.2.0/proteus_python_backend_cuda12_llvm22-0.2.0-cp312-cp312-manylinux_2_28_x86_64.whl"
+                  "browser_download_url": "https://github.com/LLNL/proteus/releases/download/v0.2.0/proteus_python_backend_cuda12_llvm22-0.2.0-cp312-cp312-manylinux_2_28_x86_64.whl"
                 },
                 {
                   "name": "proteus_python_backend_rocm72-0.2.0-cp312-cp312-manylinux_2_28_x86_64.whl",
-                  "browser_download_url": "https://github.com/Olympus-HPC/proteus/releases/download/v0.2.0/proteus_python_backend_rocm72-0.2.0-cp312-cp312-manylinux_2_28_x86_64.whl"
+                  "browser_download_url": "https://github.com/LLNL/proteus/releases/download/v0.2.0/proteus_python_backend_rocm72-0.2.0-cp312-cp312-manylinux_2_28_x86_64.whl"
                 }
               ]
             },
@@ -136,11 +136,11 @@ jobs:
               "draft": false,
               "prerelease": true,
               "published_at": "2026-06-29T12:00:00Z",
-              "html_url": "https://github.com/Olympus-HPC/proteus/releases/tag/v0.3.0rc1",
+              "html_url": "https://github.com/LLNL/proteus/releases/tag/v0.3.0rc1",
               "assets": [
                 {
                   "name": "proteus_python_backend_host_llvm22-0.3.0rc1-cp312-cp312-manylinux_2_28_x86_64.whl",
-                  "browser_download_url": "https://github.com/Olympus-HPC/proteus/releases/download/v0.3.0rc1/proteus_python_backend_host_llvm22-0.3.0rc1-cp312-cp312-manylinux_2_28_x86_64.whl"
+                  "browser_download_url": "https://github.com/LLNL/proteus/releases/download/v0.3.0rc1/proteus_python_backend_host_llvm22-0.3.0rc1-cp312-cp312-manylinux_2_28_x86_64.whl"
                 }
               ]
             }

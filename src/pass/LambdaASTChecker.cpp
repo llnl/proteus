@@ -54,6 +54,14 @@ const clang::Expr *ignoreTransparentExprs(const clang::Expr *Expr) {
   return Expr;
 }
 
+const clang::Expr *ignoreCaptureInitWrappers(const clang::Expr *Expr) {
+  Expr = ignoreTransparentExprs(Expr);
+  if (const auto *List = llvm::dyn_cast_or_null<clang::InitListExpr>(Expr);
+      List && List->getNumInits() == 1)
+    return ignoreTransparentExprs(List->getInit(0));
+  return Expr;
+}
+
 const clang::CXXRecordDecl *getCanonicalRecord(clang::QualType Type) {
   Type = Type.getNonReferenceType().getUnqualifiedType();
   if (const auto *Record = Type->getAsCXXRecordDecl())
@@ -87,6 +95,17 @@ bool takesAddressOfTarget(
   const auto *Operator = llvm::dyn_cast_or_null<clang::UnaryOperator>(Expr);
   return Operator && Operator->getOpcode() == clang::UO_AddrOf &&
          directlyReferencesTarget(Operator->getSubExpr(), Targets);
+}
+
+bool directlyWritesTarget(
+    const clang::Expr *Expr,
+    const llvm::DenseSet<const clang::VarDecl *> &Targets) {
+  Expr = ignoreTransparentExprs(Expr);
+  if (directlyReferencesTarget(Expr, Targets))
+    return true;
+  const auto *Dereference = llvm::dyn_cast_or_null<clang::UnaryOperator>(Expr);
+  return Dereference && Dereference->getOpcode() == clang::UO_Deref &&
+         takesAddressOfTarget(Dereference->getSubExpr(), Targets);
 }
 
 bool isMutableReference(clang::QualType Type) {
@@ -306,7 +325,6 @@ public:
   llvm::DenseMap<const clang::VarDecl *, unsigned> Assignments;
   llvm::SmallVector<clang::ReturnStmt *, 4> Returns;
 };
-
 class CaptureMutationVisitor
     : public clang::RecursiveASTVisitor<CaptureMutationVisitor> {
 public:
@@ -315,8 +333,11 @@ public:
       : Targets(Targets), Mutations(Mutations) {}
 
   bool VisitBinaryOperator(clang::BinaryOperator *Operator) {
-    if (Operator->isAssignmentOp() &&
-        directlyReferencesTarget(Operator->getLHS(), Targets))
+    if (!Operator->isAssignmentOp())
+      return true;
+    if (directlyWritesTarget(Operator->getLHS(), Targets) ||
+        (isMutablePointer(Operator->getLHS()->getType()) &&
+         takesAddressOfTarget(Operator->getRHS(), Targets)))
       Mutations.push_back(Operator->getSourceRange());
     return true;
   }
@@ -345,10 +366,36 @@ public:
     const clang::FunctionDecl *Callee = Call->getDirectCallee();
     if (!Callee)
       return true;
-    const unsigned Count = std::min(Call->getNumArgs(), Callee->getNumParams());
+    // Member operator calls pass the object as argument 0, ahead of the
+    // parameters.
+    const auto *Method = llvm::dyn_cast<clang::CXXMethodDecl>(Callee);
+    const unsigned FirstArgument =
+        llvm::isa<clang::CXXOperatorCallExpr>(Call) && Method &&
+                Method->isImplicitObjectMemberFunction()
+            ? 1
+            : 0;
+    const unsigned Count =
+        std::min(Call->getNumArgs() - FirstArgument, Callee->getNumParams());
     for (unsigned I = 0; I < Count; ++I) {
-      const clang::Expr *Argument = Call->getArg(I);
+      const clang::Expr *Argument = Call->getArg(I + FirstArgument);
       clang::QualType ParameterType = Callee->getParamDecl(I)->getType();
+      if ((isMutableReference(ParameterType) &&
+           directlyReferencesTarget(Argument, Targets)) ||
+          (isMutablePointer(ParameterType) &&
+           takesAddressOfTarget(Argument, Targets)))
+        Mutations.push_back(Argument->getSourceRange());
+    }
+    return true;
+  }
+
+  bool VisitCXXConstructExpr(clang::CXXConstructExpr *ConstructorCall) {
+    const clang::CXXConstructorDecl *Constructor =
+        ConstructorCall->getConstructor();
+    const unsigned Count =
+        std::min(ConstructorCall->getNumArgs(), Constructor->getNumParams());
+    for (unsigned I = 0; I < Count; ++I) {
+      const clang::Expr *Argument = ConstructorCall->getArg(I);
+      clang::QualType ParameterType = Constructor->getParamDecl(I)->getType();
       if ((isMutableReference(ParameterType) &&
            directlyReferencesTarget(Argument, Targets)) ||
           (isMutablePointer(ParameterType) &&
@@ -366,6 +413,15 @@ private:
 class LambdaVisitor : public clang::RecursiveASTVisitor<LambdaVisitor> {
 public:
   bool shouldVisitTemplateInstantiations() const { return true; }
+
+  // Only instantiations show which closure types reach register_lambda, so
+  // template patterns are skipped.
+  bool TraverseDecl(clang::Decl *Decl) {
+    if (const auto *Context = llvm::dyn_cast_or_null<clang::DeclContext>(Decl);
+        Context && Context->isDependentContext())
+      return true;
+    return RecursiveASTVisitor::TraverseDecl(Decl);
+  }
 
   bool VisitFunctionDecl(clang::FunctionDecl *Function) {
     if (Function->hasBody())
@@ -428,7 +484,7 @@ public:
             !Capture.getCapturedVar()->isInitCapture())
           continue;
         clang::QualType CaptureType = CaptureInit->getType();
-        CaptureInit = ignoreTransparentExprs(CaptureInit);
+        CaptureInit = ignoreCaptureInitWrappers(CaptureInit);
         const auto *Call = llvm::dyn_cast_or_null<clang::CallExpr>(CaptureInit);
         if (Call && isProteusFunction(Call, "proteus::jit_variable")) {
           CaptureInitializers.try_emplace(Call, Lambda);
@@ -595,7 +651,8 @@ private:
     if (Type->isPointerType() || Type->isBooleanType() ||
         (Type->isRealFloatingType() &&
          (Type->isSpecificBuiltinType(clang::BuiltinType::Float) ||
-          Type->isSpecificBuiltinType(clang::BuiltinType::Double))))
+          Type->isSpecificBuiltinType(clang::BuiltinType::Double) ||
+          Type->isSpecificBuiltinType(clang::BuiltinType::LongDouble))))
       return true;
 
     if (!Type->isIntegralOrEnumerationType())

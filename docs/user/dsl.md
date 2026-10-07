@@ -149,5 +149,5 @@ target an AMD GPU.
 
 This example is included in the test suite:
 
-- CPU: [add_vectors_runconst.cpp](https://github.com/Olympus-HPC/proteus/blob/main/tests/frontend/cpu/add_vectors_runconst.cpp)
-- GPU: [add_vectors_runconst.cpp](https://github.com/Olympus-HPC/proteus/blob/main/tests/frontend/gpu/add_vectors_runconst.cpp)
+- CPU: [add_vectors_runconst.cpp](https://github.com/LLNL/proteus/blob/main/tests/frontend/cpu/add_vectors_runconst.cpp)
+- GPU: [add_vectors_runconst.cpp](https://github.com/LLNL/proteus/blob/main/tests/frontend/gpu/add_vectors_runconst.cpp)

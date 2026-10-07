@@ -34,8 +34,8 @@ only Python distribution published to PyPI/TestPyPI. Backend wheels are built
 from dedicated subprojects, uploaded as GitHub Release assets, and exposed
 through a static PEP 503 simple index on GitHub Pages:
 
-- release channel: `https://olympus-hpc.github.io/proteus/wheels/simple/`
-- prerelease channel: `https://olympus-hpc.github.io/proteus/wheels/test/`
+- release channel: `https://software.llnl.gov/proteus/wheels/simple/`
+- prerelease channel: `https://software.llnl.gov/proteus/wheels/test/`
 
 The backend packages are built from dedicated subprojects:
 
@@ -211,11 +211,11 @@ python -m pip install proteus-python
 Stable backend installs from the GitHub Pages simple index:
 
 ```bash
-python -m pip install --index-url https://olympus-hpc.github.io/proteus/wheels/simple/ \
+python -m pip install --index-url https://software.llnl.gov/proteus/wheels/simple/ \
   proteus-python-backend-host-llvm22
-python -m pip install --index-url https://olympus-hpc.github.io/proteus/wheels/simple/ \
+python -m pip install --index-url https://software.llnl.gov/proteus/wheels/simple/ \
   proteus-python-backend-cuda12-llvm22
-python -m pip install --index-url https://olympus-hpc.github.io/proteus/wheels/simple/ \
+python -m pip install --index-url https://software.llnl.gov/proteus/wheels/simple/ \
   proteus-python-backend-rocm72
 ```
 
@@ -228,11 +228,11 @@ python -m pip install --pre --index-url https://test.pypi.org/simple/ proteus-py
 Prerelease backend installs from the prerelease simple index:
 
 ```bash
-python -m pip install --index-url https://olympus-hpc.github.io/proteus/wheels/test/ \
+python -m pip install --index-url https://software.llnl.gov/proteus/wheels/test/ \
   proteus-python-backend-host-llvm22
-python -m pip install --index-url https://olympus-hpc.github.io/proteus/wheels/test/ \
+python -m pip install --index-url https://software.llnl.gov/proteus/wheels/test/ \
   proteus-python-backend-cuda12-llvm22
-python -m pip install --index-url https://olympus-hpc.github.io/proteus/wheels/test/ \
+python -m pip install --index-url https://software.llnl.gov/proteus/wheels/test/ \
   proteus-python-backend-rocm72
 ```
 
@@ -345,9 +345,9 @@ Validate the installed-wheel path:
 | Install | Backend | Target | Required compiler/toolchain |
 | --- | --- | --- | --- |
 | `pip install proteus-python` | shim only | Python API only | none |
-| `pip install --index-url https://olympus-hpc.github.io/proteus/wheels/simple/ proteus-python-backend-host-llvm22` | `proteus-python-backend-host-llvm22` | Host CPU | LLVM/Clang 22.x |
-| `pip install --index-url https://olympus-hpc.github.io/proteus/wheels/simple/ proteus-python-backend-cuda12-llvm22` | `proteus-python-backend-cuda12-llvm22` | Host CPU + NVIDIA CUDA GPU | LLVM/Clang 22.x, plus CUDA 12.x |
-| `pip install --index-url https://olympus-hpc.github.io/proteus/wheels/simple/ proteus-python-backend-rocm72` | `proteus-python-backend-rocm72` | Host CPU + AMD ROCm GPU | ROCm 7.2.x |
+| `pip install --index-url https://software.llnl.gov/proteus/wheels/simple/ proteus-python-backend-host-llvm22` | `proteus-python-backend-host-llvm22` | Host CPU | LLVM/Clang 22.x |
+| `pip install --index-url https://software.llnl.gov/proteus/wheels/simple/ proteus-python-backend-cuda12-llvm22` | `proteus-python-backend-cuda12-llvm22` | Host CPU + NVIDIA CUDA GPU | LLVM/Clang 22.x, plus CUDA 12.x |
+| `pip install --index-url https://software.llnl.gov/proteus/wheels/simple/ proteus-python-backend-rocm72` | `proteus-python-backend-rocm72` | Host CPU + AMD ROCm GPU | ROCm 7.2.x |
 
 ### Backend Selection
 
@@ -443,8 +443,8 @@ artifacts to TestPyPI. On full GitHub releases, it publishes only the
 Backend wheels are uploaded as GitHub Release assets and exposed through the
 GitHub Pages simple indexes:
 
-- release channel: `https://olympus-hpc.github.io/proteus/wheels/simple/`
-- prerelease channel: `https://olympus-hpc.github.io/proteus/wheels/test/`
+- release channel: `https://software.llnl.gov/proteus/wheels/simple/`
+- prerelease channel: `https://software.llnl.gov/proteus/wheels/test/`
 
 The Pages publishing model is split by ownership:
 
@@ -467,7 +467,7 @@ Trusted Publishing must be configured on both PyPI and TestPyPI for:
 
 Each publisher must trust:
 
-- repository: `Olympus-HPC/proteus`
+- repository: `LLNL/proteus`
 - workflow: `.github/workflows/ci-wheels.yml`
 - environment: `testpypi` or `pypi`
 

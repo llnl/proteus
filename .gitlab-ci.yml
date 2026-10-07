@@ -28,11 +28,8 @@
 # We define the following GitLab pipeline variables:
 variables:
 ##### LC GITLAB CONFIGURATION
-# Use an LLNL service user to run CI. This prevents from running pipelines as
-# an actual user.
-  LLNL_SERVICE_USER: "fink12"
-# Use the service user workspace. Solves permission issues, stores everything
-# at the same location whoever triggers a pipeline.
+# Keep Proteus clones out of the default ~/.jacamar-ci/builds, which other
+# projects' CI jobs share and clean up.
   CUSTOM_CI_BUILDS_DIR: "/usr/workspace/fink12/gitlab-runner-proteus"
 # Tells Gitlab to recursively update the submodules when cloning the project.
 #  GIT_SUBMODULE_STRATEGY: recursive
@@ -46,11 +43,7 @@ variables:
 ##### SHARED_CI CONFIGURATION
 # Required information about GitHub repository
   GITHUB_PROJECT_NAME: "proteus"
-  GITHUB_PROJECT_ORG: "Olympus-HPC"
-# Override the pattern describing branches that will skip the "draft PR filter
-# test".  Add protected branches here. See default value in
-# preliminary-ignore-draft-pr.yml.
-#  ALWAYS_RUN_PATTERN: ""
+  GITHUB_PROJECT_ORG: "LLNL"
 
 # We organize the build-and-test stage with sub-pipelines. Each sub-pipeline
 # corresponds to a test batch on a given machine.
@@ -128,6 +121,8 @@ meta-only:
 .build-and-test-llvm:
   stage: build-and-test
   interruptible: true
+  variables:
+    PIPELINE_KIND: build-and-test-llvm-${PROTEUS_CI_LLVM_VERSION}
   parallel:
     matrix:
       - PROTEUS_CI_LLVM_VERSION: "19.1.7"
@@ -155,6 +150,8 @@ meta-only:
 .build-and-test-rocm:
   stage: build-and-test
   interruptible: true
+  variables:
+    PIPELINE_KIND: build-and-test-rocm-${PROTEUS_CI_ROCM_VERSION}
   parallel:
     matrix:
       - PROTEUS_CI_ROCM_VERSION: "6.4.3"
@@ -181,6 +178,8 @@ meta-only:
 .test-integration:
   stage: test-integration
   interruptible: true
+  variables:
+    PIPELINE_KIND: test-integration
   trigger:
     include:
       - local: '.gitlab/custom-jobs-and-variables.yml'
@@ -195,6 +194,8 @@ meta-only:
 .test-spack:
   stage: test-spack
   interruptible: true
+  variables:
+    PIPELINE_KIND: test-spack
   trigger:
     include:
       - local: '.gitlab/custom-jobs-and-variables.yml'
@@ -209,6 +210,8 @@ meta-only:
 .run-benchmarks:
   stage: run-benchmarks
   interruptible: true
+  variables:
+    PIPELINE_KIND: run-benchmarks
   trigger:
     include:
       - local: '.gitlab/custom-jobs-and-variables.yml'
@@ -226,12 +229,5 @@ include:
   # Sets ID tokens for every job using `default:`
   - project: 'lc-templates/id_tokens'
     file: 'id_tokens.yml'
-  # [Optional] checks preliminary to running the actual CI test
-  - project: 'radiuss/radiuss-shared-ci'
-    ref: 'v2025.09.1'
-    file: 'utilities/preliminary-ignore-draft-pr.yml'
-  - project: 'radiuss/radiuss-shared-ci'
-    ref: 'v2025.09.1'
-    file: 'utilities/skip-branch-not-a-pr.yml'
   # pipelines subscribed by the project
   - local: '.gitlab/subscribed-pipelines.yml'

@@ -147,7 +147,7 @@ repository documentation:
 
 - pull requests should target `main`
 - contributions are made under the Apache-2.0 with LLVM Exceptions license
-- contributors are expected to follow the project's [Code of Conduct](https://github.com/Olympus-HPC/proteus/blob/main/CODE_OF_CONDUCT.md)
+- contributors are expected to follow the project's [Code of Conduct](https://github.com/LLNL/proteus/blob/main/CODE_OF_CONDUCT.md)
 
 ## Suggested Reading Path
 

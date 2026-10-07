@@ -24,7 +24,7 @@ Assuming you already have a Spack installation, you can add the Proteus repo and
 install the package with:
 
 ```shell
-git clone https://github.com/Olympus-HPC/proteus.git
+git clone https://github.com/LLNL/proteus.git
 spack repo add proteus/packaging/spack/spack_repo/proteus
 spack install proteus
 ```
@@ -74,7 +74,7 @@ The top-level `CMakeLists.txt` currently defines the following build options:
 A typical build looks like this:
 
 ```shell
-git clone https://github.com/Olympus-HPC/proteus.git
+git clone https://github.com/LLNL/proteus.git
 cd proteus
 mkdir -p build && cd build
 cmake -DLLVM_INSTALL_DIR=<llvm-install-prefix> -DCMAKE_INSTALL_PREFIX=<install-path> <other options> ..
@@ -107,4 +107,4 @@ ctest --output-on-failure
 ```
 
 If you encounter bugs or issues, please let us know via the
-[Github issue tracker](https://github.com/Olympus-HPC/proteus/issues).
+[Github issue tracker](https://github.com/LLNL/proteus/issues).

@@ -1,0 +1,6 @@
+Repo:
+  dest_org: proteus
+  dest_name: proteus
+  check_name: gitlab-ci
+  check_types: [child-pipelines]
+  sync_drafts: false

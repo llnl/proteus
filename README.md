@@ -1,6 +1,6 @@
-[![docs (gh-pages)](https://github.com/Olympus-HPC/proteus/actions/workflows/gh-pages-docs.yml/badge.svg)](https://github.com/Olympus-HPC/proteus/actions/workflows/gh-pages-docs.yml)
-[![Build and test](https://github.com/Olympus-HPC/proteus/actions/workflows/ci-build-test.yml/badge.svg)](https://github.com/Olympus-HPC/proteus/actions/workflows/ci-build-test.yml)
-[![codecov](https://codecov.io/github/Olympus-HPC/proteus/graph/badge.svg?token=MEB0M2D0AC)](https://codecov.io/github/Olympus-HPC/proteus)
+[![docs (gh-pages)](https://github.com/LLNL/proteus/actions/workflows/gh-pages-docs.yml/badge.svg)](https://github.com/LLNL/proteus/actions/workflows/gh-pages-docs.yml)
+[![Build and test](https://github.com/LLNL/proteus/actions/workflows/ci-build-test.yml/badge.svg)](https://github.com/LLNL/proteus/actions/workflows/ci-build-test.yml)
+[![codecov](https://codecov.io/github/LLNL/proteus/graph/badge.svg?token=MEB0M2D0AC)](https://codecov.io/github/LLNL/proteus)
 [![pre-commit](https://img.shields.io/badge/pre--commit-enabled-brightgreen?logo=pre-commit)](https://github.com/pre-commit/pre-commit)
 ![License: Apache 2.0 with LLVM exceptions](https://img.shields.io/badge/license-Apache%202.0%20with%20LLVM%20exceptions-blue.svg)
 
@@ -67,7 +67,7 @@ Assuming you have a Spack installation and preferably using an isolated Spack
 environment, you can add the spack repo by cloning Proteus and then install it
 by running:
 ```bash
-git clone https://github.com/Olympus-HPC/proteus.git
+git clone https://github.com/LLNL/proteus.git
 spack repo add proteus/packaging/spack/spack_repo/proteus
 spack install proteus
 ```
@@ -120,7 +120,7 @@ working configuration.
 ### Python wheels
 Proteus now publishes a thin `proteus-python` shim package plus backend wheels.
 The default install is shim-only from PyPI. Install an explicit backend from
-the Olympus-HPC wheel index.
+the Proteus wheel index.
 
 The shim package provides the Python import surface and backend discovery. The
 native payload lives in backend-specific wheels published outside PyPI.
@@ -128,27 +128,27 @@ native payload lives in backend-specific wheels published outside PyPI.
 | Install | Backend | Target | Required compiler/toolchain |
 | --- | --- | --- | --- |
 | `pip install proteus-python` | shim only | Python API only | none |
-| `pip install --index-url https://olympus-hpc.github.io/proteus/wheels/simple/ proteus-python-backend-host-llvm22` | `proteus-python-backend-host-llvm22` | Host CPU | LLVM/Clang 22.x |
-| `pip install --index-url https://olympus-hpc.github.io/proteus/wheels/simple/ proteus-python-backend-cuda12-llvm22` | `proteus-python-backend-cuda12-llvm22` | Host CPU + NVIDIA CUDA GPU | CUDA 12.x plus LLVM/Clang 22.x |
-| `pip install --index-url https://olympus-hpc.github.io/proteus/wheels/simple/ proteus-python-backend-rocm72` | `proteus-python-backend-rocm72` | Host CPU + AMD ROCm GPU | ROCm 7.2.x |
+| `pip install --index-url https://software.llnl.gov/proteus/wheels/simple/ proteus-python-backend-host-llvm22` | `proteus-python-backend-host-llvm22` | Host CPU | LLVM/Clang 22.x |
+| `pip install --index-url https://software.llnl.gov/proteus/wheels/simple/ proteus-python-backend-cuda12-llvm22` | `proteus-python-backend-cuda12-llvm22` | Host CPU + NVIDIA CUDA GPU | CUDA 12.x plus LLVM/Clang 22.x |
+| `pip install --index-url https://software.llnl.gov/proteus/wheels/simple/ proteus-python-backend-rocm72` | `proteus-python-backend-rocm72` | Host CPU + AMD ROCm GPU | ROCm 7.2.x |
 
 Typical stable installs:
 
 ```bash
 python -m pip install proteus-python
-python -m pip install --index-url https://olympus-hpc.github.io/proteus/wheels/simple/ \
+python -m pip install --index-url https://software.llnl.gov/proteus/wheels/simple/ \
   proteus-python-backend-host-llvm22
 ```
 
 ```bash
 python -m pip install proteus-python
-python -m pip install --index-url https://olympus-hpc.github.io/proteus/wheels/simple/ \
+python -m pip install --index-url https://software.llnl.gov/proteus/wheels/simple/ \
   proteus-python-backend-cuda12-llvm22
 ```
 
 ```bash
 python -m pip install proteus-python
-python -m pip install --index-url https://olympus-hpc.github.io/proteus/wheels/simple/ \
+python -m pip install --index-url https://software.llnl.gov/proteus/wheels/simple/ \
   proteus-python-backend-rocm72
 ```
 
@@ -206,11 +206,11 @@ work:
 
 | Interface | Detailed guide |
 | --- | --- |
-| Code annotations | [Code Annotations](https://olympus-hpc.github.io/proteus/user/annotations/) |
-| C++ frontend API | [C++ Frontend API](https://olympus-hpc.github.io/proteus/user/cpp-frontend/) |
-| LLVM IR frontend API | [LLVM IR Frontend API](https://olympus-hpc.github.io/proteus/user/llvmir-frontend/) |
-| MLIR frontend API | [MLIR Frontend API](https://olympus-hpc.github.io/proteus/user/mlir-frontend/) |
-| DSL API | [DSL API](https://olympus-hpc.github.io/proteus/user/dsl/) |
+| Code annotations | [Code Annotations](https://software.llnl.gov/proteus/user/annotations/) |
+| C++ frontend API | [C++ Frontend API](https://software.llnl.gov/proteus/user/cpp-frontend/) |
+| LLVM IR frontend API | [LLVM IR Frontend API](https://software.llnl.gov/proteus/user/llvmir-frontend/) |
+| MLIR frontend API | [MLIR Frontend API](https://software.llnl.gov/proteus/user/mlir-frontend/) |
+| DSL API | [DSL API](https://software.llnl.gov/proteus/user/dsl/) |
 
 Proteus generates a unique specialization for each distinct set of runtime
 values and caches them in memory and on disk, so JIT overhead is minimized
@@ -218,7 +218,7 @@ within and across runs.
 
 ## Documentation
 
-The [Proteus documentation](https://olympus-hpc.github.io/proteus/) has more extensive information,
+The [Proteus documentation](https://software.llnl.gov/proteus/) has more extensive information,
 including a user's guide and developer manual.
 
 ## Contributing

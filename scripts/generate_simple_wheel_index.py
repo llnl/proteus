@@ -19,7 +19,7 @@ _DEFAULT_PROJECTS = [
     "proteus-python-backend-cuda12-llvm22",
     "proteus-python-backend-rocm72",
 ]
-_REPOSITORY = "Olympus-HPC/proteus"
+_REPOSITORY = "LLNL/proteus"
 _API_URL = "https://api.github.com"
 _PAGE_CSS = """
     :root {

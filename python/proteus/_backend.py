@@ -80,7 +80,7 @@ def _raise_no_backend() -> None:
         "proteus-python-backend-host-llvm22, "
         "proteus-python-backend-cuda12-llvm22, or "
         "proteus-python-backend-rocm72 from "
-        "https://olympus-hpc.github.io/proteus/wheels/simple/."
+        "https://software.llnl.gov/proteus/wheels/simple/."
     )
 
 

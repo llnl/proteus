@@ -7,6 +7,8 @@
 
 # The template job to test whether a machine is up.
 # Expects CI_MACHINE defined to machine name.
+# It fails so that "Retry failed jobs" re-runs the check and then creates the
+# skipped sub-pipelines with the machine's current state.
 .machine-check:
   stage: prerequisites
   tags: [shell, oslic]
@@ -47,54 +49,12 @@
         exit 1
       fi
 
-      # Check if machine is available - THIS is the only case we report to GitHub
       if [ "$NODES_UP" -eq 0 ]; then
         echo -e "\e[31mMachine ${CI_MACHINE} is down (${NODES_UP} nodes up)\e[0m"
-
-        # Report failure to GitHub
-        if [ -n "$GITHUB_TOKEN" ] && [ -n "$GITHUB_PROJECT_ORG" ] && [ -n "$GITHUB_PROJECT_NAME" ]; then
-          STATUS_RESPONSE=$(mktemp)
-          STATUS_HTTP_CODE=$(curl --retry 3 --retry-delay 5 --max-time 30 \
-              --url "https://api.github.com/repos/${GITHUB_PROJECT_ORG}/${GITHUB_PROJECT_NAME}/statuses/${CI_COMMIT_SHA}" \
-              --header 'Content-Type: application/json' \
-              --header "authorization: Bearer ${GITHUB_TOKEN}" \
-              --data "{ \"state\": \"failure\", \"target_url\": \"${CI_PIPELINE_URL}\", \"description\": \"GitLab: ${CI_MACHINE} down (0 nodes)\", \"context\": \"ci/gitlab/${CI_MACHINE}\" }" \
-              --output "$STATUS_RESPONSE" \
-              --write-out "%{http_code}" \
-              --silent \
-              --show-error)
-
-          echo "GitHub Status API response code: $STATUS_HTTP_CODE"
-
-          if [ "$STATUS_HTTP_CODE" -eq 201 ]; then
-            echo "Successfully reported machine down status to GitHub"
-          else
-            echo "Warning: Failed to report status to GitHub. HTTP status: $STATUS_HTTP_CODE"
-            echo "Response body:"
-            cat "$STATUS_RESPONSE"
-          fi
-
-          rm -f "$STATUS_RESPONSE"
-        else
-          echo "Warning: GitHub reporting variables not set, skipping GitHub status update"
-        fi
-
         exit 1
-      else
-        echo -e "\e[32m${CI_MACHINE} is available (${NODES_UP} nodes up)\e[0m"
-
-        # Report success to GitHub
-        if [ -n "$GITHUB_TOKEN" ] && [ -n "$GITHUB_PROJECT_ORG" ] && [ -n "$GITHUB_PROJECT_NAME" ]; then
-          curl --retry 3 --retry-delay 5 --max-time 30 \
-              --url "https://api.github.com/repos/${GITHUB_PROJECT_ORG}/${GITHUB_PROJECT_NAME}/statuses/${CI_COMMIT_SHA}" \
-              --header 'Content-Type: application/json' \
-              --header "authorization: Bearer ${GITHUB_TOKEN}" \
-              --data "{ \"state\": \"success\", \"target_url\": \"${CI_PIPELINE_URL}\", \"description\": \"GitLab: ${CI_MACHINE} up (${NODES_UP} nodes)\", \"context\": \"ci/gitlab/${CI_MACHINE}\" }" \
-              --silent --show-error
-        else
-          echo "Warning: GitHub reporting variables not set, skipping GitHub status update"
-        fi
       fi
+
+      echo -e "\e[32m${CI_MACHINE} is available (${NODES_UP} nodes up)\e[0m"
 
 .pipeline-trigger-rules:
   rules:

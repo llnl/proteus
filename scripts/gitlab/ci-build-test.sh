@@ -180,7 +180,7 @@ if [ "${ENABLE_CODECOV_UPLOAD}" = "1" ]; then
     -n "${CODECOV_NAME}" \
     -B "${CI_COMMIT_BRANCH}" \
     -C "${CI_COMMIT_SHA}" \
-    -r "Olympus-HPC/proteus" \
+    -r "LLNL/proteus" \
     "${CODECOV_PR_ARGS[@]}" \
     --git-service github 2>&1 | tee "${ARTIFACT_DIR}/codecov-upload.log"
   popd
