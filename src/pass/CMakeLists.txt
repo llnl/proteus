@@ -48,6 +48,18 @@ add_library(ProteusPassOffload SHARED
   $<TARGET_OBJECTS:ProteusPassObjects>
 )
 
+# Keep the Clang frontend plugin separate from the LLVM pass plugin: the pass
+# is also loaded by opt/offload linkers, which do not provide Clang symbols.
+add_library(ProteusASTChecker SHARED LambdaASTChecker.cpp)
+target_include_directories(ProteusASTChecker SYSTEM PRIVATE
+  ${LLVM_INCLUDE_DIRS}
+  ${CLANG_INCLUDE_DIRS})
+if(NOT LLVM_ENABLE_RTTI)
+  target_compile_options(ProteusASTChecker PRIVATE -fno-rtti)
+endif()
+target_link_options(ProteusASTChecker
+  PRIVATE "$<$<PLATFORM_ID:Darwin>:LINKER:SHELL:-undefined dynamic_lookup>")
+
 # Allow undefined symbols in shared objects on Darwin (this is the default
 # behaviour on Linux)
 target_link_options(ProteusPass
@@ -72,7 +84,7 @@ target_link_options(
   "SHELL:$<$<LINK_LANGUAGE:HIP>:-Xoffload-linker --load-pass-plugin=$<TARGET_FILE:ProteusPassOffload>>"
 )
 
-set_target_properties(ProteusPass ProteusPassOffload PROPERTIES
+set_target_properties(ProteusPass ProteusPassOffload ProteusASTChecker PROPERTIES
   # on macOS enable passing RPATH flags to the linker; no-ops on Linux
   MACOSX_RPATH          ON
   # let CMake use INSTALL_RPATH even in the build tree
@@ -85,7 +97,7 @@ set_target_properties(ProteusPass ProteusPassOffload PROPERTIES
 # is ready to support Clang/LLVM pass consumers too.
 if(NOT PROTEUS_PYTHON_WHEEL)
   install(
-    TARGETS ProteusPass ProteusPassOffload
+    TARGETS ProteusPass ProteusPassOffload ProteusASTChecker
     EXPORT proteusTargets
     RUNTIME DESTINATION "${CMAKE_INSTALL_LIBDIR}"
     LIBRARY DESTINATION "${CMAKE_INSTALL_LIBDIR}"

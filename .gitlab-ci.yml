@@ -30,7 +30,7 @@ variables:
 ##### LC GITLAB CONFIGURATION
 # Keep Proteus clones out of the default ~/.jacamar-ci/builds, which other
 # projects' CI jobs share and clean up.
-  CUSTOM_CI_BUILDS_DIR: "/usr/workspace/fink12/gitlab-runner-proteus"
+  CUSTOM_CI_BUILDS_DIR: "/usr/workspace/proteus-dev/gitlab-runner"
 # Tells Gitlab to recursively update the submodules when cloning the project.
 #  GIT_SUBMODULE_STRATEGY: recursive
 
