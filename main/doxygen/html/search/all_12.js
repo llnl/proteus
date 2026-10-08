@@ -32,7 +32,7 @@ var searchData=
   ['setmodulehash_29',['setModuleHash',['../classproteus_1_1BinaryInfo.html#af0458c318243ed481ce189a1f71692a7',1,'proteus::BinaryInfo']]],
   ['setname_30',['setName',['../classproteus_1_1FuncBase.html#af8b6a52111c31487990b45caf112a7dd',1,'proteus::FuncBase']]],
   ['shared_31',['SHARED',['../namespaceproteus.html#a063ab2ee4f71420c12ebe1dd02139317a049518eb4dc1859c7cebbe15876cfd63',1,'proteus']]],
-  ['sharedlibrary_32',['sharedlibrary',['../structproteus_1_1CppJitArtifact.html#a2898c72bedf7f79fd97e2b1acedaf4de',1,'proteus::CppJitArtifact::sharedLibrary(std::string Path)'],['../structproteus_1_1CppJitArtifact.html#a2997c581fdd612a27aca52a3e6ab8274a8988989e16522c86d49619bbd7a09bd8',1,'proteus::CppJitArtifact::SharedLibrary']]],
+  ['sharedlibrary_32',['sharedlibrary',['../structproteus_1_1CppJitArtifact.html#a2997c581fdd612a27aca52a3e6ab8274a8988989e16522c86d49619bbd7a09bd8',1,'proteus::CppJitArtifact::SharedLibrary'],['../structproteus_1_1CppJitArtifact.html#a2898c72bedf7f79fd97e2b1acedaf4de',1,'proteus::CppJitArtifact::sharedLibrary(std::string Path)']]],
   ['sharedobject_33',['sharedObject',['../structproteus_1_1CacheEntry.html#a750730524d3dc744cf3321d30145a9ff',1,'proteus::CacheEntry']]],
   ['sig_5ftraits_34',['sig_traits',['../structproteus_1_1sig__traits.html',1,'proteus']]],
   ['sig_5ftraits_3c_20r_28args_2e_2e_2e_29_3e_35',['sig_traits&lt; R(Args...)&gt;',['../structproteus_1_1sig__traits_3_01R_07Args_8_8_8_08_4.html',1,'proteus']]],

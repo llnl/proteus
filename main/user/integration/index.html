@@ -1134,14 +1134,17 @@ In this case, you don't need to compile your target with Clang:</p>
 <p>With <code>make</code>, annotation-based integration requires adding compilation and
 linking flags, for example:</p>
 <div class="highlight"><pre><span></span><code><span class="nv">CXXFLAGS</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span>-I&lt;install_path&gt;/include<span class="w"> </span><span class="se">\</span>
+<span class="w">    </span>-fplugin<span class="o">=</span>&lt;install_path&gt;/&lt;libdir&gt;/libProteusASTChecker.so<span class="w"> </span><span class="se">\</span>
 <span class="w">    </span>-fpass-plugin<span class="o">=</span>&lt;install_path&gt;/&lt;libdir&gt;/libProteusPass.so
 
 <span class="nv">LDFLAGS</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span>-L&lt;install_path&gt;/&lt;libdir&gt;<span class="w"> </span><span class="se">\</span>
 <span class="w">    </span>-Wl,-rpath,&lt;install_path&gt;/&lt;libdir&gt;<span class="w"> </span><span class="se">\</span>
 <span class="w">    </span>-lproteus<span class="w"> </span><span class="k">$(</span>llvm-config<span class="w"> </span>--libs<span class="k">)</span><span class="w"> </span>-lclang-cpp
 </code></pre></div>
-<p>If you don't use code annotations, you can omit the <code>-fpass-plugin</code> option,
-since the LLVM pass is only needed for processing annotations.</p>
+<p>The frontend checker loaded by <code>-fplugin</code> diagnoses unsupported uses of
+<code>proteus::register_lambda</code> and <code>proteus::jit_variable</code> before LLVM IR is
+emitted. If you don't use code annotations or these lambda APIs, you can omit
+both plugin options.</p>
 <div class="admonition note">
 <p class="admonition-title">Note</p>
 <p>The example above is the simplest case and is closest to a host-only build.

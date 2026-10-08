@@ -20,7 +20,7 @@ var searchData=
   ['clonekernelfrommodule_17',['cloneKernelFromModule',['../namespaceproteus.html#a3c09394a695364c423c52ce493547592',1,'proteus']]],
   ['clonekernelfrommodules_18',['cloneKernelFromModules',['../namespaceproteus.html#a36b420afb4ef303bccb8a124dda9e6ae',1,'proteus']]],
   ['cloning_2eh_19',['Cloning.h',['../Cloning_8h.html',1,'']]],
-  ['cmpop_20',['cmpop',['../namespaceproteus.html#a510a3ea3b2019aaa8c987efedab91bb5',1,'proteus::CmpOp'],['../namespaceproteus.html#a41c9ccef79e7da58da6841a72de4c9e0',1,'proteus::cmpOp(const Var&lt; T &gt; &amp;L, const Var&lt; U &gt; &amp;R, CmpOp Op)']]],
+  ['cmpop_20',['cmpop',['../namespaceproteus.html#a41c9ccef79e7da58da6841a72de4c9e0',1,'proteus::cmpOp(const Var&lt; T &gt; &amp;L, const Var&lt; U &gt; &amp;R, CmpOp Op)'],['../namespaceproteus.html#a510a3ea3b2019aaa8c987efedab91bb5',1,'proteus::CmpOp']]],
   ['code_21',['Code',['../structproteus_1_1CppJitCompileRequest.html#a92502c2b6daf65cee88e973bec57cf63',1,'proteus::CppJitCompileRequest']]],
   ['codebuilder_22',['CodeBuilder',['../classproteus_1_1CodeBuilder.html',1,'proteus']]],
   ['codebuilder_2eh_23',['CodeBuilder.h',['../CodeBuilder_8h.html',1,'']]],
