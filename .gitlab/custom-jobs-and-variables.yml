@@ -36,9 +36,9 @@ variables:
 # Arguments for top level allocation
 # Note: can be set to "OFF" to prevent allocation sharing.
 # OPTIONAL: "-o per-resource.count=2" allows to get 2 jobs running on each node.
-  TIOGA_SHARED_ALLOC: "OFF"
+  TIOGA_SHARED_ALLOC: "-B asccasc --queue=pci --exclusive --time-limit=1h --nodes=1 -o per-resource.count=4"
 # Arguments for job level allocation
-  TIOGA_JOB_ALLOC: "--job-name=${FLUX_JOB_NAME} -B asccasc --queue=pci --time-limit=1h --nodes=1 --begin-time=+5s"
+  TIOGA_JOB_ALLOC: "--job-name=${FLUX_JOB_NAME} -B asccasc --time-limit=1h --nodes=1 --begin-time=+5s"
 # Arguments for performance job allocation (dedicated allocation with no overlapping).
   TIOGA_PERF_ALLOC: "-B asccasc --queue=pci --exclusive --time-limit=1h --nodes=1 --begin-time=+5s"
 # Add variables that should apply to all the jobs on a machine:
@@ -48,9 +48,9 @@ variables:
 # Arguments for top level allocation
 # Note: can be set to "OFF" to prevent allocation sharing.
 # OPTIONAL: "-o per-resource.count=2" allows to get 2 jobs running on each node.
-  TUOLUMNE_SHARED_ALLOC: "OFF"
+  TUOLUMNE_SHARED_ALLOC: "-B asccasc --queue=pci --exclusive --time-limit=1h --nodes=1 -o per-resource.count=4"
 # Arguments for job level allocation
-  TUOLUMNE_JOB_ALLOC: "--job-name=${FLUX_JOB_NAME} -B asccasc --queue=pci --time-limit=1h --nodes=1 --begin-time=+5s"
+  TUOLUMNE_JOB_ALLOC: "--job-name=${FLUX_JOB_NAME} -B asccasc --time-limit=1h --nodes=1 --begin-time=+5s"
 # Arguments for performance job allocation (dedicated allocation with no overlapping).
   TUOLUMNE_PERF_ALLOC: "-B asccasc --queue=pci --exclusive --time-limit=1h --nodes=1 --begin-time=+5s"
 # Add variables that should apply to all the jobs on a machine:
@@ -73,6 +73,15 @@ variables:
   after_script:
     - |
       if [ "${CI_JOB_STATUS}" = "canceled" ]; then
+        # release_resources does not run in a canceled pipeline, so free the
+        # shared allocation here.
+        ALLOC_ID="$(flux jobs --name="${ALLOC_NAME}" -n -o "{id}")"
+
+        if [ -n "${ALLOC_ID}" ]; then
+          echo "### Cancel Flux shared allocation ${ALLOC_NAME} (${ALLOC_ID})"
+          flux cancel "${ALLOC_ID}" || true
+        fi
+
         URI="$(flux jobs --name="${FLUX_JOB_NAME}" -n -o "{id}")"
 
         if [ -n "${URI}" ]; then
@@ -82,6 +91,14 @@ variables:
           echo "### No standalone Flux job found for ${FLUX_JOB_NAME}"
         fi
       fi
+
+# Extends allocate_resources from the shared pipeline. It must be interruptible
+# so that waiting for the allocation does not block GitLab from auto-canceling
+# redundant pipelines.
+allocate_resources:
+  interruptible: true
+  after_script:
+    - !reference [.clean-flux-allocation, after_script]
 
 .clean-slurm-allocation:
   after_script:
