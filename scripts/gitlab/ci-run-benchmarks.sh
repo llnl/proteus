@@ -49,9 +49,9 @@ wget -q --tries=5 --retry-connrefused --wait=5 https://github.com/conda-forge/mi
 bash ${MINIFORGE_DIR}/miniforge.sh -b -u -p ${MINIFORGE_DIR}
 rm ${MINIFORGE_DIR}/miniforge.sh
 source ${MINIFORGE_DIR}/bin/activate
-conda create -y -q -n proteus --override-channels -c conda-forge \
+conda create -y -q -p ${MINIFORGE_DIR}/envs/proteus --override-channels -c conda-forge \
     python=${PYTHON_VERSION} pandas==2.2.3 matplotlib==3.10.0
-conda activate proteus
+conda activate ${MINIFORGE_DIR}/envs/proteus
 
 if [ "${CI_MACHINE}" == "matrix" ]; then
   if [ "${BENCHMARKS_TOML}" == "rajaperf.toml" ]; then
