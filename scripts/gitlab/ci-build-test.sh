@@ -34,6 +34,9 @@ install_miniforge() {
   bash "${miniforge_dir}/miniforge.sh" -b -u -p "${miniforge_dir}"
   rm "${miniforge_dir}/miniforge.sh"
   source "${miniforge_dir}/etc/profile.d/conda.sh"
+  # Create the env by prefix: a named env follows the user's condarc envs_dirs,
+  # which concurrent jobs then share and clobber.
+  CONDA_ENV_DIR="${miniforge_dir}/envs/proteus"
 }
 
 install_coverage_tools() {
@@ -48,15 +51,14 @@ if [ "${CI_MACHINE}" == "matrix" ]; then
   echo "CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-} SLURM_STEP_GPUS=${SLURM_STEP_GPUS:-}"
 
   # Install Clang/LLVM through conda.
-  MINIFORGE_DIR=miniforge3
-  install_miniforge "${MINIFORGE_DIR}"
+  install_miniforge "${WORKDIR}/miniforge3"
   # Use an older version of gcc to avoid issues with detecting Clang as the CUDA
   # compiler.
-  conda create -y -q -n proteus --override-channels -c conda-forge \
+  conda create -y -q -p "${CONDA_ENV_DIR}" --override-channels -c conda-forge \
       python=${PYTHON_VERSION} clang=${PROTEUS_CI_LLVM_VERSION} clangxx=${PROTEUS_CI_LLVM_VERSION} \
       pip pybind11 clangdev=${PROTEUS_CI_LLVM_VERSION} llvmdev=${PROTEUS_CI_LLVM_VERSION} \
       lit=${PROTEUS_CI_LLVM_VERSION} mlir=${PROTEUS_CI_LLVM_VERSION} gcc=12 gxx=12
-  conda activate proteus
+  conda activate "${CONDA_ENV_DIR}"
 
   LLVM_INSTALL_DIR=$(llvm-config --prefix)
   CMAKE_OPTIONS_MACHINE=" -DCMAKE_PREFIX_PATH=$CONDA_PREFIX;$CONDA_PREFIX/lib/cmake"
@@ -78,9 +80,9 @@ elif [ "${CI_MACHINE}" == "tioga" ] || [ "${CI_MACHINE}" == "tuolumne" ]; then
 
   LLVM_INSTALL_DIR=${ROCM_PATH}/llvm
   install_miniforge "${WORKDIR}/miniforge3"
-  conda create -y -q -n proteus --override-channels -c conda-forge \
+  conda create -y -q -p "${CONDA_ENV_DIR}" --override-channels -c conda-forge \
     python=${PYTHON_VERSION} pip pybind11
-  conda activate proteus
+  conda activate "${CONDA_ENV_DIR}"
 
   CMAKE_OPTIONS_MACHINE=" -DCMAKE_PREFIX_PATH=$CONDA_PREFIX;$CONDA_PREFIX/lib/cmake"
   CMAKE_OPTIONS_MACHINE+=" -DPROTEUS_ENABLE_HIP=on"
