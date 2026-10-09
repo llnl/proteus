@@ -552,8 +552,11 @@ private:
       for (const auto &JitVarInfo : It->second) {
         auto *SlotC = dyn_cast<ConstantInt>(JitVarInfo.Slot);
         auto *OffsetC = dyn_cast<ConstantInt>(JitVarInfo.Offset);
-        auto RCType = getRCTypeForLLVMType(JitVarInfo.Type);
-        if (!SlotC || !OffsetC || !RCType)
+        if (!SlotC || !OffsetC)
+          reportFatalError("Failed to emit lambda schema metadata");
+        auto RCType = getRCTypeForLLVMType(
+            LambdaStorageType->getElementType(SlotC->getZExtValue()));
+        if (!RCType)
           reportFatalError("Failed to emit lambda schema metadata");
 
         LLVMContext &Ctx = M.getContext();
