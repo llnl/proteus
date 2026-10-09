@@ -529,9 +529,9 @@ public:
         clang::DiagnosticsEngine::Error,
         "registered lambda pointer slot cannot escape to global storage");
     const unsigned MergedSlot = Diagnostics.getCustomDiagID(
-        clang::DiagnosticsEngine::Error,
-        "registered lambda pointer slot cannot be selected from multiple "
-        "control-flow assignments");
+        clang::DiagnosticsEngine::Warning,
+        "registered lambda pointer has been passed through "
+        "control-flow assignments.  Analysis will try to specialize but failure to specialize lambda may occur.");
     const unsigned AmbiguousField = Diagnostics.getCustomDiagID(
         clang::DiagnosticsEngine::Error,
         "registered lambda pointer slot cannot be selected from different "
