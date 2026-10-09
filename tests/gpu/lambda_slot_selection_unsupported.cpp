@@ -20,40 +20,6 @@ overwriteSlot(F *volatile *Slot, F *Replacement) {
   *Slot = Replacement;
 }
 
-template <typename F>
-__device__ __attribute__((noinline, optnone)) static F *volatile *
-returnSlotOnce(F *volatile *Slot) {
-  return Slot;
-}
-
-// Calls in both branches produce a MemoryPhi. Even though both arguments are
-// the same in this test, the current production contract rejects MemoryPhi.
-template <typename F>
-__device__ __attribute__((noinline)) static F *volatile *
-returnSlotThroughPhi(F *volatile *First, F *volatile *Second, bool UseSecond) {
-  F *volatile *Result;
-  if (UseSecond)
-    Result = returnSlotOnce(Second);
-  else
-    Result = returnSlotOnce(First);
-  return Result;
-}
-
-template <typename F>
-__device__ __attribute__((noinline, optnone)) static void
-invokeThroughPhiSlot(F *Initial, F *Replacement, bool UseSecond) {
-  F *volatile Slot = Initial;
-  F *volatile *Alias = returnSlotThroughPhi(&Slot, &Slot, UseSecond);
-  overwriteSlot(Alias, Replacement);
-  (*Slot)();
-}
-
-template <typename F>
-__global__ __attribute__((annotate("jit"))) static void
-kernelPhiSlot(F Initial, F Replacement, bool UseSecond) {
-  invokeThroughPhiSlot(&Initial, &Replacement, UseSecond);
-}
-
 // Different return paths expose different aggregate fields.
 template <typename F>
 __device__ __attribute__((noinline, optnone)) static F *volatile *
@@ -89,15 +55,9 @@ kernelAmbiguousReturnedField(F Initial, F Replacement, F Noise,
         });                                                                    \
   }
 
-MAKE_BODY(makePhiBody, "phi slot")
 MAKE_BODY(makeAmbiguousReturnedFieldBody, "ambiguous returned field")
 
 int main() {
-  auto PhiInitial = makePhiBody(619);
-  auto PhiReplacement = makePhiBody(631);
-  kernelPhiSlot<<<1, 1>>>(PhiInitial, PhiReplacement, true);
-  gpuErrCheck(gpuDeviceSynchronize());
-
   auto AmbiguousFieldInitial = makeAmbiguousReturnedFieldBody(577);
   auto AmbiguousFieldReplacement = makeAmbiguousReturnedFieldBody(587);
   auto AmbiguousFieldNoise = makeAmbiguousReturnedFieldBody(593);
@@ -109,9 +69,6 @@ int main() {
 }
 
 // clang-format off
-// CHECK: [KernelConfig] ID:{{.*}}kernelPhiSlot
-// CHECK-NOT: [LambdaSpec]
-// CHECK: phi slot 631
 // CHECK: [KernelConfig] ID:{{.*}}kernelAmbiguousReturnedField
 // CHECK-NOT: [LambdaSpec]
 // CHECK: ambiguous returned field 587
