@@ -11,6 +11,7 @@
 #include <llvm/Analysis/TargetLibraryInfo.h>
 #include <llvm/Analysis/TypeBasedAliasAnalysis.h>
 #include <llvm/Analysis/ValueTracking.h>
+#include <llvm/Config/llvm-config.h>
 #include <llvm/IR/CFG.h>
 #include <llvm/IR/Dominators.h>
 #include <llvm/IR/Function.h>
@@ -54,7 +55,12 @@ public:
   explicit FunctionMemorySSAState(Function &F)
       : DT(F), AC(F), TLII(Triple(F.getParent()->getTargetTriple())),
         TLI(TLII, &F), AA(TLI),
+#if LLVM_VERSION_MAJOR >= 20
+        BAA(F.getParent()->getDataLayout(), F, TLI, AC, &DT),
+        TBAA(/*UsingTypeSanitizer=*/false) {
+#else
         BAA(F.getParent()->getDataLayout(), F, TLI, AC, &DT) {
+#endif
     AA.addAAResult(BAA);
     AA.addAAResult(TBAA);
     MSSA = std::make_unique<MemorySSA>(F, &AA, &DT);
@@ -67,6 +73,20 @@ public:
     // Respect any precise memory effects already understood by alias analysis.
     if (!isModSet(AA.getModRefInfo(&CB, Location)))
       return true;
+
+    // Do not use capture tracking to override an explicit inline-assembly
+    // memory clobber. Inline assembly may access memory without exposing the
+    // address as an SSA operand, so the absence of a captured pointer is not
+    // sufficient proof that the tracked allocation is untouched.
+    if (Function *Callee = CB.getCalledFunction()) {
+      for (BasicBlock &BB : *Callee) {
+        for (Instruction &I : BB) {
+          auto *InnerCB = dyn_cast<CallBase>(&I);
+          if (InnerCB && InnerCB->isInlineAsm() && I.mayWriteToMemory())
+            return false;
+        }
+      }
+    }
 
     // This additional proof is valid only for function-local allocations. A
     // call cannot access such an allocation unless its address escaped earlier
@@ -89,9 +109,12 @@ public:
 
     // The current call is excluded because its operands were checked above.
     // Any earlier capture could have made the allocation reachable indirectly.
-    return !PointerMayBeCapturedBefore(Alloca, /*ReturnCaptures=*/true,
-                                       /*StoreCaptures=*/true, &CB, &DT,
-                                       /*IncludeI=*/false);
+    return !PointerMayBeCapturedBefore(
+        Alloca, /*ReturnCaptures=*/true,
+#if LLVM_VERSION_MAJOR < 22
+        /*StoreCaptures=*/true,
+#endif
+        &CB, &DT, /*IncludeI=*/false);
   }
 };
 

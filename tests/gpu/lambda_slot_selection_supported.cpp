@@ -59,6 +59,25 @@ selectSameSlot(F *volatile *First, F *volatile *Second, bool UseSecond) {
 }
 
 template <typename F>
+__device__ __attribute__((noinline, optnone)) static F *volatile *
+returnSlotOnce(F *volatile *Slot) {
+  return Slot;
+}
+
+// Calls in both branches produce pointer aliases to the same slot. The
+// pointer-value PHI is unambiguous because both incoming offsets are equal.
+template <typename F>
+__device__ __attribute__((noinline)) static F *volatile *
+returnSlotThroughPhi(F *volatile *First, F *volatile *Second, bool UseSecond) {
+  F *volatile *Result;
+  if (UseSecond)
+    Result = returnSlotOnce(Second);
+  else
+    Result = returnSlotOnce(First);
+  return Result;
+}
+
+template <typename F>
 __device__ __attribute__((noinline, optnone)) static void
 invokeThroughSelectedSlot(F *Initial, F *Replacement, bool UseSecond) {
   F *volatile Slot = Initial;
@@ -73,6 +92,21 @@ kernelSelectedSlot(F Initial, F Replacement, bool UseSecond) {
   invokeThroughSelectedSlot(&Initial, &Replacement, UseSecond);
 }
 
+template <typename F>
+__device__ __attribute__((noinline, optnone)) static void
+invokeThroughPhiSlot(F *Initial, F *Replacement, bool UseSecond) {
+  F *volatile Slot = Initial;
+  F *volatile *Alias = returnSlotThroughPhi(&Slot, &Slot, UseSecond);
+  overwriteSlot(Alias, Replacement);
+  (*Slot)();
+}
+
+template <typename F>
+__global__ __attribute__((annotate("jit"))) static void
+kernelPhiSlot(F Initial, F Replacement, bool UseSecond) {
+  invokeThroughPhiSlot(&Initial, &Replacement, UseSecond);
+}
+
 #define MAKE_BODY(Name, Message)                                               \
   static auto Name(int Value) {                                                \
     return proteus::register_lambda(                                           \
@@ -84,6 +118,7 @@ kernelSelectedSlot(F Initial, F Replacement, bool UseSecond) {
 MAKE_BODY(makeReadOnlyBody, "trailing read-only call")
 MAKE_BODY(makePostCallBody, "call after invoke")
 MAKE_BODY(makeSelectedBody, "selected slot")
+MAKE_BODY(makePhiBody, "phi slot")
 
 int main() {
   auto ReadOnlyInitial = makeReadOnlyBody(461);
@@ -102,6 +137,11 @@ int main() {
   auto SelectedReplacement = makeSelectedBody(607);
   kernelSelectedSlot<<<1, 1>>>(SelectedInitial, SelectedReplacement, true);
   gpuErrCheck(gpuDeviceSynchronize());
+
+  auto PhiInitial = makePhiBody(619);
+  auto PhiReplacement = makePhiBody(631);
+  kernelPhiSlot<<<1, 1>>>(PhiInitial, PhiReplacement, true);
+  gpuErrCheck(gpuDeviceSynchronize());
   return 0;
 }
 
@@ -112,4 +152,6 @@ int main() {
 // CHECK: call after invoke 523
 // CHECK: [LambdaSpec] Replacing slot 0 with i32 607
 // CHECK: selected slot 607
+// CHECK: [LambdaSpec] Replacing slot 0 with i32 631
+// CHECK: phi slot 631
 // clang-format on
