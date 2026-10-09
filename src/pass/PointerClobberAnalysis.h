@@ -42,6 +42,7 @@ SmallVector<ReturnInst *> getReturnInstructions(Function &F) {
 // Their lifetimes must also extend beyond MemorySSA because it retains
 // references to the alias-analysis results.
 class FunctionMemorySSAState {
+  const DataLayout &DL;
   DominatorTree DT;
   AssumptionCache AC;
   TargetLibraryInfoImpl TLII;
@@ -53,13 +54,14 @@ class FunctionMemorySSAState {
 
 public:
   explicit FunctionMemorySSAState(Function &F)
-      : DT(F), AC(F), TLII(Triple(F.getParent()->getTargetTriple())),
+      : DL(F.getParent()->getDataLayout()), DT(F), AC(F),
+        TLII(Triple(F.getParent()->getTargetTriple())),
         TLI(TLII, &F), AA(TLI),
 #if LLVM_VERSION_MAJOR >= 20
-        BAA(F.getParent()->getDataLayout(), F, TLI, AC, &DT),
+        BAA(DL, F, TLI, AC, &DT),
         TBAA(/*UsingTypeSanitizer=*/false) {
 #else
-        BAA(F.getParent()->getDataLayout(), F, TLI, AC, &DT) {
+        BAA(DL, F, TLI, AC, &DT) {
 #endif
     AA.addAAResult(BAA);
     AA.addAAResult(TBAA);
@@ -67,6 +69,38 @@ public:
   }
 
   MemorySSA &getMemorySSA() { return *MSSA; }
+
+  bool instructionMayModify(Instruction &I,
+                            const MemoryLocation &Location) {
+    if (auto *SI = dyn_cast<StoreInst>(&I);
+        SI && Location.Size.hasValue() && Location.Size.isPrecise() &&
+        !Location.Size.getValue().isScalable()) {
+      int64_t StoreOffset = 0;
+      int64_t LocationOffset = 0;
+      const Value *StoreBase = GetPointerBaseWithConstantOffset(
+          SI->getPointerOperand(), StoreOffset, DL);
+      const Value *LocationBase = GetPointerBaseWithConstantOffset(
+          Location.Ptr, LocationOffset, DL);
+      TypeSize StoreSize =
+          DL.getTypeStoreSize(SI->getValueOperand()->getType());
+
+      if (StoreBase && StoreBase == LocationBase && !StoreSize.isScalable()) {
+        uint64_t StoreBytes = StoreSize.getFixedValue();
+        uint64_t LocationBytes = Location.Size.getValue().getFixedValue();
+        bool Disjoint =
+            StoreOffset <= LocationOffset
+                ? static_cast<uint64_t>(LocationOffset) -
+                          static_cast<uint64_t>(StoreOffset) >=
+                      StoreBytes
+                : static_cast<uint64_t>(StoreOffset) -
+                          static_cast<uint64_t>(LocationOffset) >=
+                      LocationBytes;
+        if (Disjoint)
+          return false;
+      }
+    }
+    return isModSet(AA.getModRefInfo(&I, Location));
+  }
 
   bool callCannotModifyTrackedLocal(CallBase &CB,
                                     const MemoryLocation &Location) {
@@ -189,7 +223,23 @@ public:
       return {};
 
     MemorySSAWalker *Walker = MSSA.getWalker();
-    MemoryAccess *Clobber = Walker->getClobberingMemoryAccess(Before, Location);
+
+    // The location-aware walker requires a MemoryDef starting point to be an
+    // already-potential clobber. A definition obtained merely because it is
+    // the last access before UseBoundary does not satisfy that contract.
+    // LLVM 19 happened to walk past non-aliasing starting definitions, while
+    // newer walkers may return the starting definition unchanged.
+    auto FindClobber = [&](MemoryAccess *Start) {
+      while (auto *Def = dyn_cast<MemoryDef>(Start)) {
+        Instruction *I = Def->getMemoryInst();
+        if (!I || State.instructionMayModify(*I, Location))
+          break;
+        Start = Def->getDefiningAccess();
+      }
+      return Walker->getClobberingMemoryAccess(Start, Location);
+    };
+
+    MemoryAccess *Clobber = FindClobber(Before);
 
     // MemorySSA must conservatively model calls whose memory effects have not
     // yet been inferred. Skip such a call only when we can prove that this
@@ -199,8 +249,7 @@ public:
       auto *CB = dyn_cast_or_null<CallBase>(Def->getMemoryInst());
       if (!CB || !State.callCannotModifyTrackedLocal(*CB, Location))
         break;
-      Clobber =
-          Walker->getClobberingMemoryAccess(Def->getDefiningAccess(), Location);
+      Clobber = FindClobber(Def->getDefiningAccess());
     }
     if (!Clobber)
       return {};

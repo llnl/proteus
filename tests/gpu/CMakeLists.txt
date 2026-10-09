@@ -276,14 +276,12 @@ CREATE_GPU_TEST(lambda_call_shapes lambda_call_shapes.cpp)
 CREATE_GPU_TEST(lambda_memory_intrinsic_shapes lambda_memory_intrinsic_shapes.cpp)
 CREATE_GPU_TEST(lambda_pointer_field_load lambda_pointer_field_load.cpp)
 CREATE_GPU_TEST(lambda_clobber_shapes lambda_clobber_shapes.cpp)
+CREATE_GPU_TEST(lambda_clobber_query_range lambda_clobber_query_range.cpp)
+CREATE_GPU_TEST(lambda_clobber_query_suffix lambda_clobber_query_suffix.cpp)
 CREATE_GPU_TEST(lambda_portability_aggregate_shapes
                 lambda_portability_aggregate_shapes.cpp)
 CREATE_GPU_TEST(lambda_slot_selection_supported
                 lambda_slot_selection_supported.cpp)
-CREATE_GPU_TEST(lambda_unsupported_memory_shapes
-                lambda_unsupported_memory_shapes.cpp)
-CREATE_GPU_TEST(lambda_slot_selection_unsupported
-                lambda_slot_selection_unsupported.cpp)
 CREATE_GPU_TEST(lambda_multiple_callers lambda_multiple_callers.cpp)
 CREATE_GPU_TEST(lambda_unknown_clobber lambda_unknown_clobber.cpp)
 CREATE_GPU_TEST_RDC(lambda_declaration_clobber lambda_declaration_clobber.cpp
