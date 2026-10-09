@@ -236,7 +236,7 @@ public:
       return nullptr;
     }
     MemorySSAClobber SSAResult;
-    auto StoreCandidate = llvm::find_if(
+    auto *StoreCandidate = llvm::find_if(
         PotentialClobbers, [](const UseDefWriteCandidate &Candidate) {
           return isa<StoreInst>(Candidate.WriteCandidate);
         });
@@ -1021,11 +1021,13 @@ public:
     }
 
     int64_t GEPOffset = StepOffset.getSExtValue();
-    // A nonzero byte-wise GEP erases the aggregate field identity that lets
-    // this analysis distinguish a supported field projection from an
-    // arbitrary mutation of lambda storage. Be conservative when such an
-    // address is reached while following the tracked closure pointer.
-    if (GEPOffset != 0 && GEP.getSourceElementType()->isIntegerTy(8)) {
+    // LLVM may lower aggregate field materialization to a byte-wise GEP under
+    // opaque pointers. Preserve that shape when the allocation still provides
+    // local aggregate provenance, but reject byte arithmetic through an
+    // argument or another root whose storage type is unavailable here.
+    Value *UnderlyingObject = getUnderlyingObject(GEP.getPointerOperand());
+    if (GEPOffset != 0 && GEP.getSourceElementType()->isIntegerTy(8) &&
+        !isa<AllocaInst>(UnderlyingObject)) {
       DEBUG(Logger::logs("proteus-pass")
             << "    [PTR use analysis]: Rejecting byte-wise pointer offset "
             << GEP << "\n");
