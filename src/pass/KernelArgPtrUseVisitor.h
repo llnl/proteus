@@ -132,6 +132,22 @@ struct ClobberQueryDenseMapInfo {
   }
 };
 
+// A pointer-returning helper is traversed by the same use visitor as its
+// caller.  This records where that traversal should resume when it reaches the
+// helper's ReturnInst.  Chaining continuations handles nested helpers without
+// introducing a second provenance walk.
+struct ReturnContinuation {
+  CallBase *Call = nullptr;
+  Function *CallerFrame = nullptr;
+  Instruction *CallerUseBoundary = nullptr;
+  Value *CallerTrackedBase = nullptr;
+  std::shared_ptr<ReturnContinuation> Parent;
+  unsigned PendingWorkItems = 0;
+  bool SawTrackedWrite = false;
+  bool Completed = false;
+  std::optional<int64_t> ReturnedOffset;
+};
+
 // The basic unit of work on this analysis is a use--an edge connecting two
 // values. We also track their parent function and the useboundary pertaining
 // to them.  This use boundary could be an alloca ptr that triggered this
@@ -151,6 +167,7 @@ struct UseAnalysisWorkItem {
   Instruction *UseBoundary = nullptr;
   Function *Frame = nullptr;
   Value *TrackedBase = nullptr;
+  std::shared_ptr<ReturnContinuation> ReturnTo;
 };
 
 inline std::optional<MemoryLocation>
@@ -195,11 +212,13 @@ private:
   SmallVector<UseDefWriteCandidate> PotentialClobbers;
   SmallVector<SmallVector<UseDefWriteCandidate, 4>, 2>
       ParentClobberCandidateStack;
+  SmallPtrSet<CallBase *, 4> ProvenReturnedAliasCalls;
   // The visitor pattern is always setting LastUse to the back of the
   // edge at the front of the worklist (the def that brought us to the
   // current use).
   Value *Def = nullptr;
-  SmallDenseSet<Value *> Seen;
+  DenseSet<std::pair<Value *, const ReturnContinuation *>> Seen;
+  SmallDenseSet<Value *> NeverVisit;
 
   bool AnalysisSuccess = false;
   bool AnalysisFailed = false;
@@ -410,55 +429,6 @@ public:
       }
     }
 
-    // ; Function Attrs: convergent mustprogress norecurse nounwind
-    // define protected amdgpu_kernel void
-    // @_ZN17MockRajaInterface13globalWrapperIZN17MockMfemInterface6forallIN7proteus6detail20LambdaFunctorWrapperILm6894195003319168199EZ14integralKernelILi3ELi4EEvdiiEUliiE_EEEEviiOT_EUliE_EEvS9_m(ptr
-    // addrspace(4) noundef byref(%class.anon.1) align 8 %0, i64 noundef %1) #3
-    // comdat !dbg !1989 !proteus.jit !1805 {
-    //   %3 = alloca %class.anon.1, align 8, addrspace(5)
-    //   %4 = alloca %"struct.MockRajaInterface::Privatizer.4", align 8,
-    //   addrspace(5) %5 = addrspacecast ptr addrspace(5) %3 to ptr %6 =
-    //   addrspacecast ptr addrspace(5) %4 to ptr call void
-    //   @llvm.memcpy.p0.p4.i64(ptr align 8 %5, ptr addrspace(4) align 8 %0, i64
-    //   24, i1 false)
-    //     #dbg_declare(ptr addrspace(5) %3, !1993, !DIExpression(DIOpArg(0, ptr
-    //     addrspace(5)), DIOpDeref(%class.anon.1)), !1999) #dbg_value(i64 %1,
-    //     !1994, !DIExpression(DIOpArg(0, i64)), !2000)
-    //   call void @llvm.lifetime.start.p5(i64 24, ptr addrspace(5) %4) #14,
-    //   !dbg !2001
-    //     #dbg_declare(ptr addrspace(5) %4, !1995, !DIExpression(DIOpArg(0, ptr
-    //     addrspace(5)), DIOpDeref(%"struct.MockRajaInterface::Privatizer.4")),
-    //     !2002)
-    //   %7 = call %"struct.MockRajaInterface::Privatizer.4"
-    //   @_ZN17MockRajaInterface15threadPrivatizeIZN17MockMfemInterface6forallIN7proteus6detail20LambdaFunctorWrapperILm6894195003319168199EZ14integralKernelILi3ELi4EEvdiiEUliiE_EEEEviiOT_EUliE_EENS_10PrivatizerIS9_EERKS9_(ptr
-    //   noundef nonnull align 8 dereferenceable(24) %5) #16, !dbg !2003 %8 =
-    //   extractvalue %"struct.MockRajaInterface::Privatizer.4" %7, 0, !dbg
-    //   !2003 %9 = extractvalue %class.anon.1 %8, 0, !dbg !2003 store i32 %9,
-    //   ptr %6, align 8, !dbg !2003 %10 = extractvalue %class.anon.1 %8, 1, 0,
-    //   0, !dbg !2003 %11 = getelementptr inbounds %class.anon.1, ptr %6, i32
-    //   0, i32 1, i32 0, i32 0, !dbg !2003 store i32 %10, ptr %11, align 8,
-    //   !dbg !2003 %12 = extractvalue %class.anon.1 %8, 1, 0, 1, !dbg !2003 %13
-    //   = getelementptr inbounds %class.anon.1, ptr %6, i32 0, i32 1, i32 0,
-    //   i32 1, !dbg !2003 store i32 %12, ptr %13, align 4, !dbg !2003 %14 =
-    //   extractvalue %class.anon.1 %8, 1, 0, 2, !dbg !2003 %15 = getelementptr
-    //   inbounds %class.anon.1, ptr %6, i32 0, i32 1, i32 0, i32 2, !dbg !2003
-    //   store double %14, ptr %15, align 8, !dbg !2003
-    // todo: In the shape above, we have multiple stores to the same closureptr.
-    // Problem: SSA selects the store double %14, ptr %15, align 8, but all are
-    // valid In this case, its easy to check the StoreInst's valueptr's
-    // GetPointerBaseWithConstantOffset And verify we are just copying values
-    // from one aggregate into another. If two candidates have a different base
-    // ptr but same offset into TrackedPtr, and one clobbers the other, just
-    // trust the one that clobbers.
-    //
-    // In general: all candidates will be StoreInst, CallBase, or MemIntrinsic
-    // We might have TrackedPtr = %6
-    // %10 = getelementptr inbounds %class.anon.1, ptr %6, i32 0, i32 0, i32 0,
-    // i32 0 %11 = getelementptr inbounds %class.anon.1, ptr %6, i32 0, i32 1,
-    // i32 0, i32 0 store int32 %9, ptr %10 align 8 call void writeslot(%11)
-    // Here we need to check that the CB is writing from the same fundamental
-    // ptr as the store but across the interprocedural boundary, or at least
-    // reject this shape
     return nullptr;
   }
   // Constructor used whenever a NeedsDefUseAnalysis Value is encountered. We
@@ -471,15 +441,15 @@ public:
       : ClobberOracle(std::move(Oracle)), TrackedBase(PtrBegin), DL(Dl) {
     ClobberQuery Query{SeenUse->getFunction(), PtrBegin, SeenUse, TargetOff};
     queryMemorySSA(Query);
-    WorkList.push_back(
-        {PtrBegin, nullptr, SeenUse, SeenUse->getFunction(), PtrBegin});
+    WorkList.push_back({PtrBegin, nullptr, SeenUse, SeenUse->getFunction(),
+                        PtrBegin, nullptr});
     // A pointer-transform on the backwards provenance path may also have an
     // earlier store as a user.  Visit that transform so those writes remain
     // visible, but stop before re-entering the lambda invocation itself.
     if (!isa<GetElementPtrInst, BitCastInst, AddrSpaceCastInst>(SeenUse))
-      Seen.insert(SeenUse);
+      NeverVisit.insert(SeenUse);
     if (LambdaCB)
-      Seen.insert(LambdaCB);
+      NeverVisit.insert(LambdaCB);
     ValueOffsetMap[PtrBegin] = TargetOff;
   }
   auto back() { return WorkList.back(); }
@@ -487,11 +457,17 @@ public:
     Current = WorkList.back();
     Def = Current.LastVal;
     WorkList.pop_back();
+    if (Current.ReturnTo)
+      --Current.ReturnTo->PendingWorkItems;
     return Current;
   }
   auto getLastDef() { return Def; }
-  bool seen(Value *Val) { return Seen.contains(Val); }
-  void markAsSeen(Value *Val) { Seen.insert(Val); }
+  bool seen(Value *Val) {
+    return NeverVisit.contains(Val) ||
+           Seen.contains({Val, Current.ReturnTo.get()});
+  }
+  void markAsSeen(Value *Val) { Seen.insert({Val, Current.ReturnTo.get()}); }
+  void markAsUnseen(Value *Val) { Seen.erase({Val, Current.ReturnTo.get()}); }
   bool empty() { return WorkList.empty(); }
   bool success() { return AnalysisSuccess; }
   bool failed() { return AnalysisFailed; }
@@ -501,7 +477,53 @@ public:
   // Keep track of Function frame
   void pushBack(Value *NextVal, Value *CurVal, Function *Frame,
                 Instruction *UseBoundary, Value *TrackedBase) {
-    WorkList.push_back({NextVal, CurVal, UseBoundary, Frame, TrackedBase});
+    if (Current.ReturnTo)
+      ++Current.ReturnTo->PendingWorkItems;
+    WorkList.push_back(
+        {NextVal, CurVal, UseBoundary, Frame, TrackedBase, Current.ReturnTo});
+  }
+
+  void pushBack(Value *NextVal, Value *CurVal, Function *Frame,
+                Instruction *UseBoundary, Value *TrackedBase,
+                std::shared_ptr<ReturnContinuation> ReturnTo) {
+    if (ReturnTo)
+      ++ReturnTo->PendingWorkItems;
+    WorkList.push_back({NextVal, CurVal, UseBoundary, Frame, TrackedBase,
+                        std::move(ReturnTo)});
+  }
+
+  void noteTrackedWrite() {
+    for (auto Continuation = Current.ReturnTo; Continuation;
+         Continuation = Continuation->Parent)
+      Continuation->SawTrackedWrite = true;
+  }
+
+  void finishCurrentWorkItem() {
+    auto ReturnTo = Current.ReturnTo;
+    if (!ReturnTo || ReturnTo->Completed || ReturnTo->PendingWorkItems != 0 ||
+        !ReturnTo->ReturnedOffset)
+      return;
+
+    ReturnTo->Completed = true;
+    if (ReturnTo->SawTrackedWrite) {
+      // Supporting a helper that both writes through and returns the tracked
+      // pointer requires reconciling two frame-local clobber queries. Reject
+      // that shape rather than treating the call as transparent.
+      AnalysisFailed = true;
+      AnalysisSuccess = false;
+      return;
+    }
+
+    CallBase *Call = ReturnTo->Call;
+    ValueOffsetMap[Call] = *ReturnTo->ReturnedOffset;
+    ProvenReturnedAliasCalls.insert(Call);
+    // A query made before the helper was traversed may have cached the call
+    // itself as MemorySSA's conservative clobber.
+    QueryCache.clear();
+
+    for (User *Usr : Call->users())
+      pushBack(Usr, Call, ReturnTo->CallerFrame, ReturnTo->CallerUseBoundary,
+               ReturnTo->CallerTrackedBase, ReturnTo->Parent);
   }
 
   bool cacheCallBaseWorkItems(CallBase &CB, Value *DefBeforeCB) {
@@ -538,7 +560,7 @@ public:
       ValueOffsetMap[ArgToTrack] = ValueOffsetMap[DefBeforeCB];
       for (User *Usr : ArgToTrack->users())
         Deferred.push_back({Usr, ArgToTrack, ReturnInstVec.front(),
-                            CalledFunction, ArgToTrack});
+                            CalledFunction, ArgToTrack, Current.ReturnTo});
     }
 
     if (!FoundArg)
@@ -689,8 +711,17 @@ public:
     }
 
     auto Location = getTrackedPointerLocation(DL, Query.TrackedPtr);
-    if (Location)
+    if (Location) {
       Result = ClobberOracle->query(*Location, *Query.UseBoundary);
+      // A pointer-returning call that this visitor has traversed through to a
+      // ReturnInst without finding a write is an alias edge, not the memory
+      // definition we seek. Ask the same question immediately before it.
+      while (Result.Kind == MemorySSAClobberKind::Definition &&
+             ProvenReturnedAliasCalls.contains(
+                 dyn_cast_or_null<CallBase>(Result.Instruction))) {
+        Result = ClobberOracle->query(*Location, *Result.Instruction);
+      }
+    }
     QueryCache.try_emplace(Query, Result);
     return Result;
   }
@@ -736,7 +767,7 @@ public:
   void pushBackPointerUsers(Value *V) {
     SmallVector<User *, 4> PossibleWriters;
     for (User *Usr : V->users()) {
-      if (Seen.contains(Usr))
+      if (seen(Usr))
         continue;
       auto *CB = dyn_cast_or_null<CallBase>(Usr);
       if (CB && !isa<DbgInfoIntrinsic>(CB) && !CB->onlyReadsMemory()) {
@@ -769,7 +800,7 @@ public:
       ValueOffsetMap[StoreBase] = ValueOffsetMap[Stored];
       for (User *Usr : StoreBase->users()) {
         auto *LI = dyn_cast<LoadInst>(Usr);
-        if (!LI || Seen.contains(LI))
+        if (!LI || seen(LI))
           continue;
         MemorySSAClobber ReachingDefinition = ClobberOracle->query(*LI);
         if (ReachingDefinition.Kind != MemorySSAClobberKind::Definition ||
@@ -801,22 +832,19 @@ public:
     if (!StoreSize ||
         !offsetCoveredByRange(ValueOffsetMap[StoreBase], 0, *StoreSize))
       return;
-    int64_t WriteOffset = Offset;
-    // Aggregate construction can expose sibling field GEPs to one visitor.
-    // In that specific shape, derive the store offset from its own path rather
-    // than the visitor-wide offset, which may include a sibling field's GEP.
-    if (auto *GEP = dyn_cast<GetElementPtrInst>(StoreBase);
-        GEP && GEP->getSourceElementType()->isStructTy()) {
-      if (!ValueOffsetMap.contains(Current.TrackedBase)) {
-        offsetValueMapFailure(Current.TrackedBase);
-        return;
-      }
-      WriteOffset =
-          ValueOffsetMap[Current.TrackedBase] - ValueOffsetMap[StoreBase];
+    // Derive the correction from this use-def path. Offset is visitor-global
+    // and may include unrelated sibling GEPs or GEPs visited in a returned-
+    // alias helper; it therefore cannot describe this particular store.
+    if (!ValueOffsetMap.contains(TrackedBase)) {
+      offsetValueMapFailure(TrackedBase);
+      return;
     }
+    int64_t WriteOffset =
+        ValueOffsetMap[TrackedBase] - ValueOffsetMap[StoreBase];
     DEBUG(Logger::logs("proteus-pass")
           << "    Found PTRstore applicable to offset " << ValueOffsetMap[&SI]
           << " Store size = " << *StoreSize << " ; " << SI << "\n");
+    noteTrackedWrite();
     PotentialClobbers.push_back(UseDefWriteCandidate{
         .WriteCandidate = &SI,
         .ClobberInfo =
@@ -855,18 +883,127 @@ public:
     }
 
     Value *DefBeforeCB = getLastDef();
+
+    // A pointer-returning helper is another segment of this same use walk.
+    // Enter it through the formal corresponding to the use-def edge that
+    // reached this call. visitReturnInst restores the caller context and
+    // continues from the CallBase result. This deliberately uses the normal
+    // visitor worklist instead of independently tracing returned provenance.
+    bool EnteredReturnedAlias = false;
+    if (CB.getType()->isPointerTy() && DefBeforeCB &&
+        ValueOffsetMap.contains(DefBeforeCB)) {
+      Function *Callee = CB.getCalledFunction();
+      if (Callee && !Callee->isDeclaration()) {
+        auto Returns = proteus::getReturnInstructions(*Callee);
+        if (Returns.size() == 1) {
+          for (unsigned ArgI = 0;
+               ArgI < CB.arg_size() && ArgI < Callee->arg_size(); ++ArgI) {
+            if (CB.getArgOperand(ArgI) != DefBeforeCB)
+              continue;
+
+            Argument *Formal = Callee->getArg(ArgI);
+            ValueOffsetMap[Formal] = ValueOffsetMap[DefBeforeCB];
+            auto ReturnTo = std::make_shared<ReturnContinuation>(
+                ReturnContinuation{&CB, Current.Frame, Current.UseBoundary,
+                                   Current.TrackedBase, Current.ReturnTo, 0,
+                                   false, false, std::nullopt});
+            for (User *Usr : Formal->users())
+              pushBack(Usr, Formal, Callee, Returns.front(), Formal, ReturnTo);
+            EnteredReturnedAlias = true;
+          }
+        }
+      }
+    }
+
+    // The call result is an alias edge, not itself a candidate write. Any
+    // writes performed by the helper are encountered while visiting the
+    // formal's users and are handled by the ordinary StoreInst/CallBase
+    // visitors.
+    if (EnteredReturnedAlias)
+      return;
+
     if (!cacheCallBaseWorkItems(CB, DefBeforeCB)) {
       AnalysisFailed = true;
       AnalysisSuccess = false;
       return;
     }
 
+    noteTrackedWrite();
     PotentialClobbers.push_back(
         {.WriteCandidate = &CB,
          .ClobberInfo = {.Frame = Current.Frame,
                          .TrackedPtr = Current.TrackedBase,
                          .UseBoundary = Current.UseBoundary,
                          .OffsetOfWriteToBasePtr = Offset}});
+  }
+
+  void visitPHINode(PHINode &Phi) {
+    std::optional<int64_t> IncomingOffset;
+    for (Value *Incoming : Phi.incoming_values()) {
+      auto It = ValueOffsetMap.find(Incoming);
+      if (It == ValueOffsetMap.end()) {
+        // Another incoming use may still be on the visitor worklist. Permit
+        // that edge to schedule this PHI again.
+        markAsUnseen(&Phi);
+        return;
+      }
+      if (IncomingOffset && *IncomingOffset != It->second) {
+        AnalysisFailed = true;
+        AnalysisSuccess = false;
+        return;
+      }
+      IncomingOffset = It->second;
+    }
+    if (!IncomingOffset) {
+      AnalysisFailed = true;
+      AnalysisSuccess = false;
+      return;
+    }
+    ValueOffsetMap[&Phi] = *IncomingOffset;
+    pushBackPointerUsers(&Phi);
+  }
+
+  void visitSelectInst(SelectInst &Select) {
+    auto TrueIt = ValueOffsetMap.find(Select.getTrueValue());
+    auto FalseIt = ValueOffsetMap.find(Select.getFalseValue());
+    if (TrueIt == ValueOffsetMap.end() || FalseIt == ValueOffsetMap.end()) {
+      markAsUnseen(&Select);
+      return;
+    }
+    if (TrueIt->second != FalseIt->second) {
+      AnalysisFailed = true;
+      AnalysisSuccess = false;
+      return;
+    }
+    ValueOffsetMap[&Select] = TrueIt->second;
+    pushBackPointerUsers(&Select);
+  }
+
+  void visitReturnInst(ReturnInst &RI) {
+    if (!Current.ReturnTo || RI.getReturnValue() != Current.LastVal ||
+        !Current.LastVal || !ValueOffsetMap.contains(Current.LastVal)) {
+      AnalysisFailed = true;
+      AnalysisSuccess = false;
+      return;
+    }
+
+    auto ReturnTo = Current.ReturnTo;
+    CallBase *Call = ReturnTo->Call;
+    int64_t ReturnedOffset = ValueOffsetMap[Current.LastVal];
+    auto Existing = ValueOffsetMap.find(Call);
+    if (Existing != ValueOffsetMap.end() &&
+        Existing->second != ReturnedOffset) {
+      AnalysisFailed = true;
+      AnalysisSuccess = false;
+      return;
+    }
+    if (ReturnTo->ReturnedOffset &&
+        *ReturnTo->ReturnedOffset != ReturnedOffset) {
+      AnalysisFailed = true;
+      AnalysisSuccess = false;
+      return;
+    }
+    ReturnTo->ReturnedOffset = ReturnedOffset;
   }
 
   void visitGetElementPtrInst(GetElementPtrInst &GEP) {
@@ -884,6 +1021,18 @@ public:
     }
 
     int64_t GEPOffset = StepOffset.getSExtValue();
+    // A nonzero byte-wise GEP erases the aggregate field identity that lets
+    // this analysis distinguish a supported field projection from an
+    // arbitrary mutation of lambda storage. Be conservative when such an
+    // address is reached while following the tracked closure pointer.
+    if (GEPOffset != 0 && GEP.getSourceElementType()->isIntegerTy(8)) {
+      DEBUG(Logger::logs("proteus-pass")
+            << "    [PTR use analysis]: Rejecting byte-wise pointer offset "
+            << GEP << "\n");
+      AnalysisFailed = true;
+      AnalysisSuccess = false;
+      return;
+    }
     DEBUG(Logger::logs("proteus-pass")
           << "    " << "Computed GEP offset " << GEPOffset << "\n");
     Value *GEPBase = GEP.getPointerOperand();
@@ -1047,6 +1196,7 @@ public:
     // copying a field at byte 8 into a field at byte 24 needs a correction of
     // 16, so the caller turns 24 into 8.
     int64_t OffsetCorrection = DstOff - SrcOff;
+    noteTrackedWrite();
     PotentialClobbers.push_back(
         {.WriteCandidate = &I,
          .ClobberInfo = {.Frame = Current.Frame,
@@ -1098,6 +1248,7 @@ getDominatingUse(const DataLayout &DL, Value *ValueNeedingAnalysis,
               << "  [PTR use analysis]: Visiting ptr use " << *V << "\n");
         Visitor.visit(*I);
       }
+      Visitor.finishCurrentWorkItem();
     }
 
     if (!Visitor.success() && !Visitor.failed())
