@@ -35,6 +35,7 @@
 #include <llvm/IR/Type.h>
 #include <llvm/IR/Value.h>
 #include <llvm/TargetParser/Triple.h>
+#include <limits>
 #include <memory>
 #include <optional>
 
@@ -249,6 +250,23 @@ public:
       SSAResult = queryMemorySSA(Candidate.ClobberInfo);
     } else {
       SSAResult = queryMemorySSA(PotentialClobbers.begin()->ClobberInfo);
+    }
+
+    // A broad query rooted at an aggregate may select a write to an unrelated
+    // sibling field. If that would reject a sole memcpy candidate, retry at
+    // the exact zero-relative GEP already proven by the use visitor. Existing
+    // successful queries retain their original result and traversal behavior.
+    if (PotentialClobbers.size() == 1 &&
+        isa<MemTransferInst>(PotentialClobbers.front().WriteCandidate) &&
+        SSAResult.Instruction != PotentialClobbers.front().WriteCandidate) {
+      auto &Candidate = PotentialClobbers.front();
+      if (auto PreciseLocation =
+              getPreciseTrackedLocation(Candidate.ClobberInfo)) {
+        MemorySSAClobber PreciseResult = ClobberOracle->query(
+            *PreciseLocation, *Candidate.ClobberInfo.UseBoundary);
+        if (PreciseResult.Instruction == Candidate.WriteCandidate)
+          SSAResult = PreciseResult;
+      }
     }
     auto *ClobberingInst = SSAResult.Instruction;
     if (!ClobberingInst) {
@@ -724,6 +742,45 @@ public:
     }
     QueryCache.try_emplace(Query, Result);
     return Result;
+  }
+
+  std::optional<MemoryLocation>
+  getPreciseTrackedLocation(const ClobberQuery &Query) const {
+    Value *TrackedObject = getUnderlyingObject(Query.TrackedPtr);
+    Value *BestPtr = nullptr;
+    uint64_t BestSize = std::numeric_limits<uint64_t>::max();
+
+    for (const auto &[Ptr, RemainingOffset] : ValueOffsetMap) {
+      if (RemainingOffset != 0 || !Ptr->getType()->isPointerTy() ||
+          getUnderlyingObject(Ptr) != TrackedObject)
+        continue;
+
+      if (auto *I = dyn_cast<Instruction>(Ptr)) {
+        if (I->getFunction() != Query.Frame)
+          continue;
+      } else if (auto *Arg = dyn_cast<Argument>(Ptr)) {
+        if (Arg->getParent() != Query.Frame)
+          continue;
+      } else {
+        continue;
+      }
+
+      auto *GEP = dyn_cast<GetElementPtrInst>(Ptr);
+      if (!GEP)
+        continue;
+      auto Size = getTypeStoreSize(DL, GEP->getResultElementType());
+      if (!Size || *Size >= BestSize)
+        continue;
+      BestPtr = Ptr;
+      BestSize = *Size;
+    }
+
+    if (!BestPtr)
+      return std::nullopt;
+    DEBUG(Logger::logs("proteus-pass")
+          << "    [PTR use analysis]: Using precise MemorySSA location: ptr="
+          << *BestPtr << "; size=" << BestSize << "\n");
+    return MemoryLocation(BestPtr, LocationSize::precise(BestSize));
   }
 
   bool isSelectedClobber(Instruction &Candidate, Function *Frame,
