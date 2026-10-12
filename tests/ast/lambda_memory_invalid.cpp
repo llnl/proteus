@@ -58,7 +58,7 @@ F *volatile *returnSlotThroughPhi(F *volatile *First, F *volatile *Second,
     Result = returnSlotOnce(Second);
   else
     Result = returnSlotOnce(First);
-  // expected-warning@+1 {{cannot be selected from multiple control-flow}}
+  // expected-warning@+1 {{has been passed through control-flow assignments}}
   return Result;
 }
 
