@@ -226,6 +226,9 @@ private:
   Value *Def = nullptr;
   DenseSet<std::pair<Value *, const ReturnContinuation *>> Seen;
   SmallDenseSet<Value *> NeverVisit;
+  // Owns every ReturnContinuation created by this visitor so the raw
+  // addresses used as Seen keys remain valid and unique for its lifetime.
+  SmallVector<std::shared_ptr<ReturnContinuation>, 8> OwnedContinuations;
 
   bool AnalysisSuccess = false;
   bool AnalysisFailed = false;
@@ -720,7 +723,14 @@ public:
     }
     ParentClobberCandidateStack.push_back(std::move(ParentCandidates));
     PotentialClobbers.clear();
-    WorkList.append(Deferred->second.begin(), Deferred->second.end());
+    // Route through the accounting that popBack undoes: appending directly
+    // would decrement PendingWorkItems without the matching increment and
+    // wrap the unsigned counter, wedging the continuation.
+    for (const UseAnalysisWorkItem &Item : Deferred->second) {
+      if (Item.ReturnTo)
+        ++Item.ReturnTo->PendingWorkItems;
+      WorkList.push_back(Item);
+    }
     DeferredCallBaseWorkItems.erase(Deferred);
   }
 
@@ -1070,6 +1080,10 @@ public:
                 ReturnContinuation{&CB, Current.Frame, Current.UseBoundary,
                                    Current.TrackedBase, Current.ReturnTo, 0,
                                    false, false, std::nullopt});
+            // Seen is keyed on raw continuation addresses; keep every
+            // continuation alive for the visitor's lifetime so a freed
+            // allocation cannot be reused and alias stale Seen entries.
+            OwnedContinuations.push_back(ReturnTo);
             for (User *Usr : Formal->users())
               pushBack(Usr, Formal, Callee, Returns.front(), Formal, ReturnTo);
             EnteredReturnedAlias = true;
@@ -1398,9 +1412,12 @@ getDominatingUse(const DataLayout &DL, Value *ValueNeedingAnalysis,
     while (!Visitor.empty() && !Visitor.success() && !Visitor.failed()) {
       auto CurWorkItem = Visitor.popBack();
       auto *V = CurWorkItem.CurVal;
-      // Prevent loops/infinite recursion
-      if (Visitor.seen(V))
+      // Prevent loops/infinite recursion. Completion accounting must still
+      // run: a duplicate may be the final pending item of a continuation.
+      if (Visitor.seen(V)) {
+        Visitor.finishCurrentWorkItem();
         continue;
+      }
       Visitor.markAsSeen(V);
 
       // Analyze the instruction
