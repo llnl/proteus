@@ -205,7 +205,8 @@ private:
   std::shared_ptr<MemorySSAClobberOracle> ClobberOracle;
   SmallVector<WorkItem> WorkList;
   SmallDenseSet<Value *> Seen;
-
+  // The size of the struct, a pointer to this is passed to the call operator
+  uint64_t FunctorSize;
   int64_t Offset;
   uint32_t KernelArg = 0;
   Function *KernelFunction = nullptr;
@@ -223,9 +224,10 @@ private:
   // Constructor used for cloning and merging branches of phi node analysis
   LambdaArgVisitor(Value *Start, Instruction *LastSeen, CallBase *LambdaCBArg,
                    int64_t Off, const DataLayout &Dl,
-                   std::shared_ptr<MemorySSAClobberOracle> Oracle)
+                   std::shared_ptr<MemorySSAClobberOracle> Oracle,
+                   uint64_t FunctorSizeArg)
       : LambdaCB(LambdaCBArg), DL(Dl), ClobberOracle(std::move(Oracle)),
-        Offset(Off) {
+        FunctorSize(FunctorSizeArg), Offset(Off) {
     WorkList.push_back({Start, LastSeen});
   }
 
@@ -280,7 +282,7 @@ private:
       return std::nullopt;
     }
     LambdaArgVisitor Visitor(Start, MemoryAnalysisPtrUse, LambdaCB, StartOffset,
-                             DL, ClobberOracle);
+                             DL, ClobberOracle, FunctorSize);
     Visitor.AnalysisDepth = AnalysisDepth + 1;
     while (!Visitor.empty() && !Visitor.success() && !Visitor.failed()) {
       auto [V, AccessedFrom] = Visitor.back();
@@ -326,7 +328,7 @@ private:
     }
     LambdaArgVisitor Visitor(Returns.front()->getReturnValue(),
                              MemoryAnalysisPtrUse, LambdaCB, StartOffset, DL,
-                             ClobberOracle);
+                             ClobberOracle, FunctorSize);
     Visitor.AnalysisDepth = AnalysisDepth + 1;
     while (!Visitor.empty() && !Visitor.success() && !Visitor.failed()) {
       auto [V, AccessedFrom] = Visitor.back();
@@ -363,9 +365,10 @@ private:
   }
 
 public:
-  LambdaArgVisitor(CallBase *LambdaCB, Module &M)
-      : LambdaCB(LambdaCB), DL(M.getDataLayout()),
+  LambdaArgVisitor(CallBase *LambdaCB, Module &M, uint64_t FunctorSize_)
+      : LambdaCB(LambdaCB), DL(M.getDataLayout()), FunctorSize(FunctorSize_),
         ClobberOracle(std::make_shared<MemorySSAClobberOracle>()), Offset(0) {
+
     auto *ClosurePtr = LambdaCB->getArgOperand(0);
     WorkList.push_back({ClosurePtr, LambdaCB});
   }
@@ -442,8 +445,14 @@ public:
         OS << "\n";
       });
 
+      // The entity under resolution is the functor storage for value loads,
+      // or the spilled pointer itself for pointer loads -- the pointer's own
+      // store size, so partial corruption of a spill slot is range-checked.
+      uint64_t QueryEntitySize = LI.getType()->isPointerTy()
+                                     ? DL.getTypeStoreSize(LI.getType())
+                                     : FunctorSize;
       auto Res = getDominatingUse(DL, AddressBase, &LI, TargetOffset, LambdaCB,
-                                  ClobberOracle);
+                                  ClobberOracle, QueryEntitySize);
       if (!Res) {
         AnalysisFailed = true;
         AnalysisSuccess = false;
@@ -525,7 +534,7 @@ public:
   // todo: these three methods need to be changed to find a dominating store
   void visitAllocaInst(AllocaInst &Alloca) {
     auto Res = getDominatingUse(DL, &Alloca, MemoryAnalysisPtrUse, Offset,
-                                LambdaCB, ClobberOracle);
+                                LambdaCB, ClobberOracle, FunctorSize);
     if (!Res)
       return;
 
@@ -539,7 +548,7 @@ public:
 
   void visitBitCastInst(BitCastInst &BC) {
     auto Res = getDominatingUse(DL, &BC, MemoryAnalysisPtrUse, Offset, LambdaCB,
-                                ClobberOracle);
+                                ClobberOracle, FunctorSize);
     if (!Res)
       return;
     WorkList.push_back({Res->DominatingWrite, Res->WriteBoundary});
@@ -570,7 +579,7 @@ public:
       AnalysisBase = Alloca;
 
     auto Res = getDominatingUse(DL, AnalysisBase, MemoryAnalysisPtrUse, Offset,
-                                LambdaCB, ClobberOracle);
+                                LambdaCB, ClobberOracle, FunctorSize);
     if (!Res)
       return;
 
@@ -611,11 +620,14 @@ public:
       return;
     }
 
-    // Optional safety: only valid if the tracked byte lies within the copied
-    // region.
+    // Only valid if the tracked byte lies within the copied region AND the
+    // copy spans the tracked functor's full extent; a shorter copy (the
+    // classic wrong-sizeof bug) splices two sources into one functor and the
+    // byte-0 witness would lie for the uncovered slots.
     if (auto *LenC = dyn_cast<ConstantInt>(MT->getLength())) {
       uint64_t Len = LenC->getZExtValue();
-      if (Offset < DstOff || uint64_t(Offset - DstOff) >= Len) {
+      if (Offset < DstOff || uint64_t(Offset - DstOff) >= Len ||
+          uint64_t(Offset - DstOff) + FunctorSize > Len) {
         AnalysisFailed = true;
         return;
       }
@@ -771,10 +783,11 @@ public:
 inline bool analyzeLambdaUses(
     llvm::Module &M,
     DenseMap<CallBase *, LambdaKernelArgAnalysis> &CallBaseToArgOffset,
-    const SmallVector<CallBase *> &CBToAnalyze) {
+    const SmallVector<CallBase *> &CBToAnalyze,
+    uint64_t FunctorStructSize) {
   DEBUG(Logger::logs("proteus-pass") << "Beginning analysis " << "\n");
   for (auto *FunctorCB : CBToAnalyze) {
-    LambdaArgVisitor Visitor(FunctorCB, M);
+    LambdaArgVisitor Visitor(FunctorCB, M, FunctorStructSize);
     while (!Visitor.empty() && !Visitor.success() && !Visitor.failed()) {
       auto [V, LastSeen] = Visitor.back();
       Visitor.MemoryAnalysisPtrUse = LastSeen;
