@@ -155,16 +155,45 @@ Document the intentional `memmove` support regression; reword the
   (5 specialize / 7 decline). Runtime specialization values and caching remain
   unvalidated — final sign-off requires a ROCm machine.
 
-## Known contract limitation (documented, not gated)
+## Missing functor-extent tracking (upgraded to gate item 8)
 
-The analysis is byte-granular: candidate coverage, `WriteOffset`, and the
-MemorySSA anchor all reason about the *first byte* of the tracked field, while
-runtime specialization reads `sizeof(RCType)` bytes at that offset. A write
-that covers the tracked byte but not the whole field (or vice versa) is
-outside the proof. This is pre-existing, shared with the base analysis, and
-mitigated by the frontend's read-only-capture enforcement; the full fix is
-threading the field size from the lambda schema into `ClobberQuery` and
-requiring whole-field coverage. Tracked as follow-up to merge-gate item 1.
+Identified by the author post-review; both reviews under-stated it. The
+semantic unit the analysis must protect is the registered functor's byte
+range [tracked offset, tracked offset + sizeof(functor)): runtime
+specialization reads every registered slot relative to the resolved closure
+offset, so a foreign write to *any* functor byte between the authoritative
+write and the callsite invalidates specialization. The analysis is
+byte-granular instead: candidates must cover byte 0 only
+(`KernelArgPtrUseVisitor.h:889`), non-covering sibling GEPs are skipped
+(`:1109`) making interior-slot writes invisible to candidate collection, and
+`getPreciseTrackedLocation` anchors the MemorySSA query at the *smallest*
+zero-remaining GEP -- whatever size that happens to have.
+
+Evidence from `lambda_clobber_query_suffix.cpp` (passes, 631 specializes):
+the anchor is `gep %LambdaEnvelopeWithSuffix, 0, 0` with size 4, which equals
+the functor extent *only because* that GEP's result type happens to be the
+functor struct. Two consequences:
+
+- Soundness: with a multi-slot functor and a narrower zero-remaining GEP
+  (e.g. to slot 0), a foreign write to a later slot is invisible to both the
+  anchored query and candidate collection -> stale interior-slot
+  specialization. `lambda_mixed_field_overwrite` declines today only because
+  its IR lacks a narrow anchor, so the broad whole-alloca query happens to
+  see the interior store -- anchor luck, not proof.
+- Completeness: the suffix test's pass depends on Clang emitting that typed
+  GEP; a byte-GEP lowering flips it to a decline.
+
+At functor-range granularity, review B's "checked affine source/destination
+mapping with coverage" (its finding 3) is the correct spec after all -- the
+byte-granular membership rule is sound only for the first byte. Fix design:
+thread `TrackedEntitySize` (from the lambda callsite's typed GEP/alloca, or
+conservatively unknown) into `ClobberQuery`; clamp precise anchors to cover
+the full range; classify candidates by range overlap (full-cover resolvable,
+partial overlap -> decline, same-source field-wise writes jointly covering
+the range -> resolvable via the aggregate reconciliation path); decline on
+unknown size + interior ambiguity. Regression tests: multi-slot functor with
+foreign interior write plus a narrow slot-0 GEP (must decline); 2-slot suffix
+variant (must specialize); functor at nonzero envelope offset.
 
 ## Fix progress (on-branch, verified via pseudo-GPU harness)
 
@@ -204,3 +233,7 @@ requiring whole-field coverage. Tracked as follow-up to merge-gate item 1.
 7. Land the regression tests from finding 15 with IR-shape assertions via the
    harness; then the full `lambda_*` suite plus `lambda_mfem_style_launch` on
    ROCm hardware.
+8. Track the registered functor extent and enforce range-granular write
+   coverage (see "Missing functor-extent tracking"); until then, precise
+   anchors narrower than the functor are a latent miscompile channel and
+   interior-write declines are anchor-dependent.
