@@ -75,7 +75,7 @@ variables:
       case "${CI_MACHINE}" in
         matrix)
           BANK_FLAG="--account=${PREFERRED_BANK}"
-          USER_BANKS="$(sacctmgr -nP show assoc where user="${USER}" format=account)"
+          USER_BANKS="$(sacctmgr -nP show assoc where user="${USER}" cluster="${CI_MACHINE}" format=account)"
           ;;
         *)
           BANK_FLAG="--bank=${PREFERRED_BANK}"
