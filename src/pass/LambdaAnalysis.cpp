@@ -60,9 +60,9 @@ using namespace proteus;
 namespace {
 
 struct LambdaJitVariableInfo {
-  llvm::Value *Slot;
-  llvm::Value *Offset;
-  llvm::Type *Type;
+  Value *Slot;
+  Value *Offset;
+  Type *Type;
 };
 
 class LambdaPassImpl {
@@ -95,7 +95,7 @@ public:
     //      from the callsite
     //      (a) (HOST ONLY) Inject __proteus_register_lambda_runtime_constant into the functor operator()
     //          IR with the call operator functor ID as the key.  Use the analysis from (2) to
-    //          determine which llvm::Value to pass to the call.
+    //          determine which Value to pass to the call.
     // (4) (RUNTIME) (DEVICE) Look at all the call operators within a kernel, replace
     //     with runtime constants now propagated from the registry.
     // (5) (RUNTIME) (HOST) For host operator() calls, we trust the values registered
@@ -131,6 +131,7 @@ public:
       registerLambdaRuntimeConstants(M, LambdaStorageTypeToJitIndices,
                                      FunctorIDToLambdaTypeMap,
                                      FunctorIDToFunctorTypeMap);
+      attachFunctorSizeToCallsiteMetadata(M, FunctorIDToFunctorTypeMap);
     }
 
     DEBUG(Logger::logs("lambda-pass")
@@ -146,31 +147,51 @@ public:
 private:
   ProteusTypes Types;
 
+  /// Record the registered functor's byte size on each wrapper operator so
+  /// the kernel-arg analysis can reason about the functor's full extent
+  /// rather than a single byte (see gate item 8 in
+  /// docs/dev/reviews/clobbering-aware-use-analysis.md).
+  void attachFunctorSizeToCallsiteMetadata(
+      Module &M,
+      const DenseMap<uint64_t, StructType *> &FunctorIDToFunctorTypeMap) {
+    const DataLayout &DL = M.getDataLayout();
+    for (auto &F : M.getFunctionList()) {
+      auto OptionalMeta = getU64Metadata(&F, "proteus.wrapper_call");
+      if (!OptionalMeta)
+        continue;
+      auto It = FunctorIDToFunctorTypeMap.find(*OptionalMeta);
+      if (It == FunctorIDToFunctorTypeMap.end() || !It->second->isSized())
+        continue;
+      setU64FunctionMetadata(&F, "proteus.functor_size",
+                             DL.getTypeAllocSize(It->second));
+    }
+  }
+
   static void
-  findAnnotatedFunctions(llvm::Module &M, llvm::StringRef Wanted,
-                         llvm::SmallVectorImpl<llvm::Function *> &Out) {
+  findAnnotatedFunctions(Module &M, StringRef Wanted,
+                         SmallVectorImpl<Function *> &Out) {
     auto *GA = M.getGlobalVariable("llvm.global.annotations");
     if (!GA)
       return;
 
-    auto *CA = llvm::dyn_cast<llvm::ConstantArray>(GA->getOperand(0));
+    auto *CA = dyn_cast<ConstantArray>(GA->getOperand(0));
     if (!CA)
       return;
 
-    llvm::SmallDenseSet<llvm::Function *, 32> Seen;
+    SmallDenseSet<Function *, 32> Seen;
 
-    for (llvm::Value *Elt : CA->operands()) {
-      auto *CS = llvm::dyn_cast<llvm::ConstantStruct>(Elt);
+    for (Value *Elt : CA->operands()) {
+      auto *CS = dyn_cast<ConstantStruct>(Elt);
       if (!CS || CS->getNumOperands() < 5)
         continue;
 
-      auto *F = llvm::dyn_cast<llvm::Function>(
+      auto *F = dyn_cast<Function>(
           CS->getOperand(0)->stripPointerCasts());
       if (!F)
         continue;
 
-      llvm::StringRef Ann;
-      if (!llvm::getConstantStringInfo(CS->getOperand(1)->stripPointerCasts(),
+      StringRef Ann;
+      if (!getConstantStringInfo(CS->getOperand(1)->stripPointerCasts(),
                                        Ann))
         continue;
       if (Ann != Wanted)
@@ -182,31 +203,35 @@ private:
     }
   }
 
+  // Parses "annotate(Wanted, <u64 id>[, <u64 second payload>])" entries. When
+  // SecondPayloadOut is non-null, the optional second constant (e.g. the
+  // closure byte size on proteus.wrapper_call) is collected per function.
   static void findAnnotatedFunctions(
-      llvm::Module &M, llvm::StringRef Wanted,
-      llvm::SmallVectorImpl<std::pair<llvm::Function *, std::uint64_t>> &Out) {
+      Module &M, StringRef Wanted,
+      SmallVectorImpl<std::pair<Function *, std::uint64_t>> &Out,
+      DenseMap<Function *, std::uint64_t> *SecondPayloadOut = nullptr) {
     auto *GA = M.getGlobalVariable("llvm.global.annotations");
     if (!GA)
       return;
 
-    auto *CA = llvm::dyn_cast<llvm::ConstantArray>(GA->getOperand(0));
+    auto *CA = dyn_cast<ConstantArray>(GA->getOperand(0));
     if (!CA)
       return;
 
-    llvm::SmallDenseMap<llvm::Function *, std::uint64_t, 32> Seen;
+    SmallDenseMap<Function *, std::uint64_t, 32> Seen;
 
-    for (llvm::Value *Elt : CA->operands()) {
-      auto *CS = llvm::dyn_cast<llvm::ConstantStruct>(Elt);
+    for (Value *Elt : CA->operands()) {
+      auto *CS = dyn_cast<ConstantStruct>(Elt);
       if (!CS || CS->getNumOperands() < 5)
         continue;
 
-      auto *F = llvm::dyn_cast<llvm::Function>(
+      auto *F = dyn_cast<Function>(
           CS->getOperand(0)->stripPointerCasts());
       if (!F)
         continue;
 
-      llvm::StringRef Ann;
-      if (!llvm::getConstantStringInfo(CS->getOperand(1)->stripPointerCasts(),
+      StringRef Ann;
+      if (!getConstantStringInfo(CS->getOperand(1)->stripPointerCasts(),
                                        Ann))
         continue;
       if (Ann != Wanted)
@@ -214,24 +239,28 @@ private:
 
       // Parse the u64 payload (operand 4)
       std::uint64_t Id = 0;
-      llvm::Value *ArgsPtr = CS->getOperand(4)->stripPointerCasts();
-      if (llvm::isa<llvm::ConstantPointerNull>(ArgsPtr))
+      Value *ArgsPtr = CS->getOperand(4)->stripPointerCasts();
+      if (isa<ConstantPointerNull>(ArgsPtr))
         continue;
 
-      auto *ArgsGV = llvm::dyn_cast<llvm::GlobalVariable>(ArgsPtr);
+      auto *ArgsGV = dyn_cast<GlobalVariable>(ArgsPtr);
       if (!ArgsGV)
         continue;
 
       auto *ArgsInit = ArgsGV->getInitializer();
-      auto *ArgsCS = llvm::dyn_cast<llvm::ConstantStruct>(ArgsInit);
+      auto *ArgsCS = dyn_cast<ConstantStruct>(ArgsInit);
       if (!ArgsCS || ArgsCS->getNumOperands() < 1)
         continue;
 
-      auto *CI = llvm::dyn_cast<llvm::ConstantInt>(ArgsCS->getOperand(0));
+      auto *CI = dyn_cast<ConstantInt>(ArgsCS->getOperand(0));
       if (!CI)
         continue;
 
       Id = CI->getZExtValue();
+
+      if (SecondPayloadOut && ArgsCS->getNumOperands() >= 2)
+        if (auto *SecondCI = dyn_cast<ConstantInt>(ArgsCS->getOperand(1)))
+          SecondPayloadOut->try_emplace(F, SecondCI->getZExtValue());
 
       if (Seen.try_emplace(F, Id).second)
         Out.emplace_back(F, Id);
@@ -271,22 +300,6 @@ private:
     auto *IdMD =
         ConstantAsMetadata::get(ConstantInt::get(Type::getInt64Ty(Ctx), Id));
     F->setMetadata(Key, MDNode::get(Ctx, {IdMD}));
-  }
-
-  std::optional<uint64_t> getU64Metadata(Function *F, StringRef Key) {
-    if (!F)
-      return std::nullopt;
-
-    auto *Node = F->getMetadata(Key);
-    if (!Node || Node->getNumOperands() < 1)
-      return std::nullopt;
-
-    auto *CAM = dyn_cast<ConstantAsMetadata>(Node->getOperand(0));
-    auto *CI = CAM ? dyn_cast<ConstantInt>(CAM->getValue()) : nullptr;
-    if (!CI)
-      return std::nullopt;
-
-    return CI->getZExtValue();
   }
 
   void addMetadataNodeWithNameFromLLVMGlobal(Module &M,
@@ -329,13 +342,25 @@ private:
         LambdaCallToFunctor;
     // The preprocessor tags each operator() with a proteus.wrapper_call.  Use
     // the annotation to find the LambdaFunctorWrapper::operator() calls.
-    findAnnotatedFunctions(M, "proteus.wrapper_call", FunctorOperatorMethods);
+    DenseMap<Function *, uint64_t> FunctorSizes;
+    findAnnotatedFunctions(M, "proteus.wrapper_call", FunctorOperatorMethods,
+                           &FunctorSizes);
 
     for (auto &[FunctorOperator, FunctorId] : FunctorOperatorMethods) {
       // Proteus will prune llvm.global.annotations, so add a metadata node with
       // the preprocessor-emitted FunctorID and proteus.wrapper_call keyword.
       setU64FunctionMetadata(FunctorOperator, "proteus.wrapper_call",
                              FunctorId);
+      // Record the closure's byte size from the annotation payload. This runs
+      // for host and device modules alike; the device kernel-arg analysis
+      // consumes it as the tracked entity's extent. On the host,
+      // attachFunctorSizeToCallsiteMetadata recomputes the size from the
+      // registered functor type, and setU64FunctionMetadata fatals on a
+      // mismatch -- a free layout cross-check.
+      if (auto SizeIt = FunctorSizes.find(FunctorOperator);
+          SizeIt != FunctorSizes.end())
+        setU64FunctionMetadata(FunctorOperator, "proteus.functor_size",
+                               SizeIt->second);
       for (auto &BB : *FunctorOperator) {
         for (auto &I : BB) {
           CallBase *CB = dyn_cast<CallBase>(&I);
@@ -357,7 +382,7 @@ private:
                   std::string::npos || // your main::$_0 form
               CalledFunctionName.find("$_") !=
                   std::string::npos || // survives even if demangle fails
-              llvm::StringRef(CalledFunctionName)
+              StringRef(CalledFunctionName)
                   .starts_with("_ZZ"); // local-scope Itanium
 
           if (!IsCallOp || !LooksLikeLambda)
