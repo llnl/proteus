@@ -2,6 +2,7 @@
   extends: .job_on_tioga
   interruptible: true
   before_script:
+    - !reference [.select-bank, before_script]
     - echo "=== Start CI spack Tests ==="
   after_script:
     - !reference [.clean-flux-allocation, after_script]
