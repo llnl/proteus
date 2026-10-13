@@ -79,6 +79,9 @@ hipError_t __hipPopCallConfiguration(dim3 *Grid, dim3 *Block,
                                      size_t *SharedMem, hipStream_t *Stream);
 } // extern "C"
 
+#define hipLaunchKernelGGL(Kernel, Grid, Block, SharedMem, Stream, ...)        \
+  (Kernel)<<<(Grid), (Block), (SharedMem), (Stream)>>>(__VA_ARGS__)
+
 template <typename T>
 static inline hipError_t hipMallocManaged(T **Ptr, size_t Size,
                                           unsigned Flags = 1) {

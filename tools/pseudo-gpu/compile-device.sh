@@ -79,6 +79,9 @@ COMMON_ARGS=(
   -DPROTEUS_ENABLE_HIP=1
   -I "$REPO_ROOT/tools/pseudo-gpu/include"
   -I "$REPO_ROOT/include"
+  # Real HIP force-includes clang's runtime wrapper before user code; mirror
+  # that so target attribute macros exist regardless of include order.
+  -include hip/hip_runtime.h
 )
 
 WORK_DIR=$(mktemp -d /tmp/pseudo-gpu.XXXXXX)
