@@ -214,6 +214,11 @@ private:
   std::optional<RuntimeConstantType> ChangedRC = std::nullopt;
   bool AnalysisSuccess = false;
   bool AnalysisFailed = false;
+  // Depth of nested clone/function sub-analyses. Cyclic PHI webs and
+  // recursive pointer-returning callees otherwise recurse without bound,
+  // because each sub-analysis starts with a fresh Seen set.
+  int AnalysisDepth = 0;
+  static constexpr int MaxAnalysisDepth = 32;
 
   // Constructor used for cloning and merging branches of phi node analysis
   LambdaArgVisitor(Value *Start, Instruction *LastSeen, CallBase *LambdaCBArg,
@@ -268,8 +273,15 @@ private:
   inline std::optional<LambdaKernelArgAnalysis>
   cloneAndAnalyze(Value *Start, Instruction *MemoryAnalysisPtrUse,
                   int64_t StartOffset) {
+    if (AnalysisDepth >= MaxAnalysisDepth) {
+      DEBUG(Logger::logs("proteus-pass")
+            << "[Lambda arg analysis]: Sub-analysis depth limit reached at "
+            << *Start << "\n");
+      return std::nullopt;
+    }
     LambdaArgVisitor Visitor(Start, MemoryAnalysisPtrUse, LambdaCB, StartOffset,
                              DL, ClobberOracle);
+    Visitor.AnalysisDepth = AnalysisDepth + 1;
     while (!Visitor.empty() && !Visitor.success() && !Visitor.failed()) {
       auto [V, AccessedFrom] = Visitor.back();
       Visitor.MemoryAnalysisPtrUse = AccessedFrom;
@@ -293,14 +305,29 @@ private:
 
   inline std::optional<FunctionAnalysis> analyzeFunction(CallBase &CB,
                                                          int64_t StartOffset) {
+    if (AnalysisDepth >= MaxAnalysisDepth) {
+      DEBUG(Logger::logs("proteus-pass")
+            << "[Lambda arg analysis]: Sub-analysis depth limit reached at "
+            << CB << "\n");
+      return std::nullopt;
+    }
     FunctionAnalysis Result;
     auto &F = *CB.getCalledFunction();
-    auto RetInstOpt = getRetInst(F);
-    if (!RetInstOpt)
+    // Analyzing one return of a multi-return callee would specialize every
+    // path through it from a single path's provenance. Require exactly one
+    // value-returning ReturnInst, matching the forward use visitor.
+    const auto Returns = getReturnInstructions(F);
+    if (Returns.size() != 1 || !Returns.front()->getReturnValue()) {
+      DEBUG(Logger::logs("proteus-pass")
+            << "[Lambda arg analysis]: Expected exactly one value-returning "
+               "ReturnInst in "
+            << F.getName() << "; found " << Returns.size() << "\n");
       return std::nullopt;
-    LambdaArgVisitor Visitor(RetInstOpt.value()->getReturnValue(),
+    }
+    LambdaArgVisitor Visitor(Returns.front()->getReturnValue(),
                              MemoryAnalysisPtrUse, LambdaCB, StartOffset, DL,
                              ClobberOracle);
+    Visitor.AnalysisDepth = AnalysisDepth + 1;
     while (!Visitor.empty() && !Visitor.success() && !Visitor.failed()) {
       auto [V, AccessedFrom] = Visitor.back();
       DEBUG(Logger::logs("proteus-pass")
@@ -619,18 +646,30 @@ public:
       return;
     }
 
+    // Only direct callsites of F can supply this argument. Any other use --
+    // F passed as a call operand, its address stored -- means the address
+    // escapes, so an unseen indirect callsite could also supply the lambda
+    // and single-caller reasoning no longer holds.
     SmallVector<CallBase *, 2> CallSites;
-    for (User *U : F->users())
-      if (auto *CB = dyn_cast<CallBase>(U); CB && ArgNum < CB->arg_size())
+    bool AddressEscapes = false;
+    for (Use &U : F->uses()) {
+      auto *CB = dyn_cast<CallBase>(U.getUser());
+      if (!CB || !CB->isCallee(&U)) {
+        AddressEscapes = true;
+        continue;
+      }
+      if (ArgNum < CB->arg_size())
         CallSites.push_back(CB);
+    }
 
     // This visitor does not carry call context. Following more than one
     // caller would let worklist order choose which actual argument supplies
     // the lambda, so reject that shape conservatively.
-    if (CallSites.size() != 1) {
+    if (AddressEscapes || CallSites.size() != 1) {
       DEBUG(Logger::logs("proteus-pass")
-            << "[Lambda arg analysis]: Expected one caller for argument " << A
-            << "; found " << CallSites.size() << "\n");
+            << "[Lambda arg analysis]: Expected one direct caller for argument "
+            << A << "; found " << CallSites.size()
+            << (AddressEscapes ? " plus address-escaping uses" : "") << "\n");
       AnalysisFailed = true;
       AnalysisSuccess = false;
       return;
