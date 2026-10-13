@@ -465,6 +465,22 @@ inline bool hasU64Metadata(Function *F, StringRef Key) {
   return F->getMetadata(Key) != nullptr;
 }
 
+inline std::optional<uint64_t> getU64Metadata(Function *F, StringRef Key) {
+  if (!F)
+    return std::nullopt;
+
+  auto *Node = F->getMetadata(Key);
+  if (!Node || Node->getNumOperands() < 1)
+    return std::nullopt;
+
+  auto *CAM = dyn_cast<ConstantAsMetadata>(Node->getOperand(0));
+  auto *CI = CAM ? dyn_cast<ConstantInt>(CAM->getValue()) : nullptr;
+  if (!CI)
+    return std::nullopt;
+
+  return CI->getZExtValue();
+}
+
 inline void pruneIR(Module &M, bool UnsetExternallyInitialized = true) {
   // Remove llvm.global.annotations now that we have read them.
   if (auto *GlobalAnnotations = M.getGlobalVariable("llvm.global.annotations"))
