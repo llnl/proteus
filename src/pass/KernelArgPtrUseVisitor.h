@@ -210,6 +210,12 @@ private:
   DenseMap<ClobberQuery, MemorySSAClobber, ClobberQueryDenseMapInfo> QueryCache;
   std::shared_ptr<MemorySSAClobberOracle> ClobberOracle;
   Value *TrackedBase = nullptr;
+  // Byte size of the tracked entity starting at the tracked offset (the
+  // registered functor's extent, from the proteus.functor_size annotation).
+  // TODO(gate-8): consume this to protect the full range; note the canonical
+  // nested-enclosure shape assembles the closure slot-wise with no single
+  // covering write, so range semantics require piece-wise reconciliation.
+  uint64_t TrackedEntitySize = 1;
   LambdaPtrUseAnalysis Result;
   DataLayout DL;
   SmallVector<UseAnalysisWorkItem> WorkList;
@@ -448,8 +454,10 @@ public:
   LambdaInstUseVisitor(Value *PtrBegin, Instruction *SeenUse,
                        CallBase *LambdaCB, const DataLayout &Dl,
                        int64_t TargetOff,
-                       std::shared_ptr<MemorySSAClobberOracle> Oracle)
-      : ClobberOracle(std::move(Oracle)), TrackedBase(PtrBegin), DL(Dl) {
+                       std::shared_ptr<MemorySSAClobberOracle> Oracle,
+                       uint64_t EntitySize)
+      : ClobberOracle(std::move(Oracle)), TrackedBase(PtrBegin),
+        TrackedEntitySize(EntitySize), DL(Dl) {
     ClobberQuery Query{.Frame = SeenUse->getFunction(),
                        .TrackedPtr = PtrBegin,
                        .UseBoundary = SeenUse,
@@ -766,7 +774,24 @@ public:
   MemoryLocation getQueryLocation(const ClobberQuery &Query) const {
     if (auto Precise = getPreciseTrackedLocation(Query))
       return *Precise;
-    if (auto Covering = getTrackedPointerLocation(DL, Query.TrackedPtr))
+    auto Covering = getTrackedPointerLocation(DL, Query.TrackedPtr);
+    // Bound the covering fallback by the tracked entity's extent: the prefix
+    // [0, remaining offset + size) still covers the entity but excludes
+    // writes past it, so e.g. an envelope's suffix store can no longer be
+    // selected as the clobber and spuriously decline a correct shape
+    // (lambda_size_test, kernelEnvelopeSuffix).
+    int64_t Remaining = ValueOffsetMap.lookup(Query.TrackedPtr);
+    if (Remaining >= 0) {
+      uint64_t CoverBytes =
+          static_cast<uint64_t>(Remaining) + TrackedEntitySize;
+      // Keep a smaller already-precise covering location (whole allocation).
+      if (!Covering || !Covering->Size.hasValue() ||
+          !Covering->Size.isPrecise() ||
+          Covering->Size.getValue() > CoverBytes)
+        return MemoryLocation(Query.TrackedPtr,
+                              LocationSize::precise(CoverBytes));
+    }
+    if (Covering)
       return *Covering;
     return MemoryLocation::getBeforeOrAfter(Query.TrackedPtr);
   }
@@ -825,6 +850,12 @@ public:
   // remaining displacement, i.e. it addresses the tracked byte itself. The
   // smallest result size gives the tightest range at that address;
   // equal-size candidates denote the same location, so ties are immaterial.
+  // NOTE: deliberately NOT widened to the tracked entity's extent -- interior
+  // slot stores are legitimate parallel copies in slot-wise assembly (the
+  // mfem shape), and extent-wide visibility would require per-piece
+  // reconciliation to accept them. Interior-write soundness is a frontend
+  // contract; see the functor-extent discussion in
+  // docs/dev/reviews/clobbering-aware-use-analysis.md.
   std::optional<MemoryLocation>
   getPreciseTrackedLocation(const ClobberQuery &Query) const {
     Value *TrackedObject = getUnderlyingObject(Query.TrackedPtr);
@@ -1311,11 +1342,16 @@ public:
         return;
       }
       auto *Len = dyn_cast<ConstantInt>(MS->getLength());
+      // The memset destroys provenance if it touches ANY byte of the tracked
+      // entity [Remaining, Remaining + size), not only its first byte; an
+      // interior-slot memset previously slipped through here.
+      int64_t Remaining = ValueOffsetMap[Def];
       if (Len &&
-          !offsetCoveredByRange(ValueOffsetMap[Def], 0, Len->getZExtValue()))
+          !(Remaining < static_cast<int64_t>(Len->getZExtValue()) &&
+            Remaining + static_cast<int64_t>(TrackedEntitySize) > 0))
         return;
-      // A covering memset destroys the tracked provenance, and a dynamic
-      // length cannot be proven not to cover it.
+      // An overlapping memset destroys the tracked provenance, and a dynamic
+      // length cannot be proven not to overlap it.
       DEBUG(Logger::logs("proteus-pass")
             << "    [PTR use analysis]: Memset may overwrite the tracked "
                "byte: "
@@ -1355,6 +1391,20 @@ public:
     }
     if (!offsetCoveredByRange(ValueOffsetMap[Def], 0, Len->getZExtValue()))
       return;
+    // The transfer defines the tracked byte; it must then cover the entity's
+    // full extent. A shorter copy -- the classic wrong-sizeof production bug,
+    // legal C++ with no casts -- splices two sources into one functor, and
+    // the byte-0 witness would lie for the uncovered slots.
+    if (static_cast<uint64_t>(ValueOffsetMap[Def]) + TrackedEntitySize >
+        Len->getZExtValue()) {
+      DEBUG(Logger::logs("proteus-pass")
+            << "    [PTR use analysis]: Transfer covers the tracked byte but "
+               "not the tracked entity's full extent; declining: "
+            << I << "\n");
+      AnalysisFailed = true;
+      AnalysisSuccess = false;
+      return;
+    }
 
     int64_t DstOff = 0, SrcOff = 0;
     Value *DstBase =
@@ -1401,12 +1451,15 @@ inline std::optional<LambdaPtrUseAnalysis>
 getDominatingUse(const DataLayout &DL, Value *ValueNeedingAnalysis,
                  Instruction *UseofPtr, int64_t TargetOffset,
                  CallBase *LambdaCB,
-                 std::shared_ptr<MemorySSAClobberOracle> ClobberOracle) {
+                 std::shared_ptr<MemorySSAClobberOracle> ClobberOracle,
+                 uint64_t TrackedEntitySize) {
   DEBUG(Logger::logs("proteus-pass")
-        << "Beginning PtrUse analysis with offset = " << TargetOffset << "\n");
+        << "Beginning PtrUse analysis with offset = " << TargetOffset
+        << " entity size = " << TrackedEntitySize << "\n");
 
   LambdaInstUseVisitor Visitor(ValueNeedingAnalysis, UseofPtr, LambdaCB, DL,
-                               TargetOffset, std::move(ClobberOracle));
+                               TargetOffset, std::move(ClobberOracle),
+                               TrackedEntitySize);
   // Analysis loop
   while (!Visitor.success() && !Visitor.failed()) {
     while (!Visitor.empty() && !Visitor.success() && !Visitor.failed()) {
