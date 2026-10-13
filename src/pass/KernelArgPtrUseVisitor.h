@@ -89,13 +89,19 @@ struct ClobberQuery {
   // This is the instruction at which we care about the value of the TrackedPtr.
   // Above, it would be call lambda(%1)
   Instruction *UseBoundary = nullptr;
+  // Per-candidate byte correction consumed by LambdaArgVisitor
+  // (Offset -= Result.Offset); it is NOT part of the query identity.
   int64_t OffsetOfWriteToBasePtr = 0;
-  uint64_t SizeOfWriteToBasePtr = 0;
+  // The byte this query resolves, relative to TrackedPtr. Every MemorySSA
+  // question this analysis asks is "which write reaches
+  // TrackedPtr + TrackedByteOffset at UseBoundary"; this field, not the
+  // per-candidate correction above, is the query identity.
+  int64_t TrackedByteOffset = 0;
 
   bool operator==(const ClobberQuery &Other) const {
     return Frame == Other.Frame && TrackedPtr == Other.TrackedPtr &&
            UseBoundary == Other.UseBoundary &&
-           OffsetOfWriteToBasePtr == Other.OffsetOfWriteToBasePtr;
+           TrackedByteOffset == Other.TrackedByteOffset;
   }
 };
 
@@ -125,7 +131,7 @@ struct ClobberQueryDenseMapInfo {
   static unsigned getHashValue(const ClobberQuery &Query) {
     return static_cast<unsigned>(hash_combine(Query.Frame, Query.TrackedPtr,
                                               Query.UseBoundary,
-                                              Query.OffsetOfWriteToBasePtr));
+                                              Query.TrackedByteOffset));
   }
 
   static bool isEqual(const ClobberQuery &LHS, const ClobberQuery &RHS) {
@@ -223,6 +229,8 @@ private:
 
   bool AnalysisSuccess = false;
   bool AnalysisFailed = false;
+  uint64_t ProcessedWorkItems = 0;
+  static constexpr uint64_t MaxWorkItems = 1 << 17;
 
 public:
   // Data about offset comes from the use-def graph traversal, but information
@@ -236,37 +244,37 @@ public:
             << "Analysis failed to produce any write candidates\n");
       return nullptr;
     }
-    MemorySSAClobber SSAResult;
-    auto *StoreCandidate = llvm::find_if(
-        PotentialClobbers, [](const UseDefWriteCandidate &Candidate) {
-          return isa<StoreInst>(Candidate.WriteCandidate);
+    // All candidates must share a Frame, TrackedPtr, and UseBoundary: the
+    // reconciliation below asks one function-local question -- which write
+    // reaches the tracked byte at the boundary. This shape is baked into the
+    // analysis; a mismatch is an internal error and fails conservatively.
+    const ClobberQuery &CommonInfo = PotentialClobbers.front().ClobberInfo;
+    bool AllTrackedPointersSame =
+        llvm::all_of(PotentialClobbers, [&](const UseDefWriteCandidate &Q) {
+          return Q.ClobberInfo.TrackedPtr == CommonInfo.TrackedPtr &&
+                 Q.ClobberInfo.Frame == CommonInfo.Frame &&
+                 Q.ClobberInfo.UseBoundary == CommonInfo.UseBoundary;
         });
-    if (StoreCandidate != PotentialClobbers.end()) {
-      auto *SI = cast<StoreInst>(StoreCandidate->WriteCandidate);
-      SSAResult = ClobberOracle->query(
-          MemoryLocation::get(SI), *StoreCandidate->ClobberInfo.UseBoundary);
-    } else if (PotentialClobbers.size() == 1) {
-      auto &Candidate = PotentialClobbers.front();
-      SSAResult = queryMemorySSA(Candidate.ClobberInfo);
-    } else {
-      SSAResult = queryMemorySSA(PotentialClobbers.begin()->ClobberInfo);
+    if (!AllTrackedPointersSame) {
+      clobberCandidatesFailure();
+      return nullptr;
     }
 
-    // A broad query rooted at an aggregate may select a write to an unrelated
-    // sibling field. If that would reject a sole memcpy candidate, retry at
-    // the exact zero-relative GEP already proven by the use visitor. Existing
-    // successful queries retain their original result and traversal behavior.
-    if (PotentialClobbers.size() == 1 &&
-        isa<MemTransferInst>(PotentialClobbers.front().WriteCandidate) &&
-        SSAResult.Instruction != PotentialClobbers.front().WriteCandidate) {
-      auto &Candidate = PotentialClobbers.front();
-      if (auto PreciseLocation =
-              getPreciseTrackedLocation(Candidate.ClobberInfo)) {
-        MemorySSAClobber PreciseResult = ClobberOracle->query(
-            *PreciseLocation, *Candidate.ClobberInfo.UseBoundary);
-        if (PreciseResult.Instruction == Candidate.WriteCandidate)
-          SSAResult = PreciseResult;
-      }
+    // Anchor the reconciliation query at the tracked byte itself whenever a
+    // pointer denoting it exists, else at the smallest covering candidate
+    // store, else at the tracked base object. The choice is deterministic --
+    // unlike candidate discovery order -- and soundness does not depend on
+    // it: acceptance requires MemorySSA's selection to be one of the
+    // collected candidates, and every store/transfer candidate covers the
+    // tracked byte, so an imprecise anchor can only yield a decline.
+    MemorySSAClobber SSAResult;
+    if (auto PreciseLocation = getPreciseTrackedLocation(CommonInfo)) {
+      SSAResult = queryLocation(*PreciseLocation, *CommonInfo.UseBoundary);
+    } else if (StoreInst *AnchorStore = findSmallestCoveringStore()) {
+      SSAResult = queryLocation(MemoryLocation::get(AnchorStore),
+                                *CommonInfo.UseBoundary);
+    } else {
+      SSAResult = queryMemorySSA(CommonInfo);
     }
     auto *ClobberingInst = SSAResult.Instruction;
     if (!ClobberingInst) {
@@ -289,24 +297,6 @@ public:
         return nullptr;
       }
       return PotentialClobbers[0].WriteCandidate;
-    }
-    // We check that all the potential clobbers share a TrackedPtr, Frame, and
-    // UseBoundary. This shape is baked into the analysis, because MemorySSA
-    // queries must occur within the same procedure. We do a sanity check here
-    // and fail if it doesn't hold true (internal compiler error).
-    bool AllTrackedPointersSame =
-        llvm::all_of(PotentialClobbers, [&](const UseDefWriteCandidate &Q) {
-          return Q.ClobberInfo.TrackedPtr ==
-                     PotentialClobbers[0].ClobberInfo.TrackedPtr &&
-                 Q.ClobberInfo.Frame ==
-                     PotentialClobbers[0].ClobberInfo.Frame &&
-                 Q.ClobberInfo.UseBoundary ==
-                     PotentialClobbers[0].ClobberInfo.UseBoundary;
-        });
-
-    if (!AllTrackedPointersSame) {
-      clobberCandidatesFailure();
-      return nullptr;
     }
     auto *ClobberingStoreOrNull = dyn_cast<StoreInst>(ClobberingInst);
 
@@ -457,7 +447,11 @@ public:
                        int64_t TargetOff,
                        std::shared_ptr<MemorySSAClobberOracle> Oracle)
       : ClobberOracle(std::move(Oracle)), TrackedBase(PtrBegin), DL(Dl) {
-    ClobberQuery Query{SeenUse->getFunction(), PtrBegin, SeenUse, TargetOff};
+    ClobberQuery Query{.Frame = SeenUse->getFunction(),
+                       .TrackedPtr = PtrBegin,
+                       .UseBoundary = SeenUse,
+                       .OffsetOfWriteToBasePtr = TargetOff,
+                       .TrackedByteOffset = TargetOff};
     queryMemorySSA(Query);
     WorkList.push_back({PtrBegin, nullptr, SeenUse, SeenUse->getFunction(),
                         PtrBegin, nullptr});
@@ -472,6 +466,15 @@ public:
   }
   auto back() { return WorkList.back(); }
   auto popBack() {
+    // Bound total work so no IR shape -- however adversarial -- can make the
+    // analysis run unbounded; exceeding the budget declines specialization.
+    if (++ProcessedWorkItems > MaxWorkItems) {
+      DEBUG(Logger::logs("proteus-pass")
+            << "    [PTR use analysis]: Work-item budget (" << MaxWorkItems
+            << ") exhausted; failing conservatively\n");
+      AnalysisFailed = true;
+      AnalysisSuccess = false;
+    }
     Current = WorkList.back();
     Def = Current.LastVal;
     WorkList.pop_back();
@@ -573,8 +576,22 @@ public:
       if (CB.getArgOperand(ArgI) != DefBeforeCB)
         continue;
 
-      FoundArg = true;
       Argument *ArgToTrack = CalledFunction->getArg(ArgI);
+      // ValueOffsetMap is not call-context scoped: a second entry into this
+      // callee at a different remaining offset would silently retarget facts
+      // computed for the first entry. Equal offsets recompute identical facts
+      // and are permitted.
+      auto ExistingOffset = ValueOffsetMap.find(ArgToTrack);
+      if (ExistingOffset != ValueOffsetMap.end() &&
+          ExistingOffset->second != ValueOffsetMap[DefBeforeCB]) {
+        DEBUG(Logger::logs("proteus-pass")
+              << "    [PTR use analysis]: Conflicting re-entry offsets for "
+                 "formal "
+              << *ArgToTrack << ": " << ExistingOffset->second << " vs "
+              << ValueOffsetMap[DefBeforeCB] << "\n");
+        return false;
+      }
+      FoundArg = true;
       ValueOffsetMap[ArgToTrack] = ValueOffsetMap[DefBeforeCB];
       for (User *Usr : ArgToTrack->users())
         Deferred.push_back({Usr, ArgToTrack, ReturnInstVec.front(),
@@ -716,34 +733,88 @@ public:
     continueFromResolvedClobber(resolveCollectedClobbers());
   }
 
+  // Query the oracle for Location at UseBoundary. A pointer-returning call
+  // that this visitor has traversed through to a ReturnInst without finding a
+  // write is an alias edge, not the memory definition we seek; ask the same
+  // question immediately before it.
+  MemorySSAClobber queryLocation(const MemoryLocation &Location,
+                                 Instruction &UseBoundary) {
+    MemorySSAClobber Result = ClobberOracle->query(Location, UseBoundary);
+    while (Result.Kind == MemorySSAClobberKind::Definition &&
+           ProvenReturnedAliasCalls.contains(
+               dyn_cast_or_null<CallBase>(Result.Instruction))) {
+      Result = ClobberOracle->query(Location, *Result.Instruction);
+    }
+    return Result;
+  }
+
+  // Every reconciliation question is byte-anchored: resolve the location for
+  // Query.TrackedPtr + Query.TrackedByteOffset, exactly when a visited pointer
+  // denotes that byte and as a covering superset of it otherwise. A covering
+  // superset is sound -- acceptance requires the selected clobber to be a
+  // covering candidate -- it only costs completeness.
+  MemoryLocation getQueryLocation(const ClobberQuery &Query) const {
+    if (auto Precise = getPreciseTrackedLocation(Query))
+      return *Precise;
+    if (auto Covering = getTrackedPointerLocation(DL, Query.TrackedPtr))
+      return *Covering;
+    return MemoryLocation::getBeforeOrAfter(Query.TrackedPtr);
+  }
+
   MemorySSAClobber queryMemorySSA(const ClobberQuery &Query) {
     auto Cached = QueryCache.find(Query);
     if (Cached != QueryCache.end())
       return Cached->second;
 
     MemorySSAClobber Result;
-    if (!Query.Frame || !Query.TrackedPtr || !Query.UseBoundary ||
+    if (!Query.Frame || !Query.TrackedPtr ||
+        !Query.TrackedPtr->getType()->isPointerTy() || !Query.UseBoundary ||
         Query.UseBoundary->getFunction() != Query.Frame) {
       QueryCache.try_emplace(Query, Result);
       return Result;
     }
 
-    auto Location = getTrackedPointerLocation(DL, Query.TrackedPtr);
-    if (Location) {
-      Result = ClobberOracle->query(*Location, *Query.UseBoundary);
-      // A pointer-returning call that this visitor has traversed through to a
-      // ReturnInst without finding a write is an alias edge, not the memory
-      // definition we seek. Ask the same question immediately before it.
-      while (Result.Kind == MemorySSAClobberKind::Definition &&
-             ProvenReturnedAliasCalls.contains(
-                 dyn_cast_or_null<CallBase>(Result.Instruction))) {
-        Result = ClobberOracle->query(*Location, *Result.Instruction);
-      }
-    }
+    Result = queryLocation(getQueryLocation(Query), *Query.UseBoundary);
     QueryCache.try_emplace(Query, Result);
     return Result;
   }
 
+  // The deterministic fallback anchor for the reconciliation query when no
+  // pointer denoting exactly the tracked byte exists: the smallest covering
+  // candidate store (ties broken by lowest destination offset). Candidates
+  // with equal size and offset denote the same location, so further
+  // tie-breaking is immaterial.
+  StoreInst *findSmallestCoveringStore() const {
+    StoreInst *Best = nullptr;
+    uint64_t BestSize = std::numeric_limits<uint64_t>::max();
+    int64_t BestOffset = std::numeric_limits<int64_t>::max();
+    for (const UseDefWriteCandidate &Candidate : PotentialClobbers) {
+      auto *SI = dyn_cast<StoreInst>(Candidate.WriteCandidate);
+      if (!SI)
+        continue;
+      auto Size = getTypeStoreSize(DL, SI->getValueOperand()->getType());
+      if (!Size)
+        continue;
+      int64_t DestOffset = 0;
+      if (!GetPointerBaseWithConstantOffset(SI->getPointerOperand(),
+                                            DestOffset, DL))
+        continue;
+      if (*Size < BestSize || (*Size == BestSize && DestOffset < BestOffset)) {
+        Best = SI;
+        BestSize = *Size;
+        BestOffset = DestOffset;
+      }
+    }
+    return Best;
+  }
+
+  // Return a MemoryLocation denoting exactly the tracked byte, when an
+  // already-visited pointer addresses it. Invariant this relies on:
+  // visitGetElementPtrInst only inserts covering GEPs into ValueOffsetMap,
+  // and a remaining offset of zero means the pointer consumed the entire
+  // remaining displacement, i.e. it addresses the tracked byte itself. The
+  // smallest result size gives the tightest range at that address;
+  // equal-size candidates denote the same location, so ties are immaterial.
   std::optional<MemoryLocation>
   getPreciseTrackedLocation(const ClobberQuery &Query) const {
     Value *TrackedObject = getUnderlyingObject(Query.TrackedPtr);
@@ -910,6 +981,7 @@ public:
                 .TrackedPtr = Current.TrackedBase,
                 .UseBoundary = Current.UseBoundary,
                 .OffsetOfWriteToBasePtr = WriteOffset,
+                .TrackedByteOffset = ValueOffsetMap.lookup(Current.TrackedBase),
             },
     });
   }
@@ -951,6 +1023,25 @@ public:
         ValueOffsetMap.contains(DefBeforeCB)) {
       Function *Callee = CB.getCalledFunction();
       if (Callee && !Callee->isDeclaration()) {
+        // Reject recursion through pointer-returning helpers: each entry
+        // mints a fresh ReturnContinuation, and Seen is keyed on
+        // (Value, continuation), so a recursive helper would re-enqueue its
+        // formal's users without bound.
+        bool Recursive = Callee == Current.Frame;
+        for (auto Continuation = Current.ReturnTo;
+             Continuation && !Recursive; Continuation = Continuation->Parent)
+          Recursive = Continuation->CallerFrame == Callee ||
+                      (Continuation->Call &&
+                       Continuation->Call->getCalledFunction() == Callee);
+        if (Recursive) {
+          DEBUG(Logger::logs("proteus-pass")
+                << "    [PTR use analysis]: Rejecting recursive "
+                   "pointer-returning helper "
+                << Callee->getName() << "\n");
+          AnalysisFailed = true;
+          AnalysisSuccess = false;
+          return;
+        }
         auto Returns = proteus::getReturnInstructions(*Callee);
         if (Returns.size() == 1) {
           for (unsigned ArgI = 0;
@@ -959,6 +1050,21 @@ public:
               continue;
 
             Argument *Formal = Callee->getArg(ArgI);
+            // Same conflict rule as cacheCallBaseWorkItems: ValueOffsetMap is
+            // not call-context scoped, so a re-entry at a different remaining
+            // offset must decline rather than retarget in-flight facts.
+            auto ExistingOffset = ValueOffsetMap.find(Formal);
+            if (ExistingOffset != ValueOffsetMap.end() &&
+                ExistingOffset->second != ValueOffsetMap[DefBeforeCB]) {
+              DEBUG(Logger::logs("proteus-pass")
+                    << "    [PTR use analysis]: Conflicting re-entry offsets "
+                       "for formal "
+                    << *Formal << ": " << ExistingOffset->second << " vs "
+                    << ValueOffsetMap[DefBeforeCB] << "\n");
+              AnalysisFailed = true;
+              AnalysisSuccess = false;
+              return;
+            }
             ValueOffsetMap[Formal] = ValueOffsetMap[DefBeforeCB];
             auto ReturnTo = std::make_shared<ReturnContinuation>(
                 ReturnContinuation{&CB, Current.Frame, Current.UseBoundary,
@@ -988,10 +1094,12 @@ public:
     noteTrackedWrite();
     PotentialClobbers.push_back(
         {.WriteCandidate = &CB,
-         .ClobberInfo = {.Frame = Current.Frame,
-                         .TrackedPtr = Current.TrackedBase,
-                         .UseBoundary = Current.UseBoundary,
-                         .OffsetOfWriteToBasePtr = Offset}});
+         .ClobberInfo = {
+             .Frame = Current.Frame,
+             .TrackedPtr = Current.TrackedBase,
+             .UseBoundary = Current.UseBoundary,
+             .OffsetOfWriteToBasePtr = Offset,
+             .TrackedByteOffset = ValueOffsetMap.lookup(Current.TrackedBase)}});
   }
 
   void visitPHINode(PHINode &Phi) {
@@ -1258,11 +1366,12 @@ public:
     noteTrackedWrite();
     PotentialClobbers.push_back(
         {.WriteCandidate = &I,
-         .ClobberInfo = {.Frame = Current.Frame,
-                         .TrackedPtr = Current.TrackedBase,
-                         .UseBoundary = Current.UseBoundary,
-                         .OffsetOfWriteToBasePtr = OffsetCorrection,
-                         .SizeOfWriteToBasePtr = Len->getZExtValue()}});
+         .ClobberInfo = {
+             .Frame = Current.Frame,
+             .TrackedPtr = Current.TrackedBase,
+             .UseBoundary = Current.UseBoundary,
+             .OffsetOfWriteToBasePtr = OffsetCorrection,
+             .TrackedByteOffset = ValueOffsetMap.lookup(Current.TrackedBase)}});
   }
 
   void visitInstruction(Instruction &I) {
