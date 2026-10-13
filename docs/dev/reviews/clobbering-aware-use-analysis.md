@@ -234,6 +234,27 @@ variant (must specialize); functor at nonzero envelope offset.
    harness; then the full `lambda_*` suite plus `lambda_mfem_style_launch` on
    ROCm hardware.
 8. Track the registered functor extent and enforce range-granular write
-   coverage (see "Missing functor-extent tracking"); until then, precise
-   anchors narrower than the functor are a latent miscompile channel and
-   interior-write declines are anchor-dependent.
+   coverage (see "Missing functor-extent tracking").
+   RESOLVED DESIGN (implemented on-branch): the extent travels as a frontend
+   constant -- sizeof in the proteus.wrapper_call annotation payload, folded
+   per-target by Sema, stamped as proteus.functor_size metadata in both
+   modules -- and is consumed by three surgical IR checks: (a) the fallback
+   MemorySSA query location is bounded to [0, offset + size), so writes past
+   the functor can no longer be selected as clobbers (pinned by
+   lambda_size_test, kernelEnvelopeSuffix, which exposed exactly that
+   spurious decline at -O1); (b) a transfer covering the tracked byte must
+   cover the full extent or decline, closing the no-cast partial-memcpy
+   splice (the classic wrong-sizeof bug), in both visitors; (c) memsets
+   decline on any extent overlap instead of ignoring interior-only hits.
+   Deliberately NOT implemented in IR: extent-wide clobber visibility for
+   interior GEP stores -- slot-wise assembly (the mfem shape) makes interior
+   stores legitimate parallel copies, and accepting them would require
+   per-piece backward reconciliation (prototyped, rolled back, twice
+   regressed mfem). Interior-store soundness is instead a FRONTEND CONTRACT:
+   such stores require type erasure visible to the AST checker. REMAINING
+   WORK: the LambdaASTChecker diagnostic (type-erased writes into
+   wrapper-containing storage, mem* builtins on wrapper storage, unions over
+   wrappers) and repurposing lambda_interior_slot_overwrite as an AST
+   rejection test; until it lands, interior-store declines remain
+   anchor-dependent (lambda_mixed_field_overwrite declines by luck, not
+   proof).
