@@ -49,6 +49,7 @@ variables:
   # Limit actual Matrix runner jobs to two global lanes across child pipelines.
   resource_group: "matrix-ci-${MATRIX_CI_LANE}"
   before_script:
+    - !reference [.select-bank, before_script]
     - echo "=== Start CI Build and Test==="
   after_script:
     - !reference [.clean-slurm-allocation, after_script]
