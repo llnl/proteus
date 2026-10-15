@@ -512,6 +512,18 @@ public:
             << *ClobberingStoreOrNull << "\n");
       return nullptr;
     }
+    int64_t ClobberingDestOffsetForDelta = 0;
+    if (!GetPointerBaseWithConstantOffset(
+            ClobberingStoreOrNull->getPointerOperand(),
+            ClobberingDestOffsetForDelta, DL))
+      return nullptr;
+    // One source base is not enough: the source-to-destination translation
+    // must be one affine map, i.e. (source offset - destination offset) must
+    // be constant across the candidates. Without this, a field-swapping copy
+    // from a single source (dest slot 0 <- src slot 1, dest slot 1 <- src
+    // slot 0) passes the same-base check and specializes transposed slots.
+    const int64_t ClobberingDelta =
+        ClobberingOffset - ClobberingDestOffsetForDelta;
     SmallDenseMap<int64_t, SmallVector<std::pair<Value *, StoreInst *>>>
         OffsetToBasePtrStoreMap;
     SmallDenseMap<StoreInst *, SmallVector<std::pair<Value *, int64_t>>>
@@ -535,6 +547,18 @@ public:
           StoreInstToOffsetBasePtrMap[SI].push_back(
               {SIValueBasePtr, ValueOffset});
           DEBUG(Logger::logs("proteus-pass") << "Base ptr candidate = " << *SIValueBasePtr<<"\n");
+          int64_t DestOffset = 0;
+          if (!GetPointerBaseWithConstantOffset(SI->getPointerOperand(),
+                                                DestOffset, DL))
+            return false;
+          if (ValueOffset - DestOffset != ClobberingDelta) {
+            DEBUG(Logger::logs("proteus-pass")
+                  << "Store breaks the affine source-to-destination "
+                     "translation (delta "
+                  << (ValueOffset - DestOffset) << " vs " << ClobberingDelta
+                  << "); declining: " << *SI << "\n");
+            return false;
+          }
           return SIValueBasePtr == ClobberingBasePtr;
         });
 
