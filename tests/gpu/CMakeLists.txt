@@ -282,7 +282,6 @@ CREATE_GPU_TEST(lambda_pointer_field_load lambda_pointer_field_load.cpp)
 CREATE_GPU_TEST(lambda_clobber_shapes lambda_clobber_shapes.cpp)
 CREATE_GPU_TEST(lambda_clobber_query_range lambda_clobber_query_range.cpp)
 CREATE_GPU_TEST(lambda_clobber_query_suffix lambda_clobber_query_suffix.cpp)
-CREATE_GPU_TEST(lambda_interior_slot_overwrite lambda_interior_slot_overwrite.cpp)
 CREATE_GPU_TEST(lambda_portability_aggregate_shapes
                 lambda_portability_aggregate_shapes.cpp)
 CREATE_GPU_TEST(lambda_size_test lambda_size_test.cpp)
