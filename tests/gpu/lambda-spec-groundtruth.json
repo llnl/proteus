@@ -3,7 +3,7 @@
     "generated": "2026-10-15",
     "commit": "34051bce",
     "pipeline": "pseudo-gpu-llvm19",
-    "note": "Baseline at branch tip (pre affine-delta fix). Captured from the pseudo-GPU device pipeline; MUST be re-captured from a ROCm run before being treated as hardware ground truth."
+    "note": "Baseline at branch tip (pre affine-delta fix). Captured from the pseudo-GPU device pipeline; MUST be re-captured from a ROCm run before being treated as hardware ground truth. lambda_interior_slot_overwrite removed: its shape is now rejected by the AST checker (tests/ast/lambda_wrapper_storage_invalid.cpp)."
   },
   "tests": {
     "lambda-two": {
@@ -137,12 +137,6 @@
       ],
       "decline": [
         "makeUntraceableBody"
-      ]
-    },
-    "lambda_interior_slot_overwrite": {
-      "specialize": [],
-      "decline": [
-        "makeInteriorBody"
       ]
     },
     "lambda_memory_intrinsic_shapes": {
