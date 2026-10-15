@@ -85,6 +85,13 @@ private:
   std::optional<RuntimeConstantType> ChangedRC = std::nullopt;
   bool AnalysisSuccess = false;
   bool AnalysisFailed = false;
+
+  // The two flags are a unit: never both true. Every conservative decline
+  // routes through here.
+  void fail() {
+    AnalysisFailed = true;
+    AnalysisSuccess = false;
+  }
   // Depth of nested clone/function sub-analyses. Cyclic PHI webs and
   // recursive pointer-returning callees otherwise recurse without bound,
   // because each sub-analysis starts with a fresh Seen set.
@@ -233,8 +240,7 @@ public:
             << "[Lambda arg analysis]: Cannot trace indirect or declaration "
                "call "
             << CB << "\n");
-      AnalysisFailed = true;
-      AnalysisSuccess = false;
+      fail();
       return;
     }
     // Clone the visitor to determine if this function (a) returns a ptr
@@ -248,8 +254,7 @@ public:
     DEBUG(Logger::logs("proteus-pass")
           << "Function analysis of \n"
           << *CB.getCalledFunction() << " failed \n");
-    AnalysisFailed = true;
-    AnalysisSuccess = false;
+    fail();
   }
 
   void visitLoadInst(LoadInst &LI) {
@@ -268,8 +273,7 @@ public:
       Value *AddressBase = GetPointerBaseWithConstantOffset(
           LI.getPointerOperand(), AddressOffset, DL);
       if (!AddressBase) {
-        AnalysisFailed = true;
-        AnalysisSuccess = false;
+        fail();
         return;
       }
 
@@ -308,8 +312,7 @@ public:
           getDominatingUse(DL, AddressBase, &LI, TargetOffset, LambdaCB,
                            ClobberOracle, QueryEntitySize, PostLoadRange);
       if (!Res) {
-        AnalysisFailed = true;
-        AnalysisSuccess = false;
+        fail();
         return;
       }
 
@@ -329,15 +332,13 @@ public:
     }
 
     // Unknown and MemoryPhi results cannot identify one reaching value.
-    AnalysisFailed = true;
-    AnalysisSuccess = false;
+    fail();
   }
 
   void visitGetElementPtrInst(GetElementPtrInst &GEP) {
     APInt StepOffset(DL.getIndexTypeSizeInBits(GEP.getType()), 0);
     if (!GEP.accumulateConstantOffset(DL, StepOffset)) {
-      AnalysisFailed = true;
-      AnalysisSuccess = false;
+      fail();
       return;
     }
     Offset += StepOffset.getSExtValue();
@@ -381,8 +382,7 @@ public:
       if (Cur)
         AggregateOperand = Cur->getAggregateOperand();
     }
-    AnalysisFailed = true;
-    AnalysisSuccess = false;
+    fail();
   }
 
   // todo: these three methods need to be changed to find a dominating store
@@ -435,8 +435,7 @@ public:
     auto *IntegerVal = ITP.getOperand(0);
     auto *Ptr = dyn_cast<PtrToIntInst>(IntegerVal);
     if (!Ptr) {
-      AnalysisSuccess = false;
-      AnalysisFailed = true;
+      fail();
       return;
     }
     ChangedRC = convertTypeToRuntimeConstantType(Ptr->getType());
@@ -448,7 +447,7 @@ public:
     auto *MT = dyn_cast<MemTransferInst>(&I); // memcpy/memmove
     if (!MT) {
       // memset doesn't preserve any src->dst relationship we can use
-      AnalysisFailed = true;
+      fail();
       return;
     }
 
@@ -458,7 +457,7 @@ public:
     Value *SrcBase =
         GetPointerBaseWithConstantOffset(MT->getRawSource(), SrcOff, DL);
     if (!DstBase || !SrcBase) {
-      AnalysisFailed = true;
+      fail();
       return;
     }
 
@@ -470,7 +469,7 @@ public:
       uint64_t Len = LenC->getZExtValue();
       if (Offset < DstOff || uint64_t(Offset - DstOff) >= Len ||
           uint64_t(Offset - DstOff) + FunctorSize > Len) {
-        AnalysisFailed = true;
+        fail();
         return;
       }
     }
@@ -480,7 +479,7 @@ public:
   }
 
   void visitIntrinsicInst(IntrinsicInst &) {
-    AnalysisFailed = true;
+    fail();
     return;
   }
 
@@ -536,8 +535,7 @@ public:
             << "[Lambda arg analysis]: Expected one direct caller for argument "
             << A << "; found " << CallSites.size()
             << (AddressEscapes ? " plus address-escaping uses" : "") << "\n");
-      AnalysisFailed = true;
-      AnalysisSuccess = false;
+      fail();
       return;
     }
 
@@ -552,21 +550,20 @@ public:
     DEBUG(Logger::logs("proteus-pass")
           << "[Lambda arg analysis]: Unhandled instruction "
           << I.getOpcodeName() << ": " << I << "\n");
-    AnalysisFailed = true;
+    fail();
     return;
   }
 
   void visitPHINode(PHINode &P) {
     if (P.getNumIncomingValues() == 0) {
-      AnalysisFailed = true;
+      fail();
       return;
     }
 
     auto FirstAnalysis =
         cloneAndAnalyze(P.getIncomingValue(0), MemoryAnalysisPtrUse, Offset);
     if (!FirstAnalysis) {
-      AnalysisFailed = true;
-      AnalysisSuccess = false;
+      fail();
       return;
     }
     auto BaseSlot = FirstAnalysis->KernelArgIndex;
@@ -577,8 +574,7 @@ public:
                                       MemoryAnalysisPtrUse, Offset);
       if (!Analysis || Analysis->KernelArgIndex != BaseSlot ||
           Analysis->Offset != BaseOffset) {
-        AnalysisFailed = true;
-        AnalysisSuccess = false;
+        fail();
         return;
       }
     }
@@ -608,8 +604,7 @@ public:
             << "[Lambda arg analysis]: Select arms do not resolve to the "
                "same kernel argument and offset: "
             << S << "\n");
-      AnalysisFailed = true;
-      AnalysisSuccess = false;
+      fail();
       return;
     }
 
