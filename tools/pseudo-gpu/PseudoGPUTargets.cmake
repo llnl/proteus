@@ -34,7 +34,10 @@ set(PSEUDO_GPU_FLAGS
   # that so target attribute macros exist regardless of include order.
   -include hip/hip_runtime.h)
 
-file(GLOB PSEUDO_GPU_TEST_SOURCES "${PROJECT_SOURCE_DIR}/tests/gpu/*.cpp")
+# CONFIGURE_DEPENDS: recheck the listing on every build so newly added test
+# sources get targets without a manual re-run of cmake.
+file(GLOB PSEUDO_GPU_TEST_SOURCES CONFIGURE_DEPENDS
+     "${PROJECT_SOURCE_DIR}/tests/gpu/*.cpp")
 
 set(PSEUDO_GPU_ALL_OUTPUTS)
 foreach(PseudoSource IN LISTS PSEUDO_GPU_TEST_SOURCES)
