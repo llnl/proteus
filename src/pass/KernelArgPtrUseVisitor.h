@@ -214,7 +214,6 @@ getTrackedPointerLocation(const DataLayout &DL, Value *Ptr) {
 // Lambda callsite, we need to determine which definition dominates that ptr.
 class LambdaInstUseVisitor : public InstVisitor<LambdaInstUseVisitor> {
 private:
-  int64_t Offset = 0;
   // ValueRangeMap contains the byte range of the entity relative to each
   // pointer value we're analyzing.
   // For example, let's say that LambdaInstUseVisitor is handed ptr %0 = alloca
@@ -282,8 +281,7 @@ public:
   // attempts to reconcile the results of the two
   inline Value *resolveCollectedClobbers() {
     if (PotentialClobbers.empty()) {
-      AnalysisFailed = true;
-      AnalysisSuccess = false;
+      fail();
       DEBUG(Logger::logs("proteus-pass")
             << "Analysis failed to produce any write candidates\n");
       return nullptr;
@@ -330,8 +328,7 @@ public:
     if (!ClobberingInst) {
       DEBUG(Logger::logs("proteus-pass")
             << "MemorySSA did not identify a clobbering instruction\n");
-      AnalysisFailed = true;
-      AnalysisSuccess = false;
+      fail();
       return nullptr;
     }
     if (PotentialClobbers.size() == 1) {
@@ -342,8 +339,7 @@ public:
               << "Analysis found write at "
               << *PotentialClobbers[0].WriteCandidate
               << "\nBut MemorySSA found " << *ClobberingInst);
-        AnalysisFailed = true;
-        AnalysisSuccess = false;
+        fail();
         return nullptr;
       }
       if (auto *Store = dyn_cast<StoreInst>(ClobberingInst);
@@ -352,8 +348,7 @@ public:
               << "MemorySSA selected a partial store for a whole-range "
                  "clobber query; declining: "
               << *Store << "\n");
-        AnalysisFailed = true;
-        AnalysisSuccess = false;
+        fail();
         return nullptr;
       }
       return PotentialClobbers[0].WriteCandidate;
@@ -378,8 +373,7 @@ public:
                 << "MemorySSA selected a partial store from mixed clobber "
                    "candidates; declining: "
                 << *Store << "\n");
-          AnalysisFailed = true;
-          AnalysisSuccess = false;
+          fail();
           return nullptr;
         }
         return ClobberingInst;
@@ -396,8 +390,7 @@ public:
               << *Candidate.WriteCandidate);
       }
 
-      AnalysisFailed = true;
-      AnalysisSuccess = false;
+      fail();
       return nullptr;
     }
 
@@ -616,7 +609,6 @@ public:
     if (LambdaCB)
       NeverVisit.insert(LambdaCB);
   }
-  auto back() { return WorkList.back(); }
   auto popBack() {
     // Bound total work so no IR shape -- however adversarial -- can make the
     // analysis run unbounded; exceeding the budget declines specialization.
@@ -624,8 +616,7 @@ public:
       DEBUG(Logger::logs("proteus-pass")
             << "    [PTR use analysis]: Work-item budget (" << MaxWorkItems
             << ") exhausted; failing conservatively\n");
-      AnalysisFailed = true;
-      AnalysisSuccess = false;
+      fail();
     }
     Current = WorkList.back();
     Def = Current.LastVal;
@@ -682,8 +673,7 @@ public:
       // Supporting a helper that both writes through and returns the tracked
       // pointer requires reconciling two frame-local clobber queries. Reject
       // that shape rather than treating the call as transparent.
-      AnalysisFailed = true;
-      AnalysisSuccess = false;
+      fail();
       return;
     }
 
@@ -718,7 +708,7 @@ public:
     }
 
     if (!DefBeforeCB || !ValueRangeMap.contains(DefBeforeCB)) {
-      offsetValueMapFailure(DefBeforeCB ? DefBeforeCB : TrackedBase);
+      rangeMapFailure(DefBeforeCB ? DefBeforeCB : TrackedBase);
       return false;
     }
 
@@ -775,8 +765,7 @@ public:
       DEBUG(Logger::logs("proteus-pass")
             << "    [PTR use analysis]: Resolution phase failed: selected "
                "clobber is not an instruction\n");
-      AnalysisFailed = true;
-      AnalysisSuccess = false;
+      fail();
       return;
     }
 
@@ -789,8 +778,7 @@ public:
             << "    [PTR use analysis]: Resolution phase failed: MemorySSA "
                "selection is absent from collected candidates: "
             << *ResolvedInst << "\n");
-      AnalysisFailed = true;
-      AnalysisSuccess = false;
+      fail();
       return;
     }
 
@@ -814,8 +802,7 @@ public:
               OS << "<unknown>";
             OS << "; store=" << *SI << "\n";
           });
-          AnalysisFailed = true;
-          AnalysisSuccess = false;
+          fail();
           return;
         }
       }
@@ -838,8 +825,7 @@ public:
       Value *SourceBase = GetPointerBaseWithConstantOffset(MT->getRawSource(),
                                                            SourceOffset, DL);
       if (!SourceBase) {
-        AnalysisFailed = true;
-        AnalysisSuccess = false;
+        fail();
         return;
       }
       DEBUG(Logger::logs("proteus-pass")
@@ -874,8 +860,7 @@ public:
                      : Deferred->second.size());
         OS << "\n";
       });
-      AnalysisFailed = true;
-      AnalysisSuccess = false;
+      fail();
       return;
     }
 
@@ -1058,17 +1043,22 @@ public:
                           LocationSize::precise(Query.Range.Extent));
   }
 
-  void offsetValueMapFailure(Value *V) {
+  // The two flags are a unit: never both true. Every conservative decline
+  // routes through here.
+  void fail() {
     AnalysisFailed = true;
     AnalysisSuccess = false;
+  }
+
+  void rangeMapFailure(Value *V) {
+    fail();
     DEBUG(Logger::logs("proteus-pass")
           << "    [PTR use analysis]: Analysis failed due to absence of " << *V
-          << " in offset tracking map, this is an internal compiler bug\n");
+          << " in range tracking map, this is an internal compiler bug\n");
   }
 
   void clobberCandidatesFailure() {
-    AnalysisFailed = true;
-    AnalysisSuccess = false;
+    fail();
     DEBUG(Logger::logs("proteus-pass")
           << "    [PTR use analysis]: Analysis failed due to frame/tracked ptr "
              "mismatch"
@@ -1113,7 +1103,7 @@ public:
       if (!Storage)
         return;
       if (!ValueRangeMap.contains(Stored)) {
-        offsetValueMapFailure(Stored);
+        rangeMapFailure(Stored);
         return;
       }
       ValueRangeMap[StoreBase] = ValueRangeMap[Stored];
@@ -1139,7 +1129,7 @@ public:
 
     auto StoreSize = getTypeStoreSize(DL, SI.getValueOperand()->getType());
     if (!ValueRangeMap.contains(StoreBase)) {
-      offsetValueMapFailure(StoreBase);
+      rangeMapFailure(StoreBase);
       return;
     }
     TrackedRange StoreRange = ValueRangeMap[StoreBase];
@@ -1151,7 +1141,7 @@ public:
     // and may include unrelated sibling GEPs or GEPs visited in a returned-
     // alias helper; it therefore cannot describe this particular store.
     if (!ValueRangeMap.contains(TrackedBase)) {
-      offsetValueMapFailure(TrackedBase);
+      rangeMapFailure(TrackedBase);
       return;
     }
     int64_t WriteOffset = ValueRangeMap[TrackedBase].Offset - StoreRange.Offset;
@@ -1186,7 +1176,7 @@ public:
       return;
     }
     if (!ValueRangeMap.contains(LI.getPointerOperand())) {
-      offsetValueMapFailure(LI.getPointerOperand());
+      rangeMapFailure(LI.getPointerOperand());
       return;
     }
     TrackedRange InputRange = ValueRangeMap[LI.getPointerOperand()];
@@ -1244,8 +1234,7 @@ public:
                 << "    [PTR use analysis]: Rejecting recursive "
                    "pointer-returning helper "
                 << Callee->getName() << "\n");
-          AnalysisFailed = true;
-          AnalysisSuccess = false;
+          fail();
           return;
         }
         auto Returns = proteus::getReturnInstructions(*Callee);
@@ -1267,8 +1256,7 @@ public:
                        "for formal "
                     << *Formal << ": " << ExistingRange->second << " vs "
                     << ValueRangeMap[DefBeforeCB] << "\n");
-              AnalysisFailed = true;
-              AnalysisSuccess = false;
+              fail();
               return;
             }
             ValueRangeMap[Formal] = ValueRangeMap[DefBeforeCB];
@@ -1296,8 +1284,7 @@ public:
       return;
 
     if (!cacheCallBaseWorkItems(CB, DefBeforeCB)) {
-      AnalysisFailed = true;
-      AnalysisSuccess = false;
+      fail();
       return;
     }
 
@@ -1308,7 +1295,9 @@ public:
              .Frame = Current.Frame,
              .TrackedPtr = Current.TrackedBase,
              .UseBoundary = Current.UseBoundary,
-             .OffsetOfWriteToBasePtr = Offset,
+             // Unused for calls: a selected CallBase resumes interprocedural
+             // traversal instead of producing a value+correction.
+             .OffsetOfWriteToBasePtr = 0,
              .Range = ValueRangeMap.lookup(Current.TrackedBase)}});
   }
 
@@ -1323,15 +1312,13 @@ public:
         return;
       }
       if (IncomingRange && *IncomingRange != It->second) {
-        AnalysisFailed = true;
-        AnalysisSuccess = false;
+        fail();
         return;
       }
       IncomingRange = It->second;
     }
     if (!IncomingRange) {
-      AnalysisFailed = true;
-      AnalysisSuccess = false;
+      fail();
       return;
     }
     ValueRangeMap[&Phi] = *IncomingRange;
@@ -1346,8 +1333,7 @@ public:
       return;
     }
     if (TrueIt->second != FalseIt->second) {
-      AnalysisFailed = true;
-      AnalysisSuccess = false;
+      fail();
       return;
     }
     ValueRangeMap[&Select] = TrueIt->second;
@@ -1357,8 +1343,7 @@ public:
   void visitReturnInst(ReturnInst &RI) {
     if (!Current.ReturnTo || RI.getReturnValue() != Current.LastVal ||
         !Current.LastVal || !ValueRangeMap.contains(Current.LastVal)) {
-      AnalysisFailed = true;
-      AnalysisSuccess = false;
+      fail();
       return;
     }
 
@@ -1367,13 +1352,11 @@ public:
     TrackedRange ReturnedRange = ValueRangeMap[Current.LastVal];
     auto Existing = ValueRangeMap.find(Call);
     if (Existing != ValueRangeMap.end() && Existing->second != ReturnedRange) {
-      AnalysisFailed = true;
-      AnalysisSuccess = false;
+      fail();
       return;
     }
     if (ReturnTo->ReturnedRange && *ReturnTo->ReturnedRange != ReturnedRange) {
-      AnalysisFailed = true;
-      AnalysisSuccess = false;
+      fail();
       return;
     }
     ReturnTo->ReturnedRange = ReturnedRange;
@@ -1388,8 +1371,7 @@ public:
     // and (b) don't care about, we just care about the SSA to %4.
     APInt StepOffset(DL.getIndexTypeSizeInBits(GEP.getType()), 0);
     if (!GEP.accumulateConstantOffset(DL, StepOffset)) {
-      AnalysisFailed = true;
-      AnalysisSuccess = false;
+      fail();
       return;
     }
 
@@ -1404,8 +1386,7 @@ public:
       DEBUG(Logger::logs("proteus-pass")
             << "    [PTR use analysis]: Rejecting byte-wise pointer offset "
             << GEP << "\n");
-      AnalysisFailed = true;
-      AnalysisSuccess = false;
+      fail();
       return;
     }
     DEBUG(Logger::logs("proteus-pass")
@@ -1415,7 +1396,7 @@ public:
       return;
 
     if (!ValueRangeMap.contains(GEPBase)) {
-      offsetValueMapFailure(GEPBase);
+      rangeMapFailure(GEPBase);
       return;
     }
 
@@ -1437,7 +1418,6 @@ public:
     // tracked entity. This also supports constant type-erased byte GEPs: their
     // i8 element type describes pointer arithmetic, not entity size.
     ValueRangeMap[&GEP] = {BaseRange.Offset - GEPOffset, BaseRange.Extent};
-    Offset += GEPOffset;
     DEBUG(Logger::logs("proteus-pass") << "    " << "Setting map K " << GEP
                                        << " : " << ValueRangeMap[&GEP] << "\n");
     pushBackPointerUsers(&GEP);
@@ -1449,16 +1429,14 @@ public:
     // This analysis should only ever encounter an AllocaInst as the first
     // instruction We assert this below and log a failure otherwise
     if (Def) {
-      AnalysisFailed = true;
-      AnalysisSuccess = false;
+      fail();
       DEBUG(Logger::logs("proteus-pass")
             << "    Dominating use analysis somehow reached AllocaInst from "
                "non-null def\n");
       return;
     }
     if (!ValueRangeMap.contains(&Alloca)) {
-      AnalysisFailed = true;
-      AnalysisSuccess = false;
+      fail();
       DEBUG(Logger::logs("proteus-pass")
             << "    Value offset map not correctly initialized with "
                "AllocaInst\n");
@@ -1475,7 +1453,7 @@ public:
     // In this case, respect the constructor's offset for the pointer operand.
     if (!Def) {
       if (!ValueRangeMap.contains(&BC)) {
-        offsetValueMapFailure(&BC);
+        rangeMapFailure(&BC);
         return;
       }
       ValueRangeMap[BC.getOperand(0)] = ValueRangeMap[&BC];
@@ -1490,7 +1468,7 @@ public:
     // if its not present we need to rely on the pointer operand's offset
     if (!ValueRangeMap.contains(&ASC)) {
       if (!ValueRangeMap.contains(ASC.getPointerOperand())) {
-        offsetValueMapFailure(ASC.getPointerOperand());
+        rangeMapFailure(ASC.getPointerOperand());
         return;
       }
       // AddrSpaceCast does not change the offset we track.
@@ -1511,7 +1489,7 @@ public:
 
     if (auto *MS = dyn_cast<MemSetInst>(&I)) {
       if (!ValueRangeMap.contains(Def)) {
-        offsetValueMapFailure(Def);
+        rangeMapFailure(Def);
         return;
       }
       auto *Len = dyn_cast<ConstantInt>(MS->getLength());
@@ -1528,8 +1506,7 @@ public:
             << "    [PTR use analysis]: Memset may overwrite the tracked "
                "byte: "
             << I << "\n");
-      AnalysisFailed = true;
-      AnalysisSuccess = false;
+      fail();
       return;
     }
 
@@ -1538,15 +1515,14 @@ public:
     // definition reaches the source at this instruction. Reject it until the
     // analysis performs that second clobber query.
     if (isa<MemMoveInst>(&I)) {
-      AnalysisFailed = true;
-      AnalysisSuccess = false;
+      fail();
       return;
     }
 
     auto *MT = cast<MemTransferInst>(&I); // memcpy
 
     if (!ValueRangeMap.contains(Def)) {
-      offsetValueMapFailure(Def);
+      rangeMapFailure(Def);
       return;
     }
     TrackedRange Range = ValueRangeMap[Def];
@@ -1558,8 +1534,7 @@ public:
             << "    [PTR use analysis]: Dynamic-length transfer cannot prove "
                "provenance for the tracked byte: "
             << I << "\n");
-      AnalysisFailed = true;
-      AnalysisSuccess = false;
+      fail();
       return;
     }
     if (!offsetCoveredByRange(Range.Offset, 0, Len->getZExtValue()))
@@ -1577,8 +1552,7 @@ public:
             << Range << " from def " << *Def << "\n"
             << "Transfer size = " << Len->getZExtValue() << "\n"
             << " declining: " << I << "\n");
-      AnalysisFailed = true;
-      AnalysisSuccess = false;
+      fail();
       return;
     }
 
@@ -1590,7 +1564,7 @@ public:
     if (!DstBase || !SrcBase) {
       DEBUG(Logger::logs("proteus-pass")
             << "  [PTR use analysis]: Failure due to nullptr dst/src " << "\n");
-      AnalysisFailed = true;
+      fail();
       return;
     }
 
@@ -1618,8 +1592,7 @@ public:
     DEBUG(Logger::logs("proteus-pass")
           << "    [PTR use analysis]: Unhandled instruction "
           << I.getOpcodeName() << ": " << I << "\n");
-    AnalysisFailed = true;
-    AnalysisSuccess = false;
+    fail();
   }
 };
 
