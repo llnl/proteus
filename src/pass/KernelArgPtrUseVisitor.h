@@ -55,13 +55,15 @@ inline bool offsetCoveredByRange(int64_t TargetOffset, int64_t RangeOffset,
          static_cast<uint64_t>(TargetOffset - RangeOffset) < RangeSize;
 }
 
+inline constexpr unsigned PointerIntervalBitWidth = 128;
+
 inline bool rangesOverlap(int64_t FirstOffset, uint64_t FirstSize,
                           int64_t SecondOffset, uint64_t SecondSize) {
   if (FirstSize == 0 || SecondSize == 0)
     return false;
-  APInt FirstBegin(65, FirstOffset, true);
+  APInt FirstBegin(PointerIntervalBitWidth, FirstOffset, true);
   APInt FirstEnd = FirstBegin + FirstSize;
-  APInt SecondBegin(65, SecondOffset, true);
+  APInt SecondBegin(PointerIntervalBitWidth, SecondOffset, true);
   APInt SecondEnd = SecondBegin + SecondSize;
   return FirstBegin.slt(SecondEnd) && SecondBegin.slt(FirstEnd);
 }
@@ -269,6 +271,20 @@ private:
   uint64_t ProcessedWorkItems = 0;
   static constexpr uint64_t MaxWorkItems = 1 << 17;
 
+  bool storeCoversTrackedRange(const StoreInst &Store) const {
+    auto StoreSize = getTypeStoreSize(DL, Store.getValueOperand()->getType());
+    auto StoredRange = ValueRangeMap.find(Store.getPointerOperand());
+    if (!StoreSize || StoredRange == ValueRangeMap.end() ||
+        StoredRange->second.Extent == 0)
+      return false;
+
+    APInt StoreBegin(PointerIntervalBitWidth, 0, true);
+    APInt StoreEnd = StoreBegin + *StoreSize;
+    APInt RangeBegin(PointerIntervalBitWidth, StoredRange->second.Offset, true);
+    APInt RangeEnd = RangeBegin + StoredRange->second.Extent;
+    return StoreBegin.sle(RangeBegin) && StoreEnd.sge(RangeEnd);
+  }
+
 public:
   // Data about offset comes from the use-def graph traversal, but information
   // about clobbering comes from the MemorySSA IR.  This phase of the analysis
@@ -339,6 +355,16 @@ public:
         AnalysisSuccess = false;
         return nullptr;
       }
+      if (auto *Store = dyn_cast<StoreInst>(ClobberingInst);
+          Store && !storeCoversTrackedRange(*Store)) {
+        DEBUG(Logger::logs("proteus-pass")
+              << "MemorySSA selected a partial store for a whole-range "
+                 "clobber query; declining: "
+              << *Store << "\n");
+        AnalysisFailed = true;
+        AnalysisSuccess = false;
+        return nullptr;
+      }
       return PotentialClobbers[0].WriteCandidate;
     }
     auto *ClobberingStoreOrNull = dyn_cast<StoreInst>(ClobberingInst);
@@ -354,8 +380,19 @@ public:
           PotentialClobbers, [ClobberingInst](const auto &Candidate) {
             return Candidate.WriteCandidate == ClobberingInst;
           });
-      if (Selected != PotentialClobbers.end())
+      if (Selected != PotentialClobbers.end()) {
+        if (auto *Store = dyn_cast<StoreInst>(ClobberingInst);
+            Store && !storeCoversTrackedRange(*Store)) {
+          DEBUG(Logger::logs("proteus-pass")
+                << "MemorySSA selected a partial store from mixed clobber "
+                   "candidates; declining: "
+                << *Store << "\n");
+          AnalysisFailed = true;
+          AnalysisSuccess = false;
+          return nullptr;
+        }
         return ClobberingInst;
+      }
 
       DEBUG(Logger::logs("proteus-pass")
             << "Detected mixed StoreInst/CallBase/MemIntrinsics in list of "
@@ -371,6 +408,55 @@ public:
       AnalysisFailed = true;
       AnalysisSuccess = false;
       return nullptr;
+    }
+
+    // Source provenance is meaningful only after proving that the stores form
+    // a valid destination partition. Exact duplicate intervals are successive
+    // definitions of the same bytes, and disjoint intervals may be aggregate
+    // fields. Partially overlapping intervals can splice bytes from different
+    // values and must be rejected.
+    for (size_t I = 0; I < PotentialClobbers.size(); ++I) {
+      auto *First = cast<StoreInst>(PotentialClobbers[I].WriteCandidate);
+      int64_t FirstOffset = 0;
+      Value *FirstBase = GetPointerBaseWithConstantOffset(
+          First->getPointerOperand(), FirstOffset, DL);
+      auto FirstSize =
+          getTypeStoreSize(DL, First->getValueOperand()->getType());
+      if (!FirstBase || !FirstSize) {
+        DEBUG(Logger::logs("proteus-pass")
+              << "Cannot determine store destination interval: " << *First
+              << "\n");
+        return nullptr;
+      }
+
+      for (size_t J = I + 1; J < PotentialClobbers.size(); ++J) {
+        auto *Second = cast<StoreInst>(PotentialClobbers[J].WriteCandidate);
+        int64_t SecondOffset = 0;
+        Value *SecondBase = GetPointerBaseWithConstantOffset(
+            Second->getPointerOperand(), SecondOffset, DL);
+        auto SecondSize =
+            getTypeStoreSize(DL, Second->getValueOperand()->getType());
+        if (!SecondBase || !SecondSize || FirstBase != SecondBase) {
+          DEBUG(Logger::logs("proteus-pass")
+                << "Cannot prove compatible store destinations: " << *First
+                << " and " << *Second << "\n");
+          return nullptr;
+        }
+
+        APInt FirstBegin(PointerIntervalBitWidth, FirstOffset, true);
+        APInt FirstEnd = FirstBegin + *FirstSize;
+        APInt SecondBegin(PointerIntervalBitWidth, SecondOffset, true);
+        APInt SecondEnd = SecondBegin + *SecondSize;
+        bool Overlap = FirstBegin.slt(SecondEnd) &&
+                       SecondBegin.slt(FirstEnd);
+        bool Identical = FirstBegin == SecondBegin && FirstEnd == SecondEnd;
+        if (Overlap && !Identical) {
+          DEBUG(Logger::logs("proteus-pass")
+                << "Rejecting partially overlapping store destinations: "
+                << *First << " and " << *Second << "\n");
+          return nullptr;
+        }
+      }
     }
 
     // Multiple stores to one exact destination are successive definitions of
@@ -419,12 +505,17 @@ public:
     int64_t ClobberingOffset = 0;
     auto *ClobberingBasePtr = getValueBaseWithConstantOffset(
         ClobberingStoreOrNull->getValueOperand(), ClobberingOffset, DL);
+    if (!ClobberingBasePtr) {
+      DEBUG(Logger::logs("proteus-pass")
+            << "Cannot recover the selected store's source provenance; "
+               "declining: "
+            << *ClobberingStoreOrNull << "\n");
+      return nullptr;
+    }
     SmallDenseMap<int64_t, SmallVector<std::pair<Value *, StoreInst *>>>
         OffsetToBasePtrStoreMap;
     SmallDenseMap<StoreInst *, SmallVector<std::pair<Value *, int64_t>>>
         StoreInstToOffsetBasePtrMap;
-    OffsetToBasePtrStoreMap[ClobberingOffset].push_back(
-        {ClobberingBasePtr, ClobberingStoreOrNull});
     // These two booleans create the axes of cases.
     DEBUG(Logger::logs("proteus-pass") << "Clobbering query ptr candidate = " << *ClobberingBasePtr<<"\n");
     bool StoresHaveSameBasePtr =
@@ -434,6 +525,12 @@ public:
           int64_t ValueOffset = 0;
           auto *SIValueBasePtr =
               getValueBaseWithConstantOffset(ValueOp, ValueOffset, DL);
+          if (!SIValueBasePtr) {
+            DEBUG(Logger::logs("proteus-pass")
+                  << "Cannot recover store source provenance; declining: "
+                  << *SI << "\n");
+            return false;
+          }
           OffsetToBasePtrStoreMap[ValueOffset].push_back({SIValueBasePtr, SI});
           StoreInstToOffsetBasePtrMap[SI].push_back(
               {SIValueBasePtr, ValueOffset});
@@ -687,6 +784,30 @@ public:
     }
 
     if (auto *SI = dyn_cast<StoreInst>(ResolvedInst)) {
+      // When this store resolves a CallBase selected in the parent frame, it
+      // must account for the parent's entire query. A helper-local store to
+      // one field cannot stand in for the other bytes still supplied by the
+      // deferred parent writes.
+      if (!ParentClobberCandidateStack.empty()) {
+        auto StoreSize = getTypeStoreSize(DL, SI->getValueOperand()->getType());
+        auto StoredRange = ValueRangeMap.find(SI->getPointerOperand());
+        if (!storeCoversTrackedRange(*SI)) {
+          DEBUG({
+            auto &OS = Logger::logs("proteus-pass");
+            OS << "    [PTR use analysis]: Callee store covers only part of "
+                  "the parent clobber query; declining: store-size="
+               << (StoreSize ? *StoreSize : 0) << "; query-at-store=";
+            if (StoredRange != ValueRangeMap.end())
+              OS << StoredRange->second;
+            else
+              OS << "<unknown>";
+            OS << "; store=" << *SI << "\n";
+          });
+          AnalysisFailed = true;
+          AnalysisSuccess = false;
+          return;
+        }
+      }
       DEBUG(Logger::logs("proteus-pass")
             << "    [PTR use analysis]: Exiting visitor with value from "
                "resolved store: "
