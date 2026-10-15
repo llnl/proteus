@@ -55,102 +55,99 @@ class FunctionMemorySSAState {
 public:
   explicit FunctionMemorySSAState(Function &F)
       : DL(F.getParent()->getDataLayout()), DT(F), AC(F),
-        TLII(Triple(F.getParent()->getTargetTriple())),
-        TLI(TLII, &F), AA(TLI),
+        TLII(Triple(F.getParent()->getTargetTriple())), TLI(TLII, &F), AA(TLI),
 #if LLVM_VERSION_MAJOR >= 20
-        BAA(DL, F, TLI, AC, &DT),
-        TBAA(/*UsingTypeSanitizer=*/false) {
+        BAA(DL, F, TLI, AC, &DT), TBAA(/*UsingTypeSanitizer=*/false){
 #else
         BAA(DL, F, TLI, AC, &DT) {
 #endif
-    AA.addAAResult(BAA);
-    AA.addAAResult(TBAA);
-    MSSA = std::make_unique<MemorySSA>(F, &AA, &DT);
+                                      AA.addAAResult(BAA);
+  AA.addAAResult(TBAA);
+  MSSA = std::make_unique<MemorySSA>(F, &AA, &DT);
+}
+
+MemorySSA &
+getMemorySSA() {
+  return *MSSA;
+}
+
+bool instructionMayModify(Instruction &I, const MemoryLocation &Location) {
+  if (auto *SI = dyn_cast<StoreInst>(&I);
+      SI && Location.Size.hasValue() && Location.Size.isPrecise() &&
+      !Location.Size.getValue().isScalable()) {
+    int64_t StoreOffset = 0;
+    int64_t LocationOffset = 0;
+    const Value *StoreBase = GetPointerBaseWithConstantOffset(
+        SI->getPointerOperand(), StoreOffset, DL);
+    const Value *LocationBase =
+        GetPointerBaseWithConstantOffset(Location.Ptr, LocationOffset, DL);
+    TypeSize StoreSize = DL.getTypeStoreSize(SI->getValueOperand()->getType());
+
+    if (StoreBase && StoreBase == LocationBase && !StoreSize.isScalable()) {
+      uint64_t StoreBytes = StoreSize.getFixedValue();
+      uint64_t LocationBytes = Location.Size.getValue().getFixedValue();
+      bool Disjoint = StoreOffset <= LocationOffset
+                          ? static_cast<uint64_t>(LocationOffset) -
+                                    static_cast<uint64_t>(StoreOffset) >=
+                                StoreBytes
+                          : static_cast<uint64_t>(StoreOffset) -
+                                    static_cast<uint64_t>(LocationOffset) >=
+                                LocationBytes;
+      if (Disjoint)
+        return false;
+    }
   }
+  return isModSet(AA.getModRefInfo(&I, Location));
+}
 
-  MemorySSA &getMemorySSA() { return *MSSA; }
+bool callCannotModifyTrackedLocal(CallBase &CB,
+                                  const MemoryLocation &Location) {
+  // Respect any precise memory effects already understood by alias analysis.
+  if (!isModSet(AA.getModRefInfo(&CB, Location)))
+    return true;
 
-  bool instructionMayModify(Instruction &I,
-                            const MemoryLocation &Location) {
-    if (auto *SI = dyn_cast<StoreInst>(&I);
-        SI && Location.Size.hasValue() && Location.Size.isPrecise() &&
-        !Location.Size.getValue().isScalable()) {
-      int64_t StoreOffset = 0;
-      int64_t LocationOffset = 0;
-      const Value *StoreBase = GetPointerBaseWithConstantOffset(
-          SI->getPointerOperand(), StoreOffset, DL);
-      const Value *LocationBase = GetPointerBaseWithConstantOffset(
-          Location.Ptr, LocationOffset, DL);
-      TypeSize StoreSize =
-          DL.getTypeStoreSize(SI->getValueOperand()->getType());
-
-      if (StoreBase && StoreBase == LocationBase && !StoreSize.isScalable()) {
-        uint64_t StoreBytes = StoreSize.getFixedValue();
-        uint64_t LocationBytes = Location.Size.getValue().getFixedValue();
-        bool Disjoint =
-            StoreOffset <= LocationOffset
-                ? static_cast<uint64_t>(LocationOffset) -
-                          static_cast<uint64_t>(StoreOffset) >=
-                      StoreBytes
-                : static_cast<uint64_t>(StoreOffset) -
-                          static_cast<uint64_t>(LocationOffset) >=
-                      LocationBytes;
-        if (Disjoint)
+  // Do not use capture tracking to override an explicit inline-assembly
+  // memory clobber. Inline assembly may access memory without exposing the
+  // address as an SSA operand, so the absence of a captured pointer is not
+  // sufficient proof that the tracked allocation is untouched.
+  if (Function *Callee = CB.getCalledFunction()) {
+    for (BasicBlock &BB : *Callee) {
+      for (Instruction &I : BB) {
+        auto *InnerCB = dyn_cast<CallBase>(&I);
+        if (InnerCB && InnerCB->isInlineAsm() && I.mayWriteToMemory())
           return false;
       }
     }
-    return isModSet(AA.getModRefInfo(&I, Location));
   }
 
-  bool callCannotModifyTrackedLocal(CallBase &CB,
-                                    const MemoryLocation &Location) {
-    // Respect any precise memory effects already understood by alias analysis.
-    if (!isModSet(AA.getModRefInfo(&CB, Location)))
-      return true;
+  // This additional proof is valid only for function-local allocations. A
+  // call cannot access such an allocation unless its address escaped earlier
+  // or an alias is supplied by the call itself.
+  const Value *Object = getUnderlyingObject(Location.Ptr);
+  auto *Alloca = dyn_cast<AllocaInst>(Object);
+  if (!Alloca || CB.hasOperandBundles())
+    return false;
 
-    // Do not use capture tracking to override an explicit inline-assembly
-    // memory clobber. Inline assembly may access memory without exposing the
-    // address as an SSA operand, so the absence of a captured pointer is not
-    // sufficient proof that the tracked allocation is untouched.
-    if (Function *Callee = CB.getCalledFunction()) {
-      for (BasicBlock &BB : *Callee) {
-        for (Instruction &I : BB) {
-          auto *InnerCB = dyn_cast<CallBase>(&I);
-          if (InnerCB && InnerCB->isInlineAsm() && I.mayWriteToMemory())
-            return false;
-        }
-      }
-    }
-
-    // This additional proof is valid only for function-local allocations. A
-    // call cannot access such an allocation unless its address escaped earlier
-    // or an alias is supplied by the call itself.
-    const Value *Object = getUnderlyingObject(Location.Ptr);
-    auto *Alloca = dyn_cast<AllocaInst>(Object);
-    if (!Alloca || CB.hasOperandBundles())
+  // `nocapture` would not be enough here: a callee may modify a pointer
+  // argument without retaining it. Require every pointer argument to be
+  // disjoint from the tracked location.
+  for (const Use &Arg : CB.args()) {
+    Value *Actual = Arg.get();
+    if (!Actual->getType()->isPointerTy())
+      continue;
+    if (!AA.isNoAlias(MemoryLocation::getBeforeOrAfter(Actual), Location))
       return false;
-
-    // `nocapture` would not be enough here: a callee may modify a pointer
-    // argument without retaining it. Require every pointer argument to be
-    // disjoint from the tracked location.
-    for (const Use &Arg : CB.args()) {
-      Value *Actual = Arg.get();
-      if (!Actual->getType()->isPointerTy())
-        continue;
-      if (!AA.isNoAlias(MemoryLocation::getBeforeOrAfter(Actual), Location))
-        return false;
-    }
-
-    // The current call is excluded because its operands were checked above.
-    // Any earlier capture could have made the allocation reachable indirectly.
-    return !PointerMayBeCapturedBefore(
-        Alloca, /*ReturnCaptures=*/true,
-#if LLVM_VERSION_MAJOR < 22
-        /*StoreCaptures=*/true,
-#endif
-        &CB, &DT, /*IncludeI=*/false);
   }
-};
+
+  // The current call is excluded because its operands were checked above.
+  // Any earlier capture could have made the allocation reachable indirectly.
+  return !PointerMayBeCapturedBefore(Alloca, /*ReturnCaptures=*/true,
+#if LLVM_VERSION_MAJOR < 22
+                                     /*StoreCaptures=*/true,
+#endif
+                                     &CB, &DT, /*IncludeI=*/false);
+}
+}; // namespace proteus
 
 enum class MemorySSAClobberKind {
   // No definition in this function reaches the queried location.
