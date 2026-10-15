@@ -43,12 +43,6 @@
 namespace proteus {
 using namespace llvm;
 
-// Any instruction creating a new ptr needs use analysis
-bool needsDefUseAnalysis(Value *Val) {
-  return isa<AddrSpaceCastInst>(Val) || isa<AllocaInst>(Val) ||
-         isa<BitCastInst>(Val) || isa<IntToPtrInst>(Val);
-}
-
 inline bool offsetCoveredByRange(int64_t TargetOffset, int64_t RangeOffset,
                                  uint64_t RangeSize) {
   return TargetOffset >= RangeOffset &&
@@ -133,8 +127,6 @@ struct ClobberQuery {
 // one of these structs in generated, combining the context of the ClobberQuery
 // with the Instruction itself.
 struct UseDefWriteCandidate {
-  // std::variant<StoreCandidate, MemIntrinsicCandidate, CallBaseCandidate>
-  // WriteCandidate;
   Instruction *WriteCandidate;
   ClobberQuery ClobberInfo;
 };
@@ -222,7 +214,6 @@ getTrackedPointerLocation(const DataLayout &DL, Value *Ptr) {
 // Lambda callsite, we need to determine which definition dominates that ptr.
 class LambdaInstUseVisitor : public InstVisitor<LambdaInstUseVisitor> {
 private:
-  DominatorTree DTree;
   int64_t Offset = 0;
   // ValueRangeMap contains the byte range of the entity relative to each
   // pointer value we're analyzing.
@@ -526,8 +517,6 @@ public:
         ClobberingOffset - ClobberingDestOffsetForDelta;
     SmallDenseMap<int64_t, SmallVector<std::pair<Value *, StoreInst *>>>
         OffsetToBasePtrStoreMap;
-    SmallDenseMap<StoreInst *, SmallVector<std::pair<Value *, int64_t>>>
-        StoreInstToOffsetBasePtrMap;
     // These two booleans create the axes of cases.
     DEBUG(Logger::logs("proteus-pass") << "Clobbering query ptr candidate = " << *ClobberingBasePtr<<"\n");
     bool StoresHaveSameBasePtr =
@@ -544,8 +533,6 @@ public:
             return false;
           }
           OffsetToBasePtrStoreMap[ValueOffset].push_back({SIValueBasePtr, SI});
-          StoreInstToOffsetBasePtrMap[SI].push_back(
-              {SIValueBasePtr, ValueOffset});
           DEBUG(Logger::logs("proteus-pass") << "Base ptr candidate = " << *SIValueBasePtr<<"\n");
           int64_t DestOffset = 0;
           if (!GetPointerBaseWithConstantOffset(SI->getPointerOperand(),
@@ -1071,26 +1058,6 @@ public:
                           LocationSize::precise(Query.Range.Extent));
   }
 
-  bool isSelectedClobber(Instruction &Candidate, Function *Frame,
-                         Instruction *UseBoundary) {
-    ClobberQuery Query{.Frame = Frame,
-                       .TrackedPtr = TrackedBase,
-                       .UseBoundary = UseBoundary,
-                       .Range = ValueRangeMap.lookup(TrackedBase)};
-    MemorySSAClobber Clobber = queryMemorySSA(Query);
-    bool Selected = Clobber.Kind == MemorySSAClobberKind::Definition &&
-                    Clobber.Instruction == &Candidate;
-    DEBUG({
-      auto &OS = Logger::logs("proteus-pass");
-      OS << "    [PTR use analysis]: MemorySSA "
-         << (Selected ? "selected " : "did not select ") << Candidate;
-      if (!Selected && Clobber.Instruction)
-        OS << "; selected clobber is " << *Clobber.Instruction;
-      OS << "\n";
-    });
-    return Selected;
-  }
-
   void offsetValueMapFailure(Value *V) {
     AnalysisFailed = true;
     AnalysisSuccess = false;
@@ -1176,12 +1143,6 @@ public:
       return;
     }
     TrackedRange StoreRange = ValueRangeMap[StoreBase];
-
-    // Def-use traversal discovers every store through the tracked pointer.
-    // Only the MemorySSA definition reaching the use boundary can provide the
-    // value consumed there; older and non-reaching stores are not candidates.
-    // if (!isSelectedClobber(SI, Current.Frame, Current.UseBoundary))
-    //   return;
 
     if (!StoreSize ||
         !rangesOverlap(StoreRange.Offset, StoreRange.Extent, 0, *StoreSize))
