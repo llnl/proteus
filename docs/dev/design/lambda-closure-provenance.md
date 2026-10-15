@@ -1,6 +1,8 @@
-# Open design decision: provenance horizon for slot-assembled closures
+# Design decision: provenance horizon for slot-assembled closures
 
-Status: OPEN. Owner: lambda kernel-arg analysis (PR #526 and successors).
+Status: DECIDED 2026-10-15 -- option A (see "Resolution" below). Revisit only
+if soundness on IR that never passed the AST checker becomes a product
+requirement. Owner: lambda kernel-arg analysis (PR #526 and successors).
 Context anchors: `src/pass/KernelArgPtrUseVisitor.h` (forward use walk,
 candidate reconciliation), `src/pass/KernelArgVisitor.h` (backward walk,
 kernel-arg termination), `tests/gpu/lambda_mfem_style_launch.cpp`,
@@ -115,16 +117,38 @@ arguments).
 4. Decline determinism: A and C give stable outcomes; B's outcome depends on
    how far SROA happened to run.
 
-## Current position (as of 2026-10-15)
+## Resolution (2026-10-15): option A
 
 A, hardened: witness resolution + extent guards + in-frame partition for
 byte-0 collisions, with interior-store soundness delegated to the frontend
-contract (AST diagnostic still TODO). C remains the end state if unchecked-IR
-paths become a requirement; it should be built as a tier behind the cheap
-paths, not a replacement. Independent of this decision, the partition must
-also enforce **affine delta consistency** (equal `ValueOffset - DestOffset`
-across candidates), without which a field-swapping copy from one source
-passes the same-base check with transposed slots.
+contract (AST diagnostic still TODO).
+
+Rationale. The decisive observation is that C re-proves what A assumes
+rather than accepting anything new: mfem-style shapes already specialize
+under A because the witness chain resolves and the parallel slots ride the
+parallel-copy assumption. C's only marginal value is *checking* that
+assumption -- and the programs that would fail the check are ones that
+dissect closure memory and reassemble it from different kernel arguments
+through type erasure. No portability layer does this (RAJA/Kokkos/mfem
+forward closures whole, by value; that is the point of their abstractions),
+the Proteus usage contract already forbids it, and in C++ the closure
+interior is unreachable without the type erasure the AST checker flags. C
+would therefore price N interprocedural walks per callsite, on every compile
+of the hot production path, to defend against code nobody writes and the
+contract excludes. B remains ruled out by driver 3 (loses mfem).
+
+Framing for the PR: this analysis work buys no new production acceptance and
+is not meant to -- its value is that every known unsoundness changed failure
+category, from silent wrong-constant miscompiles in production kernels to
+conservative declines with logged reasons (or frontend errors), plus
+compile-time guarantees (no hangs, bounded work, deterministic outcomes
+across compiler versions). The one genuinely production-plausible new
+protection is the wrong-sizeof partial-memcpy guard.
+
+Independent of this decision, the in-frame partition must still enforce
+**affine delta consistency** (equal `ValueOffset - DestOffset` across
+candidates), without which a field-swapping copy from one source passes the
+same-base check with transposed slots.
 
 Changing the position requires updating: this file, gate 8 in
 `docs/dev/reviews/clobbering-aware-use-analysis.md`, the NOTE at
