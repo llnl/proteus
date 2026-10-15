@@ -451,8 +451,12 @@ public:
       uint64_t QueryEntitySize = LI.getType()->isPointerTy()
                                      ? DL.getTypeStoreSize(LI.getType())
                                      : FunctorSize;
-      auto Res = getDominatingUse(DL, AddressBase, &LI, TargetOffset, LambdaCB,
-                                  ClobberOracle, QueryEntitySize);
+      std::optional<TrackedRange> PostLoadRange;
+      if (LI.getType()->isPointerTy())
+        PostLoadRange = TrackedRange{OriginalOffset, FunctorSize};
+      auto Res =
+          getDominatingUse(DL, AddressBase, &LI, TargetOffset, LambdaCB,
+                           ClobberOracle, QueryEntitySize, PostLoadRange);
       if (!Res) {
         AnalysisFailed = true;
         AnalysisSuccess = false;
@@ -771,8 +775,7 @@ public:
 inline bool analyzeLambdaUses(
     llvm::Module &M,
     DenseMap<CallBase *, LambdaKernelArgAnalysis> &CallBaseToArgOffset,
-    const SmallVector<CallBase *> &CBToAnalyze,
-    uint64_t FunctorStructSize) {
+    const SmallVector<CallBase *> &CBToAnalyze, uint64_t FunctorStructSize) {
   DEBUG(Logger::logs("proteus-pass") << "Beginning analysis " << "\n");
   for (auto *FunctorCB : CBToAnalyze) {
     LambdaArgVisitor Visitor(FunctorCB, M, FunctorStructSize);

@@ -15,6 +15,7 @@ static_assert(__cplusplus >= 201703L,
 #include <llvm/CodeGen/CommandFlags.h>
 #include <llvm/IR/Constants.h>
 #include <llvm/IR/DebugInfo.h>
+#include <llvm/IR/Instructions.h>
 #include <llvm/IR/Metadata.h>
 #include <llvm/IR/Module.h>
 #include <llvm/IR/PassManager.h>
@@ -63,6 +64,46 @@ static_assert(__cplusplus >= 201703L,
 
 namespace proteus {
 using namespace llvm;
+
+// Return the common provenance root and byte offset for values materialized
+// either through pointer arithmetic or extractvalue chains. Unsupported scalar
+// SSA shapes return nullptr so callers can decline conservatively.
+inline Value *getValueBaseWithConstantOffset(Value *V, int64_t &Offset,
+                                             const DataLayout &DL) {
+  if (!V)
+    return nullptr;
+
+  Offset = 0;
+  bool SawExtractValue = false;
+  while (auto *EVI = dyn_cast<ExtractValueInst>(V)) {
+    SawExtractValue = true;
+    Type *AggregateTy = EVI->getAggregateOperand()->getType();
+    for (unsigned Index : EVI->getIndices()) {
+      if (auto *StructTy = dyn_cast<StructType>(AggregateTy)) {
+        if (Index >= StructTy->getNumElements())
+          return nullptr;
+        Offset += DL.getStructLayout(StructTy)->getElementOffset(Index);
+        AggregateTy = StructTy->getElementType(Index);
+        continue;
+      }
+      if (auto *ArrayTy = dyn_cast<ArrayType>(AggregateTy)) {
+        if (Index >= ArrayTy->getNumElements())
+          return nullptr;
+        Type *ElementTy = ArrayTy->getElementType();
+        Offset += Index * DL.getTypeAllocSize(ElementTy);
+        AggregateTy = ElementTy;
+        continue;
+      }
+      return nullptr;
+    }
+    V = EVI->getAggregateOperand();
+  }
+  if (SawExtractValue)
+    return V;
+  if (V->getType()->isPointerTy())
+    return GetPointerBaseWithConstantOffset(V, Offset, DL);
+  return nullptr;
+}
 
 namespace detail {
 
