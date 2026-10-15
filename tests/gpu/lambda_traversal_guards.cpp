@@ -74,7 +74,8 @@ kernelRecursiveHelper(F Body, int Depth) {
 // taken, so an unseen indirect callsite could supply the lambda argument;
 // single-caller reasoning in the backward argument walk must reject it.
 template <typename F>
-__device__ __attribute__((noinline, optnone)) static void forwardInvoke(F *Body) {
+__device__ __attribute__((noinline, optnone)) static void
+forwardInvoke(F *Body) {
   (*Body)();
 }
 
@@ -100,8 +101,8 @@ kernelEscapedHelper(F Body, bool Direct) {
 // with several must be rejected rather than trusting whichever return the
 // analysis happens to find first.
 template <typename F>
-__device__ __attribute__((noinline, optnone)) static F *
-selectSlot(F *A, F *B, bool UseB) {
+__device__ __attribute__((noinline, optnone)) static F *selectSlot(F *A, F *B,
+                                                                   bool UseB) {
   if (UseB)
     return B;
   return A;

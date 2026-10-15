@@ -135,20 +135,19 @@ struct ClobberQueryDenseMapInfo {
   static ClobberQuery getEmptyKey() {
     return {DenseMapInfo<Function *>::getEmptyKey(),
             DenseMapInfo<Value *>::getEmptyKey(),
-            DenseMapInfo<Instruction *>::getEmptyKey(), 0};
+            DenseMapInfo<Instruction *>::getEmptyKey(), 0, TrackedRange{}};
   }
 
   static ClobberQuery getTombstoneKey() {
     return {DenseMapInfo<Function *>::getTombstoneKey(),
             DenseMapInfo<Value *>::getTombstoneKey(),
-            DenseMapInfo<Instruction *>::getTombstoneKey(), 0};
+            DenseMapInfo<Instruction *>::getTombstoneKey(), 0, TrackedRange{}};
   }
 
   static unsigned getHashValue(const ClobberQuery &Query) {
-    return static_cast<unsigned>(hash_combine(Query.Frame, Query.TrackedPtr,
-                                              Query.UseBoundary,
-                                              Query.Range.Offset,
-                                              Query.Range.Extent));
+    return static_cast<unsigned>(
+        hash_combine(Query.Frame, Query.TrackedPtr, Query.UseBoundary,
+                     Query.Range.Offset, Query.Range.Extent));
   }
 
   static bool isEqual(const ClobberQuery &LHS, const ClobberQuery &RHS) {
@@ -287,8 +286,9 @@ public:
       return nullptr;
     }
     DEBUG(Logger::logs("proteus-pass") << "Resolving collected clobbers\n");
-    for (const auto& Candidate : PotentialClobbers)
-      DEBUG(Logger::logs("proteus-pass") << "CANDIDATE = " << *Candidate.WriteCandidate <<"\n");
+    for (const auto &Candidate : PotentialClobbers)
+      DEBUG(Logger::logs("proteus-pass")
+            << "CANDIDATE = " << *Candidate.WriteCandidate << "\n");
     // This is mostly a sanity check.
     // All candidates must share a Frame, TrackedPtr, and UseBoundary: the
     // reconciliation below asks one function-local question -- which write
@@ -431,8 +431,7 @@ public:
         APInt FirstEnd = FirstBegin + *FirstSize;
         APInt SecondBegin(PointerIntervalBitWidth, SecondOffset, true);
         APInt SecondEnd = SecondBegin + *SecondSize;
-        bool Overlap = FirstBegin.slt(SecondEnd) &&
-                       SecondBegin.slt(FirstEnd);
+        bool Overlap = FirstBegin.slt(SecondEnd) && SecondBegin.slt(FirstEnd);
         bool Identical = FirstBegin == SecondBegin && FirstEnd == SecondEnd;
         if (Overlap && !Identical) {
           DEBUG(Logger::logs("proteus-pass")
@@ -511,7 +510,8 @@ public:
     SmallDenseMap<int64_t, SmallVector<std::pair<Value *, StoreInst *>>>
         OffsetToBasePtrStoreMap;
     // These two booleans create the axes of cases.
-    DEBUG(Logger::logs("proteus-pass") << "Clobbering query ptr candidate = " << *ClobberingBasePtr<<"\n");
+    DEBUG(Logger::logs("proteus-pass")
+          << "Clobbering query ptr candidate = " << *ClobberingBasePtr << "\n");
     bool StoresHaveSameBasePtr =
         llvm::all_of(PotentialClobbers, [&](const UseDefWriteCandidate &Q) {
           auto *SI = dyn_cast<StoreInst>(Q.WriteCandidate);
@@ -526,7 +526,8 @@ public:
             return false;
           }
           OffsetToBasePtrStoreMap[ValueOffset].push_back({SIValueBasePtr, SI});
-          DEBUG(Logger::logs("proteus-pass") << "Base ptr candidate = " << *SIValueBasePtr<<"\n");
+          DEBUG(Logger::logs("proteus-pass")
+                << "Base ptr candidate = " << *SIValueBasePtr << "\n");
           int64_t DestOffset = 0;
           if (!GetPointerBaseWithConstantOffset(SI->getPointerOperand(),
                                                 DestOffset, DL))
@@ -1039,8 +1040,7 @@ public:
     DEBUG(Logger::logs("proteus-pass")
           << "    [PTR use analysis]: Using precise MemorySSA location: ptr="
           << *BestPtr << "; size=" << Query.Range.Extent << "\n");
-    return MemoryLocation(BestPtr,
-                          LocationSize::precise(Query.Range.Extent));
+    return MemoryLocation(BestPtr, LocationSize::precise(Query.Range.Extent));
   }
 
   // The two flags are a unit: never both true. Every conservative decline
@@ -1187,10 +1187,9 @@ public:
     bool LoadsFromOriginalTrackedObject =
         getUnderlyingObject(LI.getPointerOperand()) ==
         getUnderlyingObject(TrackedBase);
-    ValueRangeMap[&LI] =
-        LoadsFromOriginalTrackedObject && LoadedPointerRange
-            ? *LoadedPointerRange
-            : InputRange;
+    ValueRangeMap[&LI] = LoadsFromOriginalTrackedObject && LoadedPointerRange
+                             ? *LoadedPointerRange
+                             : InputRange;
     DEBUG(Logger::logs("proteus-pass")
           << "    [PTR use analysis]: Pointer load changes tracked range from "
           << InputRange << " to " << ValueRangeMap[&LI] << "\n");
@@ -1409,8 +1408,7 @@ public:
          !rangesOverlap(BaseRange.Offset, BaseRange.Extent, GEPOffset,
                         *ResultSize)) ||
         (TypeErasedGEP &&
-         !offsetCoveredByRange(GEPOffset, BaseRange.Offset,
-                               BaseRange.Extent)))
+         !offsetCoveredByRange(GEPOffset, BaseRange.Offset, BaseRange.Extent)))
       return;
     DEBUG(Logger::logs("proteus-pass") << "    Found GEP applicable to range="
                                        << BaseRange << " ; " << GEP << "\n");
@@ -1580,12 +1578,11 @@ public:
     noteTrackedWrite();
     PotentialClobbers.push_back(
         {.WriteCandidate = &I,
-         .ClobberInfo = {
-             .Frame = Current.Frame,
-             .TrackedPtr = Current.TrackedBase,
-             .UseBoundary = Current.UseBoundary,
-             .OffsetOfWriteToBasePtr = OffsetCorrection,
-             .Range = ValueRangeMap.lookup(Current.TrackedBase)}});
+         .ClobberInfo = {.Frame = Current.Frame,
+                         .TrackedPtr = Current.TrackedBase,
+                         .UseBoundary = Current.UseBoundary,
+                         .OffsetOfWriteToBasePtr = OffsetCorrection,
+                         .Range = ValueRangeMap.lookup(Current.TrackedBase)}});
   }
 
   void visitInstruction(Instruction &I) {

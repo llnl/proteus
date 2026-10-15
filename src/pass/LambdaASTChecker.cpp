@@ -8,9 +8,9 @@
 
 #include "clang/AST/ASTConsumer.h"
 #include "clang/AST/ASTContext.h"
-#include "clang/AST/RecordLayout.h"
 #include "clang/AST/DeclCXX.h"
 #include "clang/AST/ExprCXX.h"
+#include "clang/AST/RecordLayout.h"
 #include "clang/AST/RecursiveASTVisitor.h"
 #include "clang/Basic/Diagnostic.h"
 #include "clang/Frontend/CompilerInstance.h"
@@ -157,8 +157,7 @@ bool typeContainsLambdaFunctorWrapper(clang::QualType Type,
     return false;
   Type = Type.getNonReferenceType();
   if (const auto *Array = Type->getAsArrayTypeUnsafe())
-    return typeContainsLambdaFunctorWrapper(Array->getElementType(),
-                                            Depth + 1);
+    return typeContainsLambdaFunctorWrapper(Array->getElementType(), Depth + 1);
   const clang::CXXRecordDecl *Record = getCanonicalRecord(Type);
   if (!Record)
     return false;
@@ -203,8 +202,8 @@ getIntrinsicDestination(const clang::Expr *Arg, clang::ASTContext &Context) {
   // root) on anything else, e.g. array indexing with a dynamic index.
   uint64_t OffsetBits = 0;
   const clang::Expr *Current = Lvalue;
-  while (const auto *Member =
-             llvm::dyn_cast<clang::MemberExpr>(ignoreTransparentExprs(Current))) {
+  while (const auto *Member = llvm::dyn_cast<clang::MemberExpr>(
+             ignoreTransparentExprs(Current))) {
     const auto *Field =
         llvm::dyn_cast<clang::FieldDecl>(Member->getMemberDecl());
     if (!Field)
@@ -233,8 +232,8 @@ getWrapperIntervalInType(clang::QualType Root, clang::ASTContext &Context,
   Root = Root.getNonReferenceType();
   const clang::CXXRecordDecl *Record = getCanonicalRecord(Root);
   if (Record && isLambdaFunctorWrapper(Record))
-    return std::make_pair(
-        uint64_t{0}, Context.getTypeSizeInChars(Root).getQuantity());
+    return std::make_pair(uint64_t{0},
+                          Context.getTypeSizeInChars(Root).getQuantity());
   if (const auto *Array = Root->getAsArrayTypeUnsafe()) {
     if (auto Inner = getWrapperIntervalInType(Array->getElementType(), Context,
                                               Depth + 1))
@@ -249,8 +248,8 @@ getWrapperIntervalInType(clang::QualType Root, clang::ASTContext &Context,
             getWrapperIntervalInType(Base.getType(), Context, Depth + 1)) {
       const auto *BaseRecord = getCanonicalRecord(Base.getType());
       uint64_t BaseOff =
-          Layout.getBaseClassOffset(llvm::cast<clang::CXXRecordDecl>(
-                                        BaseRecord))
+          Layout
+              .getBaseClassOffset(llvm::cast<clang::CXXRecordDecl>(BaseRecord))
               .getQuantity();
       return std::make_pair(BaseOff + Inner->first, Inner->second);
     }
@@ -258,8 +257,8 @@ getWrapperIntervalInType(clang::QualType Root, clang::ASTContext &Context,
   for (const clang::FieldDecl *Field : Record->fields())
     if (auto Inner =
             getWrapperIntervalInType(Field->getType(), Context, Depth + 1))
-      return std::make_pair(
-          Context.getFieldOffset(Field) / 8 + Inner->first, Inner->second);
+      return std::make_pair(Context.getFieldOffset(Field) / 8 + Inner->first,
+                            Inner->second);
   return std::nullopt;
 }
 
@@ -525,12 +524,10 @@ public:
         // wrapper, i.e. it does not start past the wrapper's end.
         if (WriteBegin < WrapperEnd)
           report(Call->getExprLoc(), Call->getSourceRange(),
-                 StorageHazard::MemoryBuiltinOnWrapper,
-                 MemoryBuiltinOnWrapper);
+                 StorageHazard::MemoryBuiltinOnWrapper, MemoryBuiltinOnWrapper);
         break;
       }
-      uint64_t WriteEnd =
-          WriteBegin + Length.Val.getInt().getZExtValue();
+      uint64_t WriteEnd = WriteBegin + Length.Val.getInt().getZExtValue();
       bool Overlaps = WriteBegin < WrapperEnd && WriteEnd > WrapperBegin;
       bool Covers = WriteBegin <= WrapperBegin && WriteEnd >= WrapperEnd;
       if (Overlaps && (IsSet || !Covers))
@@ -576,7 +573,8 @@ private:
   unsigned MemoryBuiltinOnWrapper;
   llvm::DenseSet<uint64_t> &Reported;
   llvm::DenseMap<const clang::VarDecl *, unsigned> CallWrites;
-  llvm::SmallVector<const clang::CXXReinterpretCastExpr *, 4> ErasedWrapperCasts;
+  llvm::SmallVector<const clang::CXXReinterpretCastExpr *, 4>
+      ErasedWrapperCasts;
   llvm::SmallPtrSet<const clang::VarDecl *, 4> ErasedPointerVariables;
   llvm::SmallVector<const clang::BinaryOperator *, 8> Assignments;
   llvm::SmallVector<const clang::VarDecl *, 8> InitializedVariables;
@@ -816,7 +814,8 @@ public:
     const unsigned MergedSlot = Diagnostics.getCustomDiagID(
         clang::DiagnosticsEngine::Warning,
         "registered lambda pointer has been passed through "
-        "control-flow assignments.  Analysis will try to specialize but failure to specialize lambda may occur.");
+        "control-flow assignments.  Analysis will try to specialize but "
+        "failure to specialize lambda may occur.");
     const unsigned AmbiguousField = Diagnostics.getCustomDiagID(
         clang::DiagnosticsEngine::Error,
         "registered lambda pointer slot cannot be selected from different "

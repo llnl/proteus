@@ -59,21 +59,21 @@ kernelEnvelopeSuffix(F Body, std::uint64_t Patch) {
 }
 
 static auto makeBody(int A, int B) {
-  return proteus::register_lambda([X = proteus::jit_variable(A),
-                                   Y = proteus::jit_variable(B)] __host__
-                                                                __device__ {
-    printf("enclosed functor %d %d\n", X, Y);
-  });
+  return proteus::register_lambda(
+      [X = proteus::jit_variable(A),
+       Y = proteus::jit_variable(B)] __host__ __device__ {
+        printf("enclosed functor %d %d\n", X, Y);
+      });
 }
 
 // A distinct closure type for the envelope case so one analysis outcome
 // cannot mask the other's.
 static auto makeSuffixBody(int A, int B) {
-  return proteus::register_lambda([X = proteus::jit_variable(A),
-                                   Y = proteus::jit_variable(B)] __host__
-                                                                __device__ {
-    printf("envelope suffix functor %d %d\n", X, Y);
-  });
+  return proteus::register_lambda(
+      [X = proteus::jit_variable(A),
+       Y = proteus::jit_variable(B)] __host__ __device__ {
+        printf("envelope suffix functor %d %d\n", X, Y);
+      });
 }
 
 int main() {

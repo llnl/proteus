@@ -147,8 +147,7 @@ kernelPartialByteStore(F Body, std::uint8_t Replacement) {
 
 template <typename F>
 __global__ __attribute__((annotate("jit"))) static void
-kernelConditionalStore(F Initial, F FirstDonor, F SecondDonor,
-                       bool UseSecond) {
+kernelConditionalStore(F Initial, F FirstDonor, F SecondDonor, bool UseSecond) {
   invokeAfterConditionalStore(&Initial, &FirstDonor, &SecondDonor, UseSecond);
 }
 
@@ -219,8 +218,7 @@ int main() {
   auto HeterogeneousInitial = makeHeterogeneousPair(167, 173);
   auto HeterogeneousFirst = makeHeterogeneousPair(179, 181);
   auto HeterogeneousSecond = makeHeterogeneousPair(191, 193);
-  kernelHeterogeneousStores<<<1, 1>>>(HeterogeneousInitial,
-                                      HeterogeneousFirst,
+  kernelHeterogeneousStores<<<1, 1>>>(HeterogeneousInitial, HeterogeneousFirst,
                                       HeterogeneousSecond);
   gpuErrCheck(gpuDeviceSynchronize());
 
