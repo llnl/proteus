@@ -35,14 +35,6 @@
 namespace proteus {
 using namespace llvm;
 
-std::optional<ReturnInst *> getRetInst(Function &F) {
-  for (auto &BB : F) {
-    if (auto *TermInst = dyn_cast<ReturnInst>(BB.getTerminator()))
-      return TermInst;
-  }
-  return std::nullopt;
-}
-
 inline int64_t getValueIndicesOffset(const DataLayout &DL, Type *AggTy,
                                      ArrayRef<unsigned> Indices) {
   LLVMContext &Ctx = AggTy->getContext();
@@ -51,128 +43,6 @@ inline int64_t getValueIndicesOffset(const DataLayout &DL, Type *AggTy,
   for (unsigned Idx : Indices)
     GEPIndices.push_back(ConstantInt::get(Type::getInt32Ty(Ctx), Idx));
   return DL.getIndexedOffsetInType(AggTy, GEPIndices);
-}
-
-struct ReachingPointerStores {
-  SmallVector<Value *, 4> Values;
-  bool Complete = true;
-};
-
-// Return whether LHS and RHS name exactly the same byte address after peeling
-// constant-offset pointer arithmetic and casts.
-inline bool isSamePointerAddress(const DataLayout &DL, Value *LHS, Value *RHS) {
-  int64_t LHSOffset = 0;
-  int64_t RHSOffset = 0;
-  Value *LHSBase = GetPointerBaseWithConstantOffset(LHS, LHSOffset, DL);
-  Value *RHSBase = GetPointerBaseWithConstantOffset(RHS, RHSOffset, DL);
-  return LHSBase && RHSBase && LHSBase == RHSBase && LHSOffset == RHSOffset;
-}
-
-// Collect the closest pointer-valued store to Address on every CFG path that
-// reaches Before. A path with no store, or a revisited block (such as a loop),
-// marks the result incomplete so callers conservatively decline rather than
-// infer a store that is not guaranteed to reach the load.
-inline void collectReachingPointerStores(const DataLayout &DL, BasicBlock *BB,
-                                         Instruction *Before, Value *Address,
-                                         SmallPtrSetImpl<BasicBlock *> &Visited,
-                                         ReachingPointerStores &Result) {
-  if (!Visited.insert(BB).second) {
-    Result.Complete = false;
-    return;
-  }
-
-  for (Instruction *I = Before ? Before->getPrevNode() : BB->getTerminator(); I;
-       I = I->getPrevNode()) {
-    auto *SI = dyn_cast<StoreInst>(I);
-    if (SI && SI->getValueOperand()->getType()->isPointerTy() &&
-        isSamePointerAddress(DL, SI->getPointerOperand(), Address)) {
-      Result.Values.push_back(SI->getValueOperand());
-      return;
-    }
-  }
-
-  if (pred_empty(BB)) {
-    Result.Complete = false;
-    return;
-  }
-  for (BasicBlock *Pred : predecessors(BB))
-    collectReachingPointerStores(DL, Pred, nullptr, Address, Visited, Result);
-}
-
-// Resolve pointer spills by walking backwards from the load through the CFG.
-// This finds the nearest store on every incoming path instead of depending on
-// the arbitrary order in which Value::users() happens to enumerate writes.
-// The result is complete only when every incoming path contributes a store.
-inline ReachingPointerStores getReachingPointerStores(const DataLayout &DL,
-                                                      LoadInst &LI) {
-  ReachingPointerStores Result;
-  SmallPtrSet<BasicBlock *, 8> Visited;
-  collectReachingPointerStores(DL, LI.getParent(), &LI, LI.getPointerOperand(),
-                               Visited, Result);
-  return Result;
-}
-
-inline Value *getPointerLoadOrigin(const DataLayout &DL, Value *V,
-                                   SmallPtrSetImpl<Value *> &Visited);
-
-// Return one source pointer when every reaching store has the same origin.
-// Nested pointer-spill loads are recursively resolved; distinct origins or
-// cycles are ambiguous and return nullptr.
-inline Value *getUniqueReachingPointer(const DataLayout &DL,
-                                       const ReachingPointerStores &Stores,
-                                       SmallPtrSetImpl<Value *> &Visited) {
-  if (!Stores.Complete || Stores.Values.empty())
-    return nullptr;
-
-  Value *First = getPointerLoadOrigin(DL, Stores.Values.front(), Visited);
-  if (!First)
-    return nullptr;
-  for (Value *V : drop_begin(Stores.Values)) {
-    Value *Origin = getPointerLoadOrigin(DL, V, Visited);
-    if (Origin != First)
-      return nullptr;
-  }
-  return First;
-}
-
-// Resolve a pointer value through nested pointer-spill loads. Non-load pointer
-// values are already origins. Visited prevents cyclic spill graphs from being
-// mistaken for a unique source.
-inline Value *getPointerLoadOrigin(const DataLayout &DL, Value *V,
-                                   SmallPtrSetImpl<Value *> &Visited) {
-  auto *LI = dyn_cast<LoadInst>(V);
-  if (!LI || !LI->getType()->isPointerTy())
-    return V;
-  if (!Visited.insert(V).second)
-    return nullptr;
-
-  ReachingPointerStores Stores = getReachingPointerStores(DL, *LI);
-  return getUniqueReachingPointer(DL, Stores, Visited);
-}
-
-// Report ambiguity only for complete reaching-store sets. Incomplete sets can
-// still be handled by ordinary backward memory-use analysis.
-inline bool hasAmbiguousReachingPointers(const DataLayout &DL,
-                                         const ReachingPointerStores &Stores) {
-  if (!Stores.Complete || Stores.Values.empty())
-    return false;
-  SmallPtrSet<Value *, 8> Visited;
-  return !getUniqueReachingPointer(DL, Stores, Visited);
-}
-
-// A compiler spill is a temporary local slot the compiler uses to save an SSA
-// pointer value (for example, `alloca ptr`, followed by `store ptr` and a
-// later `load ptr`).  A pointer-valued load is not necessarily such a spill:
-// it can instead read an ordinary pointer field from a closure/context
-// aggregate.  The reaching-store recovery below is only valid for a local
-// `alloca ptr` slot; aggregate fields must be traced backwards through their
-// address.
-inline bool isPointerSpillLoad(const LoadInst &LI) {
-  if (!LI.getType()->isPointerTy())
-    return false;
-  const Value *Storage = getUnderlyingObject(LI.getPointerOperand());
-  auto *Slot = dyn_cast_or_null<AllocaInst>(Storage);
-  return Slot && Slot->getAllocatedType()->isPointerTy();
 }
 
 struct LambdaKernelArgAnalysis {
@@ -229,26 +99,6 @@ private:
       : LambdaCB(LambdaCBArg), DL(Dl), ClobberOracle(std::move(Oracle)),
         FunctorSize(FunctorSizeArg), Offset(Off) {
     WorkList.push_back({Start, LastSeen});
-  }
-
-  std::optional<Value *> getCallBaseIdentityArgOperand(CallBase &CB) {
-    auto *CalledFunction = CB.getCalledFunction();
-    DEBUG(Logger::logs("proteus-pass")
-          << "Checking if function is identity " << *CalledFunction << "\n");
-    auto RetInstOpt = getRetInst(*CalledFunction);
-    if (!RetInstOpt)
-      return std::nullopt;
-    auto *RetInst = *RetInstOpt;
-
-    DEBUG(Logger::logs("proteus-pass") << "CB called function return inst "
-                                       << *RetInst->getReturnValue() << "\n");
-    for (size_t ArgNum = 0; ArgNum < CalledFunction->arg_size(); ++ArgNum) {
-      DEBUG(Logger::logs("proteus-pass")
-            << "Called Fn arg " << *CalledFunction->getArg(ArgNum) << "\n");
-      if (RetInst->getReturnValue() == CalledFunction->getArg(ArgNum))
-        return CB.getArgOperand(ArgNum);
-    }
-    return std::nullopt;
   }
 
 public:
