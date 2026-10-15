@@ -24,7 +24,7 @@
 namespace proteus {
 using namespace llvm;
 
-SmallVector<ReturnInst *> getReturnInstructions(Function &F) {
+inline SmallVector<ReturnInst *> getReturnInstructions(Function &F) {
   SmallVector<ReturnInst *> Result;
 
   for (BasicBlock &BB : F) {
