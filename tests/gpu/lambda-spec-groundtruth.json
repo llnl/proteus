@@ -1,9 +1,9 @@
 {
   "meta": {
     "generated": "2026-10-15",
-    "commit": "34051bce",
+    "commit": "9cffdd4a",
     "pipeline": "pseudo-gpu-llvm19",
-    "note": "Baseline at branch tip (pre affine-delta fix). Captured from the pseudo-GPU device pipeline; MUST be re-captured from a ROCm run before being treated as hardware ground truth. lambda_interior_slot_overwrite removed: its shape is now rejected by the AST checker (tests/ast/lambda_wrapper_storage_invalid.cpp)."
+    "note": "Baseline of MAIN's analysis over main's lambda suite (branch base 2a8f200a). Captured from the pseudo-GPU device pipeline; re-capture from a ROCm run before treating as hardware ground truth. lambda_dominating_store (ill-formed, unregistered) and lambda_large_warning (stub lacks __syncthreads) produce no decisions."
   },
   "tests": {
     "lambda-two": {
@@ -18,57 +18,15 @@
       ],
       "decline": []
     },
-    "lambda_aggregate_store_reconciliation": {
-      "specialize": [],
-      "decline": [
-        "makeBody"
-      ]
-    },
     "lambda_call_shapes": {
       "specialize": [
+        "kernelSameReturns",
         "kernelSelectSame"
       ],
       "decline": [
         "makeIndirectBody",
         "makeReturnBody",
-        "makeSameReturnBody",
         "makeSelectSameBody"
-      ]
-    },
-    "lambda_clobber_query_range": {
-      "specialize": [
-        "kernelUnrelatedPrefixOverwrite"
-      ],
-      "decline": []
-    },
-    "lambda_clobber_query_suffix": {
-      "specialize": [
-        "kernelUnrelatedSuffixOverwrite"
-      ],
-      "decline": []
-    },
-    "lambda_clobber_shapes": {
-      "specialize": [
-        "kernelCallOverwrite",
-        "kernelLocalSupersedesCall",
-        "kernelNestedCallOverwrite",
-        "kernelNonoverlapOverwrite",
-        "kernelPredecessorOverwrite"
-      ],
-      "decline": [
-        "makeAmbiguousLoopBody",
-        "makeDifferentBranchBody",
-        "makeDifferentCallBranchBody",
-        "makeSameBranchBody",
-        "makeSameCallBranchBody",
-        "makeSameLoopBody",
-        "makeUnrelatedCallBody"
-      ]
-    },
-    "lambda_declaration_clobber": {
-      "specialize": [],
-      "decline": [
-        "makeBody"
       ]
     },
     "lambda_def": {
@@ -129,23 +87,13 @@
       ],
       "decline": []
     },
-    "lambda_inst_visitor_call_clobber": {
-      "specialize": [
-        "kernelInstVisitorCallClobber",
-        "kernelInstVisitorCallDoesntClobber",
-        "kernelInstVisitorOrderedMemcpys"
-      ],
-      "decline": [
-        "makeUntraceableBody"
-      ]
-    },
     "lambda_memory_intrinsic_shapes": {
       "specialize": [
-        "kernelNonoverlapMemset"
+        "kernelNonoverlapMemset",
+        "kernelOffsetMemmove"
       ],
       "decline": [
-        "makeDynamicBody",
-        "makeMoveBody"
+        "makeDynamicBody"
       ]
     },
     "lambda_mfem_style_launch": {
@@ -154,23 +102,11 @@
       ],
       "decline": []
     },
-    "lambda_mixed_field_overwrite": {
-      "specialize": [],
-      "decline": [
-        "makeBody"
-      ]
-    },
     "lambda_multiple": {
       "specialize": [
         "kernel"
       ],
       "decline": []
-    },
-    "lambda_multiple_callers": {
-      "specialize": [],
-      "decline": [
-        "makeBody"
-      ]
     },
     "lambda_pathological": {
       "specialize": [
@@ -196,16 +132,6 @@
       ],
       "decline": []
     },
-    "lambda_portability_aggregate_shapes": {
-      "specialize": [
-        "kernelAggregateFieldCall",
-        "kernelCallContext",
-        "kernelNestedReturn",
-        "kernelReturnedAlias",
-        "kernelReturnedFieldAlias"
-      ],
-      "decline": []
-    },
     "lambda_provenance_shapes": {
       "specialize": [
         "kernelArrayMember",
@@ -214,33 +140,6 @@
         "kernelOffsetMemcpy",
         "kernelPartialMemcpy",
         "kernelReturnedInteriorPointer"
-      ],
-      "decline": []
-    },
-    "lambda_reconciliation_adversarial": {
-      "specialize": [],
-      "decline": [
-        "makeBytePair",
-        "makeConditionalPair",
-        "makeDuplicatePair",
-        "makeHeterogeneousPair",
-        "makePermutedPair",
-        "makeTriple"
-      ]
-    },
-    "lambda_size_test": {
-      "specialize": [
-        "kernelEnclosedFunctor",
-        "kernelEnvelopeSuffix"
-      ],
-      "decline": []
-    },
-    "lambda_slot_selection_supported": {
-      "specialize": [
-        "kernelCallAfterInvoke",
-        "kernelPhiSlot",
-        "kernelSelectedSlot",
-        "kernelTrailingReadOnlyCall"
       ],
       "decline": []
     },
@@ -265,21 +164,6 @@
       "specialize": [
         "kernel_thread_privatizer"
       ],
-      "decline": []
-    },
-    "lambda_unknown_clobber": {
-      "specialize": [],
-      "decline": [
-        "makeAggregateHiddenBody",
-        "makeAtomicBody",
-        "makeCompareExchangeBody",
-        "makeIndirectCallBody",
-        "makeOpaqueCallBody",
-        "makeSelectedStoreBody"
-      ]
-    },
-    "lambda_unknown_clobber_decl": {
-      "specialize": [],
       "decline": []
     }
   }

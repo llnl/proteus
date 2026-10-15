@@ -29,18 +29,13 @@ builds and the pseudo-GPU pipeline:
 
 ## Provenance caveat
 
-The current JSON was captured from the pseudo-GPU pipeline (LLVM 19, -O1,
-gfx90a) at the branch tip. Compile-time decisions have matched ROCm in spot
-checks, but this file MUST be re-captured from a ROCm run before being
-treated as hardware ground truth -- pseudo-GPU "green" has disagreed with
-ROCm before. Tests with no entry produce no analysis decisions in this
+The current JSON is the baseline of MAIN's analysis over main's lambda
+suite, captured from the pseudo-GPU pipeline (LLVM 19, -O1, gfx90a).
+Compile-time decisions have matched ROCm in spot checks, but this file
+should be re-captured from a ROCm run before being treated as hardware
+ground truth. Tests with no entry produce no analysis decisions in this
 pipeline: lambda_dominating_store (ill-formed, unregistered in CMake) and
 lambda_large_warning (needs __syncthreads in the pseudo-GPU stub).
-
-The former expected-fail lambda_interior_slot_overwrite has been removed
-from the GPU suite: its type-erased interior write is now rejected at
-compile time by the AST checker (tests/ast/lambda_wrapper_storage_invalid.cpp,
-per the frontend contract in docs/dev/design/lambda-closure-provenance.md).
 
 ## Current decisions
 
@@ -48,12 +43,7 @@ per the frontend contract in docs/dev/design/lambda-closure-provenance.md).
 | --- | --- | --- |
 | lambda | kernel | — |
 | lambda-two | kernel | — |
-| lambda_aggregate_store_reconciliation | — | makeBody |
-| lambda_call_shapes | kernelSelectSame | makeIndirectBody, makeReturnBody, makeSameReturnBody, makeSelectSameBody |
-| lambda_clobber_query_range | kernelUnrelatedPrefixOverwrite | — |
-| lambda_clobber_query_suffix | kernelUnrelatedSuffixOverwrite | — |
-| lambda_clobber_shapes | kernelCallOverwrite, kernelLocalSupersedesCall, kernelNestedCallOverwrite, kernelNonoverlapOverwrite, kernelPredecessorOverwrite | makeAmbiguousLoopBody, makeDifferentBranchBody, makeDifferentCallBranchBody, makeSameBranchBody, makeSameCallBranchBody, makeSameLoopBody, makeUnrelatedCallBody |
-| lambda_declaration_clobber | — | makeBody |
+| lambda_call_shapes | kernelSameReturns, kernelSelectSame | makeIndirectBody, makeReturnBody, makeSelectSameBody |
 | lambda_def | kernel | — |
 | lambda_factory | kernel | — |
 | lambda_factory_forwarded | kernel | — |
@@ -64,22 +54,13 @@ per the frontend contract in docs/dev/design/lambda-closure-provenance.md).
 | lambda_host_device | kernel | — |
 | lambda_index_first_wrapper | kernel | — |
 | lambda_insertvalue_offsets | kernelDoubleShift, kernelPadded, kernelShift | — |
-| lambda_inst_visitor_call_clobber | kernelInstVisitorCallClobber, kernelInstVisitorCallDoesntClobber, kernelInstVisitorOrderedMemcpys | makeUntraceableBody |
-| lambda_memory_intrinsic_shapes | kernelNonoverlapMemset | makeDynamicBody, makeMoveBody |
+| lambda_memory_intrinsic_shapes | kernelNonoverlapMemset, kernelOffsetMemmove | makeDynamicBody |
 | lambda_mfem_style_launch | MockRajaInterface | — |
-| lambda_mixed_field_overwrite | — | makeBody |
 | lambda_multiple | kernel | — |
-| lambda_multiple_callers | — | makeBody |
 | lambda_pathological | kernel_case1, kernel_case2_a, kernel_case2_b, kernel_case4, kernel_case5 | — |
 | lambda_phi_analysis | kernel_phi, kernel_phi_arg1, kernel_phi_changed_rc | — |
 | lambda_pointer_field_load | kernelPointerFieldLoad | — |
-| lambda_portability_aggregate_shapes | kernelAggregateFieldCall, kernelCallContext, kernelNestedReturn, kernelReturnedAlias, kernelReturnedFieldAlias | — |
 | lambda_provenance_shapes | kernelArrayMember, kernelMemcpySource, kernelNegativeGep, kernelOffsetMemcpy, kernelPartialMemcpy, kernelReturnedInteriorPointer | — |
-| lambda_reconciliation_adversarial | — | makeBytePair, makeConditionalPair, makeDuplicatePair, makeHeterogeneousPair, makePermutedPair, makeTriple |
-| lambda_size_test | kernelEnclosedFunctor, kernelEnvelopeSuffix | — |
-| lambda_slot_selection_supported | kernelCallAfterInvoke, kernelPhiSlot, kernelSelectedSlot, kernelTrailingReadOnlyCall | — |
 | lambda_spec_test | kernel | — |
 | lambda_store_order | kernelCaptureFromArg, kernelLatestStore, kernelStoreOrder | makeAmbiguousBody, makeMutatedBody |
 | lambda_thread_privatizer | kernel_thread_privatizer | — |
-| lambda_unknown_clobber | — | makeAggregateHiddenBody, makeAtomicBody, makeCompareExchangeBody, makeIndirectCallBody, makeOpaqueCallBody, makeSelectedStoreBody |
-| lambda_unknown_clobber_decl | — | — |
