@@ -223,8 +223,9 @@ private:
 
 public:
   LambdaArgVisitor(CallBase *LambdaCB, Module &M, uint64_t FunctorSize_)
-      : LambdaCB(LambdaCB), DL(M.getDataLayout()), FunctorSize(FunctorSize_),
-        ClobberOracle(std::make_shared<MemorySSAClobberOracle>()), Offset(0) {
+      : LambdaCB(LambdaCB), DL(M.getDataLayout()),
+        ClobberOracle(std::make_shared<MemorySSAClobberOracle>()),
+        FunctorSize(FunctorSize_), Offset(0) {
 
     auto *ClosurePtr = LambdaCB->getArgOperand(0);
     WorkList.push_back({ClosurePtr, LambdaCB});

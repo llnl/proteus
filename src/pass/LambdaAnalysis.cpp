@@ -167,9 +167,8 @@ private:
     }
   }
 
-  static void
-  findAnnotatedFunctions(Module &M, StringRef Wanted,
-                         SmallVectorImpl<Function *> &Out) {
+  static void findAnnotatedFunctions(Module &M, StringRef Wanted,
+                                     SmallVectorImpl<Function *> &Out) {
     auto *GA = M.getGlobalVariable("llvm.global.annotations");
     if (!GA)
       return;
@@ -185,14 +184,12 @@ private:
       if (!CS || CS->getNumOperands() < 5)
         continue;
 
-      auto *F = dyn_cast<Function>(
-          CS->getOperand(0)->stripPointerCasts());
+      auto *F = dyn_cast<Function>(CS->getOperand(0)->stripPointerCasts());
       if (!F)
         continue;
 
       StringRef Ann;
-      if (!getConstantStringInfo(CS->getOperand(1)->stripPointerCasts(),
-                                       Ann))
+      if (!getConstantStringInfo(CS->getOperand(1)->stripPointerCasts(), Ann))
         continue;
       if (Ann != Wanted)
         continue;
@@ -225,14 +222,12 @@ private:
       if (!CS || CS->getNumOperands() < 5)
         continue;
 
-      auto *F = dyn_cast<Function>(
-          CS->getOperand(0)->stripPointerCasts());
+      auto *F = dyn_cast<Function>(CS->getOperand(0)->stripPointerCasts());
       if (!F)
         continue;
 
       StringRef Ann;
-      if (!getConstantStringInfo(CS->getOperand(1)->stripPointerCasts(),
-                                       Ann))
+      if (!getConstantStringInfo(CS->getOperand(1)->stripPointerCasts(), Ann))
         continue;
       if (Ann != Wanted)
         continue;
