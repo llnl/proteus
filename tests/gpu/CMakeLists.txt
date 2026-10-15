@@ -274,6 +274,8 @@ CREATE_GPU_TEST(lambda_store_order lambda_store_order.cpp)
 CREATE_GPU_TEST(lambda_mixed_field_overwrite lambda_mixed_field_overwrite.cpp)
 CREATE_GPU_TEST(lambda_aggregate_store_reconciliation
                 lambda_aggregate_store_reconciliation.cpp)
+CREATE_GPU_TEST(lambda_reconciliation_adversarial
+                lambda_reconciliation_adversarial.cpp)
 CREATE_GPU_TEST(lambda_call_shapes lambda_call_shapes.cpp)
 CREATE_GPU_TEST(lambda_memory_intrinsic_shapes lambda_memory_intrinsic_shapes.cpp)
 CREATE_GPU_TEST(lambda_pointer_field_load lambda_pointer_field_load.cpp)
