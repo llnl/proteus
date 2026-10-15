@@ -23,6 +23,10 @@ option(ENABLE_DEVELOPER_COMPILER_FLAGS "Enable developer compiler flags: -Wall -
 option(PROTEUS_INSTALL_IMPL_HEADERS "Install implementation headers" OFF)
 option(PROTEUS_ENABLE_PYTHON "Build Python bindings" OFF)
 option(PROTEUS_PYTHON_WHEEL "Build wheel-oriented Python package layout" OFF)
+option(PROTEUS_PSEUDO_GPU
+  "Add per-test pseudo-GPU device-compile targets (<test>.HIP) that run the \
+real HIP device pipeline through ProteusPass and emit LLVM IR, without \
+ROCm or a GPU" OFF)
 
 set(PROTEUS_PYTHON_PACKAGE_DIR "proteus" CACHE STRING
   "Install-relative path for the Proteus Python package")
@@ -111,7 +115,23 @@ include(cmake/ProteusFunctions.cmake)
 include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
 
+if(PROTEUS_PSEUDO_GPU AND (PROTEUS_ENABLE_HIP OR PROTEUS_ENABLE_CUDA))
+  message(FATAL_ERROR "PROTEUS_PSEUDO_GPU is for builds without a GPU "
+                      "toolchain; disable PROTEUS_ENABLE_HIP/CUDA")
+endif()
+
 add_subdirectory(src)
+
+if(PROTEUS_PSEUDO_GPU)
+  # Build the pass HIP-flavored so isDeviceKernel recognizes amdgpu_kernel
+  # functions without requiring the HIP toolchain, and let it tolerate
+  # upstream clang re-running it on the device module (see emitModuleDevice);
+  # production builds keep the unique-name fatal. Scoped to the pass objects
+  # so the runtime library is unaffected.
+  target_compile_definitions(ProteusPassObjects PRIVATE PROTEUS_ENABLE_HIP=1
+                                                        PROTEUS_PSEUDO_GPU=1)
+  include(tools/pseudo-gpu/PseudoGPUTargets.cmake)
+endif()
 
 if(ENABLE_TESTS)
   enable_testing()
