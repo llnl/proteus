@@ -37,10 +37,10 @@ ROCm before. Tests with no entry produce no analysis decisions in this
 pipeline: lambda_dominating_store (ill-formed, unregistered in CMake) and
 lambda_large_warning (needs __syncthreads in the pseudo-GPU stub).
 
-Known expected-fail pinned in the suite: lambda_interior_slot_overwrite
-currently SPECIALIZES (type-erased interior write; soundness delegated to
-the frontend contract -- see docs/dev/design/lambda-closure-provenance.md).
-Its runtime FileCheck fails by design until the AST diagnostic lands.
+The former expected-fail lambda_interior_slot_overwrite has been removed
+from the GPU suite: its type-erased interior write is now rejected at
+compile time by the AST checker (tests/ast/lambda_wrapper_storage_invalid.cpp,
+per the frontend contract in docs/dev/design/lambda-closure-provenance.md).
 
 ## Current decisions
 
@@ -65,7 +65,6 @@ Its runtime FileCheck fails by design until the AST diagnostic lands.
 | lambda_index_first_wrapper | kernel | — |
 | lambda_insertvalue_offsets | kernelDoubleShift, kernelPadded, kernelShift | — |
 | lambda_inst_visitor_call_clobber | kernelInstVisitorCallClobber, kernelInstVisitorCallDoesntClobber, kernelInstVisitorOrderedMemcpys | makeUntraceableBody |
-| lambda_interior_slot_overwrite | — | makeInteriorBody |
 | lambda_memory_intrinsic_shapes | kernelNonoverlapMemset | makeDynamicBody, makeMoveBody |
 | lambda_mfem_style_launch | MockRajaInterface | — |
 | lambda_mixed_field_overwrite | — | makeBody |
