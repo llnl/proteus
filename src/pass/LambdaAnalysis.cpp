@@ -62,7 +62,7 @@ namespace {
 struct LambdaJitVariableInfo {
   Value *Slot;
   Value *Offset;
-  Type *Type;
+  Type *ValueType;
 };
 
 class LambdaPassImpl {
@@ -753,7 +753,7 @@ private:
       if (JitVarIt == LambdaStorageTypeToJitIndices.end())
         continue;
       for (auto JitVarInfo : JitVarIt->getSecond()) {
-        if (!JitVarInfo.Type)
+        if (!JitVarInfo.ValueType)
           reportFatalError(InsertionErrorMsg);
         ConstantInt *SlotC = dyn_cast<ConstantInt>(JitVarInfo.Slot);
         if (!SlotC)

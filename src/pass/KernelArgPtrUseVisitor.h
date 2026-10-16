@@ -324,7 +324,7 @@ public:
     } else {
       SSAResult = queryMemorySSA(CommonInfo);
     }
-    auto *ClobberingInst = SSAResult.Instruction;
+    auto *ClobberingInst = SSAResult.ClobberingInstruction;
     if (!ClobberingInst) {
       DEBUG(Logger::logs("proteus-pass")
             << "MemorySSA did not identify a clobbering instruction\n");
@@ -911,8 +911,8 @@ public:
     MemorySSAClobber Result = ClobberOracle->query(Location, UseBoundary);
     while (Result.Kind == MemorySSAClobberKind::Definition &&
            ProvenReturnedAliasCalls.contains(
-               dyn_cast_or_null<CallBase>(Result.Instruction))) {
-      Result = ClobberOracle->query(Location, *Result.Instruction);
+               dyn_cast_or_null<CallBase>(Result.ClobberingInstruction))) {
+      Result = ClobberOracle->query(Location, *Result.ClobberingInstruction);
     }
     return Result;
   }
@@ -1113,7 +1113,7 @@ public:
           continue;
         MemorySSAClobber ReachingDefinition = ClobberOracle->query(*LI);
         if (ReachingDefinition.Kind != MemorySSAClobberKind::Definition ||
-            ReachingDefinition.Instruction != &SI)
+            ReachingDefinition.ClobberingInstruction != &SI)
           continue;
         ProvenPointerReloads.insert(LI);
         pushBack(LI, StoreBase, Current.Frame, Current.UseBoundary,
