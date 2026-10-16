@@ -21,6 +21,8 @@ nav:
     - Proteus Internals:
       - Overview: dev/proteus-internals.md
       - Optimization Pipeline: dev/optimization-pipeline.md
+    - Design Decisions:
+      - Lambda Closure Provenance: dev/design/lambda-closure-provenance.md
     - Python Wheel Build: dev/python-wheel.md
     - Detecting CUDA Toolchain: dev/runtime-cuda-toolchain.md
     - Detecting HIP Assets: dev/runtime-hip-toolchain.md

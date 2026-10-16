@@ -548,11 +548,16 @@ private:
       collectWrapperCallsites(*FunctorOperator, CBToAnalyze);
       if (CBToAnalyze.empty())
         continue;
-
+      auto optionalMeta =
+          getU64Metadata(FunctorOperator, "proteus.functor_size");
+      if (!optionalMeta)
+        reportFatalError("Internal Proteus Error: Missing metadata on functor "
+                         "size.  Please report this bug.");
       DenseMap<CallBase *, LambdaKernelArgAnalysis> CallBaseToArgOffset;
       // If analysis fails we log the error in the above function call, and
       // fallback to unspecialized IR at runtime.
-      if (!analyzeLambdaUses(M, CallBaseToArgOffset, CBToAnalyze))
+      if (!analyzeLambdaUses(M, CallBaseToArgOffset, CBToAnalyze,
+                             *optionalMeta))
         continue;
 
       for (CallBase *CB : CBToAnalyze) {

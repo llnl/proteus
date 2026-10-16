@@ -107,9 +107,15 @@ template <uint64_t FunctorID, typename Lambda> struct LambdaFunctorWrapper {
   static constexpr std::uint64_t functor_id = FunctorID;
   LambdaType lambda;
 
+  // The second annotation payload is the closure's byte size, folded to a
+  // constant by the compiler frontend at template instantiation -- host and
+  // device compilations each record their own target's value. The kernel-arg
+  // analysis uses it as the tracked entity's extent; unlike types in the IR,
+  // it cannot be erased by optimization.
   template <typename... Args>
-  PROTEUS_HOST_DEVICE __attribute__((annotate("jit")))
-  __attribute__((annotate("proteus.wrapper_call", functor_id))) decltype(auto)
+  PROTEUS_HOST_DEVICE __attribute__((annotate("jit"))) __attribute__((
+      annotate("proteus.wrapper_call", functor_id,
+               sizeof(LambdaType)))) decltype(auto)
   operator()(Args &&...args) const noexcept {
     return lambda(std::forward<Args>(args)...);
   }
