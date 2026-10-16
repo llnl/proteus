@@ -142,7 +142,7 @@ bool callCannotModifyTrackedLocal(CallBase &CB,
   // The current call is excluded because its operands were checked above.
   // Any earlier capture could have made the allocation reachable indirectly.
   return !PointerMayBeCapturedBefore(Alloca, /*ReturnCaptures=*/true,
-#if LLVM_VERSION_MAJOR < 22
+#if LLVM_VERSION_MAJOR < 21
                                      /*StoreCaptures=*/true,
 #endif
                                      &CB, &DT, /*IncludeI=*/false);
@@ -153,8 +153,9 @@ enum class MemorySSAClobberKind {
   // No definition in this function reaches the queried location.
   LiveOnEntry,
 
-  // One MemoryDef reaches the query. Instruction identifies it, but the
-  // oracle deliberately does not interpret the instruction's effect.
+  // One MemoryDef reaches the query. ClobberingInstruction identifies the
+  // defining instruction, but the oracle deliberately does not interpret its
+  // effect.
   Definition,
 
   // Control-flow paths carry different reaching memory versions.
@@ -167,7 +168,7 @@ enum class MemorySSAClobberKind {
 struct MemorySSAClobber {
   MemorySSAClobberKind Kind = MemorySSAClobberKind::Unknown;
   MemoryAccess *Access = nullptr;
-  Instruction *Instruction = nullptr;
+  Instruction *ClobberingInstruction = nullptr;
 };
 
 // A deliberately small, function-local MemorySSA oracle. It answers only:

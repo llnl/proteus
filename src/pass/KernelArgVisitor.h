@@ -293,8 +293,8 @@ public:
         OS << "[Lambda arg analysis]: Resolving load definition from base "
            << *AddressBase << " at byte offset " << TargetOffset
            << "; MemorySSA selected ";
-        if (Clobber.Instruction)
-          OS << *Clobber.Instruction;
+        if (Clobber.ClobberingInstruction)
+          OS << *Clobber.ClobberingInstruction;
         else
           OS << "<no instruction>";
         OS << "\n";
@@ -505,6 +505,80 @@ public:
     DEBUG(Logger::logs("proteus-pass")
           << "Visiting argument with parent function = \n"
           << *F << "\n");
+
+    // A direct Argument -> lambda call edge has no intervening LoadInst, so
+    // the normal load-side MemorySSA query never runs. Check this exact shape
+    // before either accepting a kernel argument or crossing to its caller.
+    bool HasDirectPriorStore = llvm::any_of(A.users(), [&](User *U) {
+      auto *SI = dyn_cast<StoreInst>(U);
+      if (!SI || SI->getParent() != LambdaCB->getParent() ||
+          !SI->comesBefore(LambdaCB))
+        return false;
+      int64_t StoreOffset = 0;
+      Value *StoreBase = GetPointerBaseWithConstantOffset(
+          SI->getPointerOperand(), StoreOffset, DL);
+      auto StoreSize = getTypeStoreSize(DL, SI->getValueOperand()->getType());
+      return StoreBase == &A && StoreSize &&
+             rangesOverlap(StoreOffset, *StoreSize, 0, FunctorSize);
+    });
+    if (MemoryAnalysisPtrUse == LambdaCB && LambdaCB->getArgOperand(0) == &A &&
+        HasDirectPriorStore) {
+      if (Offset != 0) {
+        DEBUG(Logger::logs("proteus-pass")
+              << "[Lambda arg analysis]: Direct lambda argument has an "
+                 "unexpected nonzero offset "
+              << Offset << "\n");
+        fail();
+        return;
+      }
+
+      MemoryLocation Location(&A, LocationSize::precise(FunctorSize));
+      MemorySSAClobber Clobber = ClobberOracle->query(Location, *LambdaCB);
+      if (Clobber.Kind == MemorySSAClobberKind::LiveOnEntry) {
+        // The call still observes the value supplied by this argument. Keep
+        // following the ordinary interprocedural/kernel-argument path below.
+      } else if (Clobber.Kind == MemorySSAClobberKind::Definition) {
+        auto *SI = dyn_cast_or_null<StoreInst>(Clobber.ClobberingInstruction);
+        int64_t StoreOffset = 0;
+        Value *StoreBase = SI ? GetPointerBaseWithConstantOffset(
+                                    SI->getPointerOperand(), StoreOffset, DL)
+                              : nullptr;
+        auto StoreSize =
+            SI ? getTypeStoreSize(DL, SI->getValueOperand()->getType())
+               : std::nullopt;
+
+        // Continue only through the simple full-range store represented by
+        // this direct use-def shape. Atomic and partial stores require memory
+        // semantics that LambdaArgVisitor does not model.
+        if (!SI || SI->isAtomic() || StoreBase != &A || StoreOffset != 0 ||
+            !StoreSize || *StoreSize != FunctorSize) {
+          DEBUG({
+            auto &OS = Logger::logs("proteus-pass");
+            OS << "[Lambda arg analysis]: Unsupported write reaches a direct "
+                  "lambda argument; declining specialization";
+            if (Clobber.ClobberingInstruction)
+              OS << ": " << *Clobber.ClobberingInstruction;
+            OS << "\n";
+          });
+          fail();
+          return;
+        }
+
+        DEBUG(Logger::logs("proteus-pass")
+              << "[Lambda arg analysis]: Following full-range store to a "
+                 "direct lambda argument: "
+              << *SI << "\n");
+        WorkList.push_back({SI->getValueOperand(), SI});
+        return;
+      } else {
+        DEBUG(Logger::logs("proteus-pass")
+              << "[Lambda arg analysis]: Cannot identify one write reaching "
+                 "a direct lambda argument; declining specialization\n");
+        fail();
+        return;
+      }
+    }
+
     auto ArgNum = A.getArgNo();
     // termination case:  we have reached the parent calling kernel
     // todo: we could just pass in the kernel pointer here and check equality
