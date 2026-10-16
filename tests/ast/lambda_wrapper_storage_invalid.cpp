@@ -39,24 +39,21 @@ void interiorSliceWrite(Registered *Initial, Registered *Donor) {
   Registered Copy = *Initial;
   auto *Words = reinterpret_cast<std::uint32_t *>(&Copy);
   const auto *DonorWords = reinterpret_cast<const std::uint32_t *>(Donor);
-  // expected-error@+1 {{cannot be reinterpreted through a type-erased mutable
-  // pointer}}
+  // expected-error@+1 {{cannot be reinterpreted through a type-erased mutable pointer}}
   Words[1] = DonorWords[1];
   Copy();
 }
 
 // Write directly through the cast expression, no intermediate variable.
 void directErasedWrite(Registered *Body) {
-  // expected-error@+1 {{cannot be reinterpreted through a type-erased mutable
-  // pointer}}
+  // expected-error@+1 {{cannot be reinterpreted through a type-erased mutable pointer}}
   *reinterpret_cast<std::uint32_t *>(Body) = 7;
 }
 
 // Wrong-length copy: covers byte 0 of the closure but not its extent.
 void partialMemcpy(Registered *Initial, Registered *Donor) {
   Registered Copy = *Donor;
-  // expected-error@+1 {{memory builtins cannot write into storage containing a
-  // registered lambda}}
+  // expected-error@+1 {{memory builtins cannot write into storage containing a registered lambda}}
   __builtin_memcpy(&Copy, Initial, 4);
   Copy();
 }
@@ -64,16 +61,14 @@ void partialMemcpy(Registered *Initial, Registered *Donor) {
 // Memset overlapping the wrapper: destroys registered-slot provenance even
 // when it covers the whole object.
 void envelopeMemset(Envelope<Registered> *E) {
-  // expected-error@+1 {{memory builtins cannot write into storage containing a
-  // registered lambda}}
+  // expected-error@+1 {{memory builtins cannot write into storage containing a registered lambda}}
   __builtin_memset(E, 0, sizeof(*E));
 }
 
 // Dynamic length that may reach the wrapper: cannot be proven safe.
 void dynamicLengthMemcpy(Registered *Dest, const Registered *Source,
                          unsigned Length) {
-  // expected-error@+1 {{memory builtins cannot write into storage containing a
-  // registered lambda}}
+  // expected-error@+1 {{memory builtins cannot write into storage containing a registered lambda}}
   __builtin_memcpy(Dest, Source, Length);
 }
 
