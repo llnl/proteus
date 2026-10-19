@@ -113,9 +113,9 @@ template <uint64_t FunctorID, typename Lambda> struct LambdaFunctorWrapper {
   // analysis uses it as the tracked entity's extent; unlike types in the IR,
   // it cannot be erased by optimization.
   template <typename... Args>
-  PROTEUS_HOST_DEVICE __attribute__((annotate("jit"))) __attribute__((
-      annotate("proteus.wrapper_call", functor_id,
-               sizeof(LambdaType)))) decltype(auto)
+  PROTEUS_HOST_DEVICE __attribute__((annotate("jit")))
+  __attribute__((annotate("proteus.wrapper_call", functor_id,
+                          sizeof(LambdaType)))) decltype(auto)
   operator()(Args &&...args) const noexcept {
     return lambda(std::forward<Args>(args)...);
   }
