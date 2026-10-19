@@ -22,7 +22,8 @@ install_miniforge() {
   bash "${miniforge_dir}/miniforge.sh" -b -u -p "${miniforge_dir}"
   rm "${miniforge_dir}/miniforge.sh"
   source "${miniforge_dir}/etc/profile.d/conda.sh"
-  # Use a per-job prefix: named environments follow the user's shared envs_dirs.
+  # Create the environment by prefix. A named environment follows the user's
+  # condarc envs_dirs and can select a persistent environment outside this job.
   CONDA_ENV_DIR="${miniforge_dir}/envs/proteus"
 }
 
@@ -34,7 +35,7 @@ pushd /tmp/proteus-ci-$(basename ${TEST_DIR})-${CI_JOB_ID}
 rm -rf build-proteus install-proteus build install miniforge3
 
 # Install Clang/LLVM through conda.
-install_miniforge "${PWD}/miniforge3"
+install_miniforge miniforge3
 # Use an older version of gcc to avoid issues with detecting Clang as the CUDA
 # compiler.
 conda create -y -q -p "${CONDA_ENV_DIR}" --override-channels -c conda-forge \
