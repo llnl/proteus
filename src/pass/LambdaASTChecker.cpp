@@ -10,6 +10,7 @@
 #include "clang/AST/ASTContext.h"
 #include "clang/AST/DeclCXX.h"
 #include "clang/AST/ExprCXX.h"
+#include "clang/AST/RecordLayout.h"
 #include "clang/AST/RecursiveASTVisitor.h"
 #include "clang/Basic/Diagnostic.h"
 #include "clang/Frontend/CompilerInstance.h"
@@ -17,10 +18,12 @@
 
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/DenseSet.h"
+#include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
 
 #include <algorithm>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -145,6 +148,120 @@ bool isPointerToLambdaFunctorWrapper(clang::QualType Type,
          isLambdaFunctorWrapper(getCanonicalRecord(Type));
 }
 
+// Whether Type is, or transitively holds by value, a registered lambda
+// wrapper. This is the storage the kernel-arg analysis specializes from;
+// envelopes and enclosing closures that capture a wrapper by value count.
+bool typeContainsLambdaFunctorWrapper(clang::QualType Type,
+                                      unsigned Depth = 0) {
+  if (Depth > 8)
+    return false;
+  Type = Type.getNonReferenceType();
+  if (const auto *Array = Type->getAsArrayTypeUnsafe())
+    return typeContainsLambdaFunctorWrapper(Array->getElementType(), Depth + 1);
+  const clang::CXXRecordDecl *Record = getCanonicalRecord(Type);
+  if (!Record)
+    return false;
+  if (isLambdaFunctorWrapper(Record))
+    return true;
+  if (!Record->hasDefinition())
+    return false;
+  for (const clang::CXXBaseSpecifier &Base : Record->bases())
+    if (typeContainsLambdaFunctorWrapper(Base.getType(), Depth + 1))
+      return true;
+  for (const clang::FieldDecl *Field : Record->fields())
+    if (typeContainsLambdaFunctorWrapper(Field->getType(), Depth + 1))
+      return true;
+  return false;
+}
+
+// Destination of a memory intrinsic, resolved through the implicit void*
+// decay: the pointee type plus the byte offset of the denoted lvalue within
+// its outermost containing object (so &Envelope->Body yields Body's type at
+// Body's offset inside Envelope, with the envelope as the root).
+struct IntrinsicDestination {
+  clang::QualType PointeeType; // type the pointer denotes
+  clang::QualType RootType;    // outermost object the write lands in
+  uint64_t OffsetInRoot = 0;   // byte offset of PointeeType within RootType
+};
+
+std::optional<IntrinsicDestination>
+getIntrinsicDestination(const clang::Expr *Arg, clang::ASTContext &Context) {
+  Arg = ignoreTransparentExprs(Arg);
+  const clang::Expr *Lvalue = nullptr;
+  if (const auto *AddrOf = llvm::dyn_cast_or_null<clang::UnaryOperator>(Arg);
+      AddrOf && AddrOf->getOpcode() == clang::UO_AddrOf)
+    Lvalue = ignoreTransparentExprs(AddrOf->getSubExpr());
+  else if (Arg && Arg->getType()->isPointerType())
+    return IntrinsicDestination{Arg->getType()->getPointeeType(),
+                                Arg->getType()->getPointeeType(), 0};
+  if (!Lvalue)
+    return std::nullopt;
+
+  // Accumulate constant member offsets through a (possibly nested) member
+  // chain: &E.Prefix.Body, &E->Body, ... Bail (conservatively unknown offset
+  // root) on anything else, e.g. array indexing with a dynamic index.
+  uint64_t OffsetBits = 0;
+  const clang::Expr *Current = Lvalue;
+  while (const auto *Member = llvm::dyn_cast<clang::MemberExpr>(
+             ignoreTransparentExprs(Current))) {
+    const auto *Field =
+        llvm::dyn_cast<clang::FieldDecl>(Member->getMemberDecl());
+    if (!Field)
+      return IntrinsicDestination{Lvalue->getType(), Lvalue->getType(), 0};
+    OffsetBits += Context.getFieldOffset(Field);
+    Current = Member->getBase();
+    if (Member->isArrow()) {
+      // The root is the pointee of the base pointer; stop the walk here.
+      return IntrinsicDestination{Lvalue->getType(),
+                                  Current->getType()->getPointeeType(),
+                                  OffsetBits / 8};
+    }
+  }
+  return IntrinsicDestination{Lvalue->getType(),
+                              ignoreTransparentExprs(Current)->getType(),
+                              OffsetBits / 8};
+}
+
+// Byte interval [Offset, Offset + Size) of the first wrapper found inside
+// Root (by value, through bases/fields/arrays), or nullopt if none.
+std::optional<std::pair<uint64_t, uint64_t>>
+getWrapperIntervalInType(clang::QualType Root, clang::ASTContext &Context,
+                         unsigned Depth = 0) {
+  if (Depth > 8)
+    return std::nullopt;
+  Root = Root.getNonReferenceType();
+  const clang::CXXRecordDecl *Record = getCanonicalRecord(Root);
+  if (Record && isLambdaFunctorWrapper(Record))
+    return std::make_pair(uint64_t{0},
+                          Context.getTypeSizeInChars(Root).getQuantity());
+  if (const auto *Array = Root->getAsArrayTypeUnsafe()) {
+    if (auto Inner = getWrapperIntervalInType(Array->getElementType(), Context,
+                                              Depth + 1))
+      return Inner; // first element's instance suffices for overlap checks
+    return std::nullopt;
+  }
+  if (!Record || !Record->hasDefinition())
+    return std::nullopt;
+  const clang::ASTRecordLayout &Layout = Context.getASTRecordLayout(Record);
+  for (const clang::CXXBaseSpecifier &Base : Record->bases()) {
+    if (auto Inner =
+            getWrapperIntervalInType(Base.getType(), Context, Depth + 1)) {
+      const auto *BaseRecord = getCanonicalRecord(Base.getType());
+      uint64_t BaseOff =
+          Layout
+              .getBaseClassOffset(llvm::cast<clang::CXXRecordDecl>(BaseRecord))
+              .getQuantity();
+      return std::make_pair(BaseOff + Inner->first, Inner->second);
+    }
+  }
+  for (const clang::FieldDecl *Field : Record->fields())
+    if (auto Inner =
+            getWrapperIntervalInType(Field->getType(), Context, Depth + 1))
+      return std::make_pair(Context.getFieldOffset(Field) / 8 + Inner->first,
+                            Inner->second);
+  return std::nullopt;
+}
+
 class VariableReferenceVisitor
     : public clang::RecursiveASTVisitor<VariableReferenceVisitor> {
 public:
@@ -163,6 +280,32 @@ private:
   const clang::VarDecl *Target;
   bool Found = false;
 };
+
+// Whether Statement transitively contains exactly the given expression node.
+class ExpressionSearchVisitor
+    : public clang::RecursiveASTVisitor<ExpressionSearchVisitor> {
+public:
+  explicit ExpressionSearchVisitor(const clang::Expr *Target)
+      : Target(Target) {}
+
+  bool VisitStmt(clang::Stmt *Statement) {
+    Found |= Statement == Target;
+    return !Found;
+  }
+
+  bool found() const { return Found; }
+
+private:
+  const clang::Expr *Target;
+  bool Found = false;
+};
+
+bool expressionContains(const clang::Expr *Haystack,
+                        const clang::Expr *Needle) {
+  ExpressionSearchVisitor Visitor(Needle);
+  Visitor.TraverseStmt(const_cast<clang::Expr *>(Haystack));
+  return Visitor.found();
+}
 
 bool referencesVariable(const clang::Stmt *Statement,
                         const clang::VarDecl *Variable) {
@@ -247,6 +390,9 @@ enum class StorageHazard : unsigned {
   EscapedSlot,
   MergedSlot,
   AmbiguousField,
+  TypeErasedWrapperStorage,
+  MemoryBuiltinOnWrapper,
+  UnionOverWrapper,
 };
 
 class FunctionStorageHazardVisitor
@@ -255,15 +401,81 @@ public:
   FunctionStorageHazardVisitor(clang::DiagnosticsEngine &Diagnostics,
                                unsigned MultipleCallWrites,
                                unsigned TypeErasedSlot, unsigned EscapedSlot,
+                               unsigned TypeErasedWrapperStorage,
+                               unsigned MemoryBuiltinOnWrapper,
                                llvm::DenseSet<uint64_t> &Reported)
       : Diagnostics(Diagnostics), MultipleCallWrites(MultipleCallWrites),
         TypeErasedSlot(TypeErasedSlot), EscapedSlot(EscapedSlot),
-        Reported(Reported) {}
+        TypeErasedWrapperStorage(TypeErasedWrapperStorage),
+        MemoryBuiltinOnWrapper(MemoryBuiltinOnWrapper), Reported(Reported) {}
 
   bool VisitCXXReinterpretCastExpr(clang::CXXReinterpretCastExpr *Cast) {
     if (isPointerToLambdaFunctorWrapper(Cast->getType(), 2))
       report(Cast->getExprLoc(), Cast->getSourceRange(),
              StorageHazard::TypeErasedSlot, TypeErasedSlot);
+    // Record casts that erase wrapper-containing storage into a mutable
+    // pointer. The cast alone is legal (container_of-style address math and
+    // const reads are common); only a WRITE through the erased pointer can
+    // break the whole-object discipline the IR analysis's witness model
+    // assumes (docs/dev/design/lambda-closure-provenance.md). The write scan
+    // happens in diagnoseErasedPointerWrites after the traversal.
+    clang::QualType Source = Cast->getSubExpr()->getType();
+    clang::QualType Dest = Cast->getType();
+    if (Source->isPointerType() &&
+        typeContainsLambdaFunctorWrapper(Source->getPointeeType()) &&
+        Dest->isPointerType() &&
+        !typeContainsLambdaFunctorWrapper(
+            Dest->getPointeeType().getNonReferenceType()) &&
+        !Dest->getPointeeType().isConstQualified())
+      ErasedWrapperCasts.push_back(Cast);
+    return true;
+  }
+
+  // Collect assignments; the erased-pointer write scan runs after the
+  // traversal (diagnoseErasedPointerWrites), because this visitor fires in
+  // pre-order -- a cast inside this assignment's LHS has not been recorded
+  // yet when the assignment itself is visited.
+  bool VisitBinaryOperator(clang::BinaryOperator *Operator) {
+    if (Operator->isAssignmentOp())
+      Assignments.push_back(Operator);
+    return true;
+  }
+
+  // A write whose destination goes through an erased pointer: *p = v or
+  // p[i] = v where p is a recorded erased cast or a variable holding one.
+  void diagnoseErasedPointerWrites() {
+    // Variables initialized from an erased cast propagate its taint:
+    // auto *Words = reinterpret_cast<...>(&Copy); Words[1] = ...;
+    for (const clang::VarDecl *Variable : InitializedVariables) {
+      if (Variable->getType().isConstQualified() ||
+          !Variable->getType()->isPointerType() ||
+          Variable->getType()->getPointeeType().isConstQualified())
+        continue;
+      for (const clang::CXXReinterpretCastExpr *Cast : ErasedWrapperCasts)
+        if (expressionContains(Variable->getInit(), Cast))
+          ErasedPointerVariables.insert(Variable->getCanonicalDecl());
+    }
+    for (const clang::BinaryOperator *Operator : Assignments) {
+      const clang::Expr *LHS = Operator->getLHS();
+      bool ThroughErased = false;
+      for (const clang::CXXReinterpretCastExpr *Cast : ErasedWrapperCasts)
+        ThroughErased |= expressionContains(LHS, Cast);
+      for (const clang::VarDecl *Variable : ErasedPointerVariables)
+        ThroughErased |= referencesVariable(LHS, Variable);
+      if (ThroughErased)
+        report(Operator->getOperatorLoc(), Operator->getSourceRange(),
+               StorageHazard::TypeErasedWrapperStorage,
+               TypeErasedWrapperStorage);
+    }
+  }
+
+  bool VisitDeclStmt(clang::DeclStmt *Stmt) {
+    // Collected for the post-traversal scan: a variable's initializer may
+    // contain a cast that has not been recorded yet in this pre-order visit.
+    for (const clang::Decl *Decl : Stmt->decls())
+      if (const auto *Variable = llvm::dyn_cast<clang::VarDecl>(Decl);
+          Variable && Variable->hasInit())
+        InitializedVariables.push_back(Variable);
     return true;
   }
 
@@ -271,6 +483,62 @@ public:
     const clang::FunctionDecl *Callee = Call->getDirectCallee();
     if (!Callee)
       return true;
+
+    // Memory builtins writing into wrapper storage can bypass the closure's
+    // whole-object copy discipline: a wrong length splices two sources into
+    // one functor (the classic wrong-sizeof bug). Writes that provably cover
+    // the whole wrapper, or provably miss it, are the discipline itself and
+    // stay legal; only a PARTIAL overlap of the wrapper's bytes -- or an
+    // overlap whose extent cannot be computed -- is diagnosed. Memset is
+    // stricter: any overlap destroys registered-slot provenance.
+    bool IsSet = false;
+    switch (Callee->getBuiltinID()) {
+    case clang::Builtin::BImemset:
+    case clang::Builtin::BI__builtin_memset:
+    case clang::Builtin::BI__builtin_memset_inline:
+      IsSet = true;
+      [[fallthrough]];
+    case clang::Builtin::BImemcpy:
+    case clang::Builtin::BImemmove:
+    case clang::Builtin::BI__builtin_memcpy:
+    case clang::Builtin::BI__builtin_memmove:
+    case clang::Builtin::BI__builtin_memcpy_inline: {
+      if (Call->getNumArgs() < 3)
+        break;
+      clang::ASTContext &Context = Callee->getASTContext();
+      auto Destination = getIntrinsicDestination(Call->getArg(0), Context);
+      if (!Destination)
+        break;
+      auto Wrapper = getWrapperIntervalInType(Destination->RootType, Context);
+      if (!Wrapper)
+        break; // no registered wrapper in the written object
+
+      // Wrapper interval within the root; write interval within the root.
+      uint64_t WrapperBegin = Wrapper->first;
+      uint64_t WrapperEnd = Wrapper->first + Wrapper->second;
+      uint64_t WriteBegin = Destination->OffsetInRoot;
+      clang::Expr::EvalResult Length;
+      bool HasLength = Call->getArg(2)->EvaluateAsInt(Length, Context);
+      if (!HasLength) {
+        // Unknown length: diagnose only if the write could reach the
+        // wrapper, i.e. it does not start past the wrapper's end.
+        if (WriteBegin < WrapperEnd)
+          report(Call->getExprLoc(), Call->getSourceRange(),
+                 StorageHazard::MemoryBuiltinOnWrapper, MemoryBuiltinOnWrapper);
+        break;
+      }
+      uint64_t WriteEnd = WriteBegin + Length.Val.getInt().getZExtValue();
+      bool Overlaps = WriteBegin < WrapperEnd && WriteEnd > WrapperBegin;
+      bool Covers = WriteBegin <= WrapperBegin && WriteEnd >= WrapperEnd;
+      if (Overlaps && (IsSet || !Covers))
+        report(Call->getExprLoc(), Call->getSourceRange(),
+               StorageHazard::MemoryBuiltinOnWrapper, MemoryBuiltinOnWrapper);
+      break;
+    }
+    default:
+      break;
+    }
+
     const unsigned Count = std::min(Call->getNumArgs(), Callee->getNumParams());
     for (unsigned I = 0; I < Count; ++I) {
       const clang::VarDecl *Variable = getAddressedVariable(Call->getArg(I));
@@ -301,8 +569,15 @@ private:
   unsigned MultipleCallWrites;
   unsigned TypeErasedSlot;
   unsigned EscapedSlot;
+  unsigned TypeErasedWrapperStorage;
+  unsigned MemoryBuiltinOnWrapper;
   llvm::DenseSet<uint64_t> &Reported;
   llvm::DenseMap<const clang::VarDecl *, unsigned> CallWrites;
+  llvm::SmallVector<const clang::CXXReinterpretCastExpr *, 4>
+      ErasedWrapperCasts;
+  llvm::SmallPtrSet<const clang::VarDecl *, 4> ErasedPointerVariables;
+  llvm::SmallVector<const clang::BinaryOperator *, 8> Assignments;
+  llvm::SmallVector<const clang::VarDecl *, 8> InitializedVariables;
 };
 
 class ReturnStorageHazardVisitor
@@ -434,6 +709,12 @@ public:
     return true;
   }
 
+  bool VisitCXXRecordDecl(clang::CXXRecordDecl *Record) {
+    if (Record->isUnion() && Record->isCompleteDefinition())
+      Unions.push_back(Record);
+    return true;
+  }
+
   bool VisitCallExpr(clang::CallExpr *Call) {
     if (isProteusFunction(Call, "proteus::jit_variable"))
       JitVariableCalls.push_back(Call);
@@ -454,6 +735,7 @@ public:
   }
 
   llvm::SmallVector<clang::LambdaExpr *, 16> Lambdas;
+  llvm::SmallVector<clang::CXXRecordDecl *, 8> Unions;
   llvm::SmallVector<clang::FunctionDecl *, 32> Functions;
   llvm::SmallVector<clang::CallExpr *, 16> JitVariableCalls;
   llvm::SmallVector<clang::CallExpr *, 16> RegisterLambdaCalls;
@@ -464,7 +746,8 @@ public:
 
 class LambdaASTConsumer : public clang::ASTConsumer {
 public:
-  explicit LambdaASTConsumer(clang::CompilerInstance &CI) : CI(CI) {}
+  LambdaASTConsumer(clang::CompilerInstance &CI, bool ContractWarnOnly)
+      : CI(CI), ContractWarnOnly(ContractWarnOnly) {}
 
   void HandleTranslationUnit(clang::ASTContext &Context) override {
     LambdaVisitor Visitor;
@@ -529,20 +812,45 @@ public:
         clang::DiagnosticsEngine::Error,
         "registered lambda pointer slot cannot escape to global storage");
     const unsigned MergedSlot = Diagnostics.getCustomDiagID(
-        clang::DiagnosticsEngine::Error,
-        "registered lambda pointer slot cannot be selected from multiple "
-        "control-flow assignments");
+        clang::DiagnosticsEngine::Warning,
+        "registered lambda pointer has been passed through "
+        "control-flow assignments.  Analysis will try to specialize but "
+        "failure to specialize lambda may occur.");
     const unsigned AmbiguousField = Diagnostics.getCustomDiagID(
         clang::DiagnosticsEngine::Error,
         "registered lambda pointer slot cannot be selected from different "
         "aggregate fields at runtime");
+    const clang::DiagnosticsEngine::Level ContractLevel =
+        ContractWarnOnly ? clang::DiagnosticsEngine::Warning
+                         : clang::DiagnosticsEngine::Error;
+    const unsigned TypeErasedWrapperStorage = Diagnostics.getCustomDiagID(
+        ContractLevel,
+        "storage containing a registered lambda cannot be reinterpreted "
+        "through a type-erased mutable pointer; the specialization analysis "
+        "requires closures to be written only as whole objects");
+    const unsigned MemoryBuiltinOnWrapper = Diagnostics.getCustomDiagID(
+        ContractLevel,
+        "memory builtins cannot write into storage containing a registered "
+        "lambda; copy the closure object instead");
+    const unsigned UnionOverWrapper = Diagnostics.getCustomDiagID(
+        ContractLevel,
+        "a registered lambda cannot be a member of a union; union storage "
+        "reuse defeats the specialization analysis");
+
+    for (const clang::CXXRecordDecl *Union : Visitor.Unions)
+      for (const clang::FieldDecl *Field : Union->fields())
+        if (typeContainsLambdaFunctorWrapper(Field->getType()))
+          Diagnostics.Report(Field->getLocation(), UnionOverWrapper)
+              << Field->getSourceRange();
 
     llvm::DenseSet<uint64_t> ReportedStorageHazards;
     for (clang::FunctionDecl *Function : Visitor.Functions) {
       FunctionStorageHazardVisitor StorageVisitor(
           Diagnostics, MultipleCallWrites, TypeErasedSlot, EscapedSlot,
+          TypeErasedWrapperStorage, MemoryBuiltinOnWrapper,
           ReportedStorageHazards);
       StorageVisitor.TraverseStmt(Function->getBody());
+      StorageVisitor.diagnoseErasedPointerWrites();
 
       if (!isPointerToLambdaFunctorWrapper(Function->getReturnType(), 2))
         continue;
@@ -662,19 +970,32 @@ private:
   }
 
   clang::CompilerInstance &CI;
+  bool ContractWarnOnly;
 };
 
 class LambdaASTCheckerAction : public clang::PluginASTAction {
 protected:
   std::unique_ptr<clang::ASTConsumer>
   CreateASTConsumer(clang::CompilerInstance &CI, llvm::StringRef) override {
-    return std::make_unique<LambdaASTConsumer>(CI);
+    return std::make_unique<LambdaASTConsumer>(CI, ContractWarnOnly);
   }
 
   bool ParseArgs(const clang::CompilerInstance &,
-                 const std::vector<std::string> &) override {
+                 const std::vector<std::string> &Args) override {
+    for (const std::string &Arg : Args)
+      if (Arg == "-contract-warn")
+        ContractWarnOnly = true;
     return true;
   }
+
+private:
+  // Downgrades the wrapper-storage contract diagnostics (type-erased writes,
+  // partial memory builtins, unions) from error to warning. For test code
+  // that deliberately violates the contract to exercise the IR analysis's
+  // conservative declines -- the second line of defense for IR that never
+  // passed this checker. Pass via:
+  //   -Xclang -plugin-arg-proteus-lambda-checker -Xclang -contract-warn
+  bool ContractWarnOnly = false;
 
   ActionType getActionType() override { return AddBeforeMainAction; }
 };
