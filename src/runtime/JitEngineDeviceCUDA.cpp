@@ -9,6 +9,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "proteus/impl/JitEngineDeviceCUDA.h"
+#include "proteus/impl/ShadowBitcodeRegistry.h"
 #include "proteus/impl/CoreLLVM.h"
 #include "proteus/impl/Frontend/DispatcherCUDA.h"
 #include "proteus/impl/JitEngineDevice.h"
@@ -38,14 +39,28 @@ void JitEngineDeviceCUDA::extractLinkedBitcode(
   if (!ModuleIdToFatBinary.count(ModuleId))
     reportFatalError("Expected to find module id " + ModuleId + " in map");
 
-  CUdeviceptr DevPtr;
-  size_t Bytes;
-  proteusCuErrCheck(
-      cuModuleGetGlobal(&DevPtr, &Bytes, CUMod, ModuleId.c_str()));
-
+  // NVCC fatbinaries carry no bitcode global; a shadow Clang device compile
+  // registers the module's bitcode at startup instead. Prefer the fatbin
+  // (Clang-CUDA builds), fall back to the shadow registry (NVCC builds).
+  // See docs/dev/design/nvcc-interop.md.
   SmallString<4096> DeviceBitcode;
-  DeviceBitcode.reserve(Bytes);
-  proteusCuErrCheck(cuMemcpyDtoH(DeviceBitcode.data(), DevPtr, Bytes));
+  size_t Bytes = 0;
+  CUdeviceptr DevPtr;
+  CUresult GetGlobalResult =
+      cuModuleGetGlobal(&DevPtr, &Bytes, CUMod, ModuleId.c_str());
+  if (GetGlobalResult == CUDA_SUCCESS) {
+    DeviceBitcode.reserve(Bytes);
+    proteusCuErrCheck(cuMemcpyDtoH(DeviceBitcode.data(), DevPtr, Bytes));
+  } else {
+    StringRef Shadow = ShadowBitcodeRegistry::instance().lookup(ModuleId);
+    if (Shadow.empty())
+      proteusCuErrCheck(GetGlobalResult);
+    PROTEUS_DBG(Logger::logs("proteus")
+                << "extractLinkedBitcode: shadow bitcode for " << ModuleId
+                << " (" << Shadow.size() << " bytes)\n");
+    DeviceBitcode.append(Shadow.begin(), Shadow.end());
+    Bytes = Shadow.size();
+  }
 
   Timer T(Config::get().ProteusEnableTimers);
   StringRef Bitcode{DeviceBitcode.data(), Bytes};
@@ -82,8 +97,15 @@ HashT JitEngineDeviceCUDA::getModuleHash(BinaryInfo &BinInfo) {
   auto ExtractLinkedBitcodeHash = [&CUMod](std::string &ModuleId) {
     CUdeviceptr DevPtr;
     size_t Bytes;
-    proteusCuErrCheck(
-        cuModuleGetGlobal(&DevPtr, &Bytes, CUMod, ModuleId.c_str()));
+    CUresult GetGlobalResult =
+        cuModuleGetGlobal(&DevPtr, &Bytes, CUMod, ModuleId.c_str());
+    if (GetGlobalResult != CUDA_SUCCESS) {
+      // NVCC build: hash the shadow-registered bitcode instead.
+      StringRef Shadow = ShadowBitcodeRegistry::instance().lookup(ModuleId);
+      if (Shadow.empty())
+        proteusCuErrCheck(GetGlobalResult);
+      return hash(Shadow);
+    }
 
     SmallVector<char, 4096> DeviceBitcode;
     DeviceBitcode.reserve(Bytes);

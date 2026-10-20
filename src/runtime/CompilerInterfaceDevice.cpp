@@ -15,6 +15,7 @@
 #include "proteus/impl/JitEngineDevice.h"
 #include "proteus/impl/JitEngineInfoRegistry.h"
 #include "proteus/impl/LambdaRegistry.h"
+#include "proteus/impl/ShadowBitcodeRegistry.h"
 #include <llvm/ADT/DenseMap.h>
 
 #include <cstring>
@@ -50,6 +51,15 @@ extern "C" __attribute__((used)) void
 __proteus_register_fatbinary_end(void *Handle) {
   auto &JitEngineInfo = JitEngineInfoRegistry::instance();
   JitEngineInfo.registerFatBinaryEnd(Handle);
+}
+
+// Registers device bitcode produced by a shadow Clang compile of an
+// NVCC-built translation unit. Called from constructors emitted by
+// add_proteus_nvcc(); Bitcode has static storage duration.
+extern "C" __attribute__((used)) void
+__proteus_register_shadow_bitcode(const char *ModuleId, const void *Bitcode,
+                                  uint64_t Size) {
+  ShadowBitcodeRegistry::instance().registerBitcode(ModuleId, Bitcode, Size);
 }
 
 extern "C" __attribute__((used)) void
