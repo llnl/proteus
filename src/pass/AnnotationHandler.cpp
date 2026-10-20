@@ -175,6 +175,12 @@ static Argument *getOriginatingArgument(Value *V,
 
 static SmallPtrSet<Argument *, 16>
 tryGatherCoercedArguments(Value *Obj, const Instruction *AnnotCall) {
+  // The annotation receives the generic (addrspace 0) pointer.  For objects
+  // passed by value Clang materializes the object in the alloca address space
+  // and inserts an addrspacecast before calling jit_object.  Strip that cast
+  // before looking for the stack slot; otherwise this routine aborts even
+  // though the underlying value is an alloca.
+  Obj = stripAllCasts(Obj);
   AllocaInst *AI = dyn_cast<AllocaInst>(Obj);
   if (!AI)
     reportFatalError("Expected object in local alloca");
@@ -264,6 +270,12 @@ tryGatherCoercedArguments(Value *Obj, const Instruction *AnnotCall) {
                                                         m_Value()))) {
       if (!CoercedArgs.empty())
         reportFatalError("Expected empty coerced arguments");
+
+      // The source of the copy is the by-value kernel argument in current
+      // LLVM/Clang.  Older IR used stores into another temporary, which is
+      // why the store walk below is still retained.
+      if (auto *Arg = dyn_cast<Argument>(stripAllCasts(Src)))
+        CoercedArgs.insert(Arg);
 
       // Restart detection for the Src operand.
       const Instruction &E = I;

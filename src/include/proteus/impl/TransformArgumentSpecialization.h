@@ -180,7 +180,25 @@ public:
         SmallString<128> S;
         raw_svector_ostream OS(S);
         OS << "[ArgSpec] Replaced Function " << F.getName() << " ArgNo "
-           << ArgNo << " with value " << *C->stripPointerCasts() << "\n";
+           << ArgNo << " with value ";
+
+        // LLVM 23 changed the textual form of x86_fp80 constants from the
+        // stable LLVM IR hexadecimal form to decimal notation.  Keep the
+        // diagnostic representation stable; this is only logging and does
+        // not affect the ConstantFP inserted into the module.
+        auto *StrippedC = C->stripPointerCasts();
+        if (auto *FP = dyn_cast<ConstantFP>(StrippedC);
+            FP && FP->getType()->isX86_FP80Ty()) {
+          SmallString<32> Hex;
+          FP->getValueAPF().bitcastToAPInt().toStringUnsigned(Hex, 16);
+          OS << "x86_fp80 0xK";
+          for (size_t I = Hex.size(); I < 20; ++I)
+            OS << '0';
+          OS << Hex;
+        } else {
+          OS << *StrippedC;
+        }
+        OS << "\n";
 
         return S;
       };

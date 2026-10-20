@@ -112,9 +112,17 @@ inline std::string getDefaultOptimizationPipeline(char OptLevel) {
   case '3':
     return "default<O3>";
   case 's':
+#if LLVM_VERSION_MAJOR > 22
+    return "default<O2>";
+#else
     return "default<Os>";
+#endif
   case 'z':
+#if LLVM_VERSION_MAJOR > 22
+    return "default<O2>";
+#else
     return "default<Oz>";
+#endif
   default:
     reportFatalError(std::string("Unsupported optimization level ") + OptLevel);
   }
@@ -148,6 +156,29 @@ inline std::string composeOptimizationPassPipeline(
   }
 
   return Pipeline;
+}
+
+// LLVM 23 removed the textual Os/Oz pipeline names.  Keep accepting these
+// names in PROTEUS_OPT_PIPELINE for compatibility with existing callers, but
+// translate them only at the point where LLVM parses the pipeline.  The
+// caller-facing trace can therefore continue to report the requested
+// pipeline.
+inline std::string normalizeOptimizationPassPipeline(StringRef PassPipeline) {
+#if LLVM_VERSION_MAJOR > 22
+  std::string Normalized = PassPipeline.str();
+  for (auto [Old, New] : {std::pair<StringRef, StringRef>{"default<Os>",
+                                                           "default<O2>"},
+                          {"default<Oz>", "default<O2>"}}) {
+    size_t Pos = 0;
+    while ((Pos = Normalized.find(Old.str(), Pos)) != std::string::npos) {
+      Normalized.replace(Pos, Old.size(), New.str());
+      Pos += New.size();
+    }
+  }
+  return Normalized;
+#else
+  return PassPipeline.str();
+#endif
 }
 
 inline bool
@@ -213,7 +244,9 @@ inline void runOptimizationPassPipeline(
   PB.registerLoopAnalyses(LAM);
   PB.crossRegisterProxies(LAM, FAM, CGAM, MAM);
   ModulePassManager Passes;
-  if (auto E = PB.parsePassPipeline(Passes, PassPipeline))
+  const std::string NormalizedPipeline =
+      normalizeOptimizationPassPipeline(PassPipeline);
+  if (auto E = PB.parsePassPipeline(Passes, NormalizedPipeline))
     reportFatalError("Error: " + toString(std::move(E)));
 
   Passes.run(M, MAM);
@@ -263,10 +296,22 @@ inline void runOptimizationPassPipeline(
     OptSetting = OptimizationLevel::O3;
     break;
   case 's':
+#if LLVM_VERSION_MAJOR > 22
+    // LLVM 23 removed the size-oriented optimization levels. O2 is the
+    // closest remaining pipeline and keeps this option optimizing code.
+    OptSetting = OptimizationLevel::O2;
+#else
     OptSetting = OptimizationLevel::Os;
+#endif
     break;
   case 'z':
+#if LLVM_VERSION_MAJOR > 22
+    // LLVM 23 removed the size-oriented optimization levels. O2 is the
+    // closest remaining pipeline and keeps this option optimizing code.
+    OptSetting = OptimizationLevel::O2;
+#else
     OptSetting = OptimizationLevel::Oz;
+#endif
     break;
   default:
     reportFatalError(std::string("Unsupported optimization level ") + OptLevel);

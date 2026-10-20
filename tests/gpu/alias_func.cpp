@@ -16,9 +16,17 @@
 // 1) Forward‐declare the real device function
 extern "C" __device__ __attribute__((used)) void foo(int V);
 
-// 2) Create the alias (must refer to the mangled/assembler name)
+// 2) Create the alias (must refer to the mangled/assembler name).  LLVM 23's
+// AMDGPU frontend no longer emits source-level device aliases, so use an
+// equivalent forwarding function with that compiler.
+#if __clang_major__ >= 23
+extern "C" __device__ __attribute__((used, noinline)) void foo_alias(int V) {
+  foo(V);
+}
+#else
 extern "C" __device__ __attribute__((used)) void foo_alias(int V)
     __attribute__((alias("foo")));
+#endif
 
 // 3) Define the aliasee
 extern "C" __device__ __attribute__((used)) void foo(int V) {
