@@ -33,6 +33,7 @@ inline auto __proteus_launch_kernel_internal(void *Kernel, dim3 GridDim,
   }
 
   auto &KernelInfo = OptionalKernelInfo.value().get();
+  LambdaRegistry::instance().invokeRegisterLambdaConstants(Kernel, KernelArgs);
   const auto &CGConfig = Config::get().getCGConfig(KernelInfo.getName());
   if (const auto &TunedGridDim = CGConfig.gridDim())
     GridDim = dim3((*TunedGridDim)[0], (*TunedGridDim)[1], (*TunedGridDim)[2]);

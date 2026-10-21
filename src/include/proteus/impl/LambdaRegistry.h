@@ -8,6 +8,7 @@
 #include "proteus/impl/LambdaCallsite.h"
 #include "proteus/impl/Logger.h"
 
+#include <atomic>
 #include <llvm/ADT/DenseMap.h>
 #include <llvm/ADT/STLExtras.h>
 #include <llvm/ADT/SmallVector.h>
@@ -65,8 +66,11 @@ public:
     if (PendingIt->second.empty())
       return;
 
-    currentHostJitVariables()[FunctorID] = std::move(PendingIt->second);
-    PendingVariants.erase(PendingIt);
+    // Swap and clear instead of moving so neither map frees and reallocates its
+    // buckets on every register_lambda call.
+    auto &Current = currentHostJitVariables()[FunctorID];
+    std::swap(Current, PendingIt->second);
+    PendingIt->second.clear();
   }
 
   void eraseHostJitVariables(uint64_t FunctorID) {
@@ -105,28 +109,32 @@ public:
                    return L.Pos < R.Pos;
                  });
     }
-    CurrentLaunchInfo = std::move(PendingLaunchInfo);
+    std::swap(CurrentLaunchInfo, PendingLaunchInfo);
     PendingLaunchInfo.LambdaCalleeInfo.clear();
     PendingLaunchInfo.CallsiteRuntimeConstants.clear();
   }
 
-  DeviceLaunchInfo takeDeviceLaunchInfo() {
+  // Valid until clearDeviceLaunchInfo or the next launch.
+  const DeviceLaunchInfo &peekDeviceLaunchInfo() const {
+    return currentDeviceLaunchInfo();
+  }
+
+  void clearDeviceLaunchInfo() {
     auto &CurrentLaunchInfo = currentDeviceLaunchInfo();
-    DeviceLaunchInfo LaunchInfo = std::move(CurrentLaunchInfo);
     CurrentLaunchInfo.LambdaCalleeInfo.clear();
     CurrentLaunchInfo.CallsiteRuntimeConstants.clear();
-    return LaunchInfo;
   }
 
   void populateLambdaRegistrationCodeCache(void *Kernel,
                                            void *RegistrationFunc) {
     std::lock_guard<std::mutex> Lock(DeviceRegistrationMutex);
     KernelToLambdaRegistration[Kernel] = RegistrationFunc;
+    HasDeviceRegistrations.store(true, std::memory_order_release);
   }
 
   void invokeRegisterLambdaConstants(void *Kernel, void **Args) {
     void *RegistrationFunc = nullptr;
-    {
+    if (HasDeviceRegistrations.load(std::memory_order_acquire)) {
       std::lock_guard<std::mutex> Lock(DeviceRegistrationMutex);
       auto It = KernelToLambdaRegistration.find(Kernel);
       if (It != KernelToLambdaRegistration.end())
@@ -164,6 +172,7 @@ private:
   }
 
   mutable std::mutex DeviceRegistrationMutex;
+  std::atomic<bool> HasDeviceRegistrations{false};
   DenseMap<void *, void *> KernelToLambdaRegistration;
 };
 

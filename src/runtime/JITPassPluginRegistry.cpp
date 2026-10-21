@@ -40,6 +40,7 @@ public:
                              return Entry.Path == Config.Path &&
                                     Entry.Insertion == Config.Insertion;
                            });
+    Generation.fetch_add(1, std::memory_order_release);
     if (It != Plugins.end()) {
       It->Fingerprint = std::move(Config.Fingerprint);
       return;
@@ -53,6 +54,11 @@ public:
     std::lock_guard<std::mutex> Lock(Mutex);
     Plugins.clear();
     HasPlugins.store(false, std::memory_order_release);
+    Generation.fetch_add(1, std::memory_order_release);
+  }
+
+  uint64_t generation() const {
+    return Generation.load(std::memory_order_acquire);
   }
 
   std::vector<JITPassPluginConfig> snapshot() {
@@ -88,6 +94,7 @@ private:
 
   std::mutex Mutex;
   std::atomic<bool> HasPlugins{false};
+  std::atomic<uint64_t> Generation{0};
   std::vector<JITPassPluginConfig> Plugins;
 };
 
@@ -104,6 +111,10 @@ void clearJITPassPluginsImpl() { JITPassPluginRegistry::instance().clear(); }
 
 std::vector<JITPassPluginConfig> getJITPassPluginConfigs() {
   return JITPassPluginRegistry::instance().snapshot();
+}
+
+uint64_t getJITPassPluginGeneration() {
+  return JITPassPluginRegistry::instance().generation();
 }
 
 } // namespace proteus

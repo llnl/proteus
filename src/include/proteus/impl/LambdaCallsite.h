@@ -27,7 +27,7 @@ using LambdaKernelArgLocationMap =
     DenseMap<uint64_t, LambdaKernelArgLocationVec>;
 using LambdaCallsiteLocationMap =
     DenseMap<uint64_t, DenseMap<uint32_t, LambdaKernelArgLocation>>;
-using LambdaCallsiteRuntimeConstants = SmallVector<RuntimeConstant, 8>;
+using LambdaCallsiteRuntimeConstants = SmallVector<RuntimeConstant, 2>;
 using LambdaCallsiteRuntimeConstantsMap =
     DenseMap<uint64_t, LambdaCallsiteRuntimeConstants>;
 

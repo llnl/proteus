@@ -64,6 +64,7 @@
 #include <llvm/Transforms/Utils/Cloning.h>
 #include <llvm/Transforms/Utils/ModuleUtils.h>
 
+#include <array>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -237,6 +238,15 @@ class JITKernelInfo {
   std::optional<SmallVector<uint64_t>> LambdaCalleeInfo;
   std::optional<LambdaCallsiteLocationMap> LambdaCallsiteLocationInfo;
 
+  // Recent specializations keyed by the raw launch inputs that feed the
+  // specialization hash, so warm launches skip hashing and cache lookups.
+  struct LaunchMemoEntry {
+    SmallVector<char, 64> Key;
+    void *KernelFunc = nullptr;
+  };
+  std::array<LaunchMemoEntry, 4> LaunchMemo;
+  unsigned NextLaunchMemo = 0;
+
 public:
   JITKernelInfo(void *Kernel, BinaryInfo &BinInfo, char const *Name,
                 ArrayRef<RuntimeConstantInfo *> RCInfoArray)
@@ -271,6 +281,20 @@ public:
   void createStaticHash(HashT ModuleHash) {
     StaticHash = hash(Name);
     StaticHash = hashCombine(StaticHash.value(), ModuleHash);
+  }
+
+  void *lookupLaunchMemo(ArrayRef<char> Key) const {
+    for (const auto &Entry : LaunchMemo)
+      if (Entry.KernelFunc && ArrayRef<char>(Entry.Key) == Key)
+        return Entry.KernelFunc;
+    return nullptr;
+  }
+
+  void insertLaunchMemo(ArrayRef<char> Key, void *KernelFunc) {
+    auto &Entry = LaunchMemo[NextLaunchMemo];
+    NextLaunchMemo = (NextLaunchMemo + 1) % LaunchMemo.size();
+    Entry.Key.assign(Key.begin(), Key.end());
+    Entry.KernelFunc = KernelFunc;
   }
 
   bool hasLambdaCalleeInfo() { return LambdaCalleeInfo.has_value(); }
@@ -450,12 +474,57 @@ public:
                      LambdaCallsiteRuntimeConstantsMap &LambdaJitValuesMap) {
     TIMESCOPE(JitEngineDevice, getLambdaJitValues);
     LambdaRegistry &LR = LambdaRegistry::instance();
-    auto LaunchInfo = LR.takeDeviceLaunchInfo();
-    if (LaunchInfo.CallsiteRuntimeConstants.empty()) {
-      return;
+    const auto &LaunchInfo = LR.peekDeviceLaunchInfo();
+    if (!LaunchInfo.CallsiteRuntimeConstants.empty()) {
+      LambdaCalleeInfo.assign(LaunchInfo.LambdaCalleeInfo.begin(),
+                              LaunchInfo.LambdaCalleeInfo.end());
+      LambdaJitValuesMap = LaunchInfo.CallsiteRuntimeConstants;
     }
-    LambdaCalleeInfo = std::move(LaunchInfo.LambdaCalleeInfo);
-    LambdaJitValuesMap = std::move(LaunchInfo.CallsiteRuntimeConstants);
+    LR.clearDeviceLaunchInfo();
+  }
+
+  // Serializes the launch inputs that feed the specialization hash. Returns
+  // false for inputs that are not plain scalars, which take the hashing path.
+  bool buildLaunchMemoKey(JITKernelInfo &KernelInfo, void **KernelArgs,
+                          dim3 GridDim, dim3 BlockDim,
+                          const CodeGenerationConfig &CGConfig,
+                          SmallVectorImpl<char> &Key) {
+    auto Append = [&Key](const void *Ptr, size_t Size) {
+      Key.append(static_cast<const char *>(Ptr),
+                 static_cast<const char *>(Ptr) + Size);
+    };
+
+    for (const auto *RCInfo : KernelInfo.getRCInfoArray()) {
+      RuntimeConstantType Type = RCInfo->ArgInfo.Type;
+      if (!isScalarRuntimeConstantType(Type))
+        return false;
+      size_t Size = Type == RuntimeConstantType::PTR ? sizeof(void *)
+                                                     : getSizeInBytes(Type);
+      Append(KernelArgs[RCInfo->ArgInfo.Pos], Size);
+    }
+
+    Append(&BlockDim, sizeof(BlockDim));
+    if (CGConfig.specializeDims() || CGConfig.specializeDimsRange())
+      Append(&GridDim, sizeof(GridDim));
+
+    uint64_t PluginGeneration = getJITPassPluginGeneration();
+    Append(&PluginGeneration, sizeof(PluginGeneration));
+
+    const auto &LaunchInfo = LambdaRegistry::instance().peekDeviceLaunchInfo();
+    for (const auto &[CallsiteIndex, RCs] :
+         LaunchInfo.CallsiteRuntimeConstants) {
+      Append(&CallsiteIndex, sizeof(CallsiteIndex));
+      for (const auto &RC : RCs) {
+        if (!isScalarRuntimeConstantType(RC.Type))
+          return false;
+        Append(&RC.Type, sizeof(RC.Type));
+        Append(&RC.Pos, sizeof(RC.Pos));
+        Append(&RC.Offset, sizeof(RC.Offset));
+        Append(&RC.Value, sizeof(RC.Value));
+      }
+    }
+
+    return true;
   }
 
   void registerVar(void *Handle, const char *VarName, const void *HostAddr,
@@ -493,10 +562,10 @@ public:
 
   std::optional<std::reference_wrapper<JITKernelInfo>>
   getJITKernelInfo(const void *Func) {
-    if (!containsJITKernelInfo(Func)) {
+    auto It = JITKernelInfoMap.find(Func);
+    if (It == JITKernelInfoMap.end())
       return std::nullopt;
-    }
-    return JITKernelInfoMap[Func];
+    return It->second;
   }
 
   HashT getStaticHash(JITKernelInfo &KernelInfo) {
@@ -579,6 +648,22 @@ JitEngineDevice<ImplT>::compileAndRun(
   TIMESCOPE(JitEngineDevice, compileAndRun);
 
   auto &BinInfo = KernelInfo.getBinaryInfo();
+  const auto &CGConfig = Config::get().getCGConfig(KernelInfo.getName());
+
+  // Cache statistics count lookups, so tracing them disables the memo.
+  SmallVector<char, 64> MemoKey;
+  const bool UseLaunchMemo = !Config::get().traceCacheStats() &&
+                             !Config::get().traceKernels() &&
+                             buildLaunchMemoKey(KernelInfo, KernelArgs, GridDim,
+                                                BlockDim, CGConfig, MemoKey);
+  if (UseLaunchMemo) {
+    if (void *KernelFunc = KernelInfo.lookupLaunchMemo(MemoKey)) {
+      LambdaRegistry::instance().clearDeviceLaunchInfo();
+      return launchKernelFunction(
+          reinterpret_cast<KernelFunction_t>(KernelFunc), GridDim, BlockDim,
+          KernelArgs, ShmemSize, Stream);
+    }
+  }
 
   SmallVector<RuntimeConstant> RCVec =
       getRuntimeConstantValues(KernelArgs, KernelInfo.getRCInfoArray());
@@ -586,7 +671,6 @@ JitEngineDevice<ImplT>::compileAndRun(
   SmallVector<uint64_t> LambdaCalleeInfoToSpecialize;
   LambdaCallsiteRuntimeConstantsMap LambdaJitValuesMap;
   getLambdaJitValues(LambdaCalleeInfoToSpecialize, LambdaJitValuesMap);
-  const auto &CGConfig = Config::get().getCGConfig(KernelInfo.getName());
   // Determine the hash based on dimension specialization.  If we do not
   // specialize IR based on grid dimensions, avoid hashing on those to
   // eliminate repeated compilation overhead.
@@ -599,12 +683,18 @@ JitEngineDevice<ImplT>::compileAndRun(
 
   Dispatcher &Dispatch = getDispatcher();
 
-  if (void *KernelFunc =
-          Dispatch.lookupFunction(KernelInfo.getName(), HashValue))
+  auto Launch = [&](void *KernelFunc) {
+    if (UseLaunchMemo)
+      KernelInfo.insertLaunchMemo(MemoKey, KernelFunc);
     return static_cast<DeviceError_t>(Dispatch
                                           .launch(KernelFunc, GridDim, BlockDim,
                                                   KernelArgs, ShmemSize, Stream)
                                           .Ret);
+  };
+
+  if (void *KernelFunc =
+          Dispatch.lookupFunction(KernelInfo.getName(), HashValue))
+    return Launch(KernelFunc);
 
   // NOTE: we don't need a suffix to differentiate kernels, each
   // specialization will be in its own module uniquely identify by HashValue.
@@ -619,11 +709,7 @@ JitEngineDevice<ImplT>::compileAndRun(
   };
 
   if (auto CompiledLib = Dispatch.lookupCompiledLibrary(HashValue))
-    return static_cast<DeviceError_t>(Dispatch
-                                          .launch(LoadKernel(*CompiledLib),
-                                                  GridDim, BlockDim, KernelArgs,
-                                                  ShmemSize, Stream)
-                                          .Ret);
+    return Launch(LoadKernel(*CompiledLib));
 
   MemoryBufferRef KernelBitcode = getBitcode(KernelInfo);
   std::unique_ptr<MemoryBuffer> ObjBuf = nullptr;
@@ -681,11 +767,7 @@ JitEngineDevice<ImplT>::compileAndRun(
   CompiledLibrary Library{std::move(ObjBuf)};
   Library.GlobalsRelinked = true;
 
-  return static_cast<DeviceError_t>(Dispatch
-                                        .launch(LoadKernel(Library), GridDim,
-                                                BlockDim, KernelArgs, ShmemSize,
-                                                Stream)
-                                        .Ret);
+  return Launch(LoadKernel(Library));
 }
 
 template <typename ImplT>

@@ -3,6 +3,7 @@
 
 #include "proteus/Init.h"
 
+#include <cstdint>
 #include <optional>
 #include <string>
 #include <vector>
@@ -28,6 +29,8 @@ void registerJITPassPluginImpl(const std::string &PluginPath,
                                std::optional<JITPassPluginInsertion> Insertion);
 void clearJITPassPluginsImpl();
 std::vector<JITPassPluginConfig> getJITPassPluginConfigs();
+// Changes whenever the registered plugins change.
+uint64_t getJITPassPluginGeneration();
 
 } // namespace proteus
 
