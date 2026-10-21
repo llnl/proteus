@@ -478,7 +478,9 @@ public:
     if (!LaunchInfo.CallsiteRuntimeConstants.empty()) {
       LambdaCalleeInfo.assign(LaunchInfo.LambdaCalleeInfo.begin(),
                               LaunchInfo.LambdaCalleeInfo.end());
-      LambdaJitValuesMap = LaunchInfo.CallsiteRuntimeConstants;
+      for (const auto &[CallsiteIndex, RCs] :
+           LaunchInfo.CallsiteRuntimeConstants)
+        LambdaJitValuesMap.try_emplace(CallsiteIndex, RCs);
     }
     LR.clearDeviceLaunchInfo();
   }

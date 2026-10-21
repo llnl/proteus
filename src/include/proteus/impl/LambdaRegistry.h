@@ -37,9 +37,11 @@ public:
 
   using JitVariantMap = DenseMap<int32_t, RuntimeConstant>;
   using JitVariantVec = SmallVector<JitVariantMap, 4>;
+  // Rebuilt on every launch, so keep the common few-callsite case inline.
   struct DeviceLaunchInfo {
     SmallVector<uint64_t, 4> LambdaCalleeInfo;
-    LambdaCallsiteRuntimeConstantsMap CallsiteRuntimeConstants;
+    SmallDenseMap<uint64_t, LambdaCallsiteRuntimeConstants, 4>
+        CallsiteRuntimeConstants;
   };
 
   std::optional<JitVariantMap> getHostJitVariant(uint64_t FunctorID) const {
@@ -69,7 +71,7 @@ public:
     // Swap and clear instead of moving so neither map frees and reallocates its
     // buckets on every register_lambda call.
     auto &Current = currentHostJitVariables()[FunctorID];
-    std::swap(Current, PendingIt->second);
+    Current.swap(PendingIt->second);
     PendingIt->second.clear();
   }
 
@@ -109,7 +111,9 @@ public:
                    return L.Pos < R.Pos;
                  });
     }
-    std::swap(CurrentLaunchInfo, PendingLaunchInfo);
+    CurrentLaunchInfo.LambdaCalleeInfo.swap(PendingLaunchInfo.LambdaCalleeInfo);
+    CurrentLaunchInfo.CallsiteRuntimeConstants.swap(
+        PendingLaunchInfo.CallsiteRuntimeConstants);
     PendingLaunchInfo.LambdaCalleeInfo.clear();
     PendingLaunchInfo.CallsiteRuntimeConstants.clear();
   }
