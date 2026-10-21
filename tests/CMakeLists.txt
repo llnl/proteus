@@ -75,6 +75,17 @@ function(proteus_attach_pass_plugin_rebuild_dep target)
     add_dependencies(${target} ProteusASTChecker)
 endfunction()
 
+function(proteus_attach_gpu_pass_pipeline target)
+    if(PROTEUS_ENABLE_NVCC_SHADOW)
+        add_proteus_nvcc(${target}
+            CLANG "${PROTEUS_NVCC_SHADOW_CLANG}"
+            CUDA_ARCH "${PROTEUS_NVCC_SHADOW_CUDA_ARCH}"
+            CUDA_PATH "${PROTEUS_NVCC_SHADOW_CUDA_PATH}")
+    else()
+        proteus_attach_pass_plugin_rebuild_dep(${target} ${ARGN})
+    endif()
+endfunction()
+
 add_subdirectory(cpu)
 add_subdirectory(ast)
 

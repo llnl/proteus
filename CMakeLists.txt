@@ -14,6 +14,9 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
 endif()
 option(PROTEUS_ENABLE_HIP "Enable HIP" OFF)
 option(PROTEUS_ENABLE_CUDA "Enable CUDA" OFF)
+option(PROTEUS_ENABLE_NVCC_SHADOW
+  "Use NVCC for CUDA AOT compilation and Clang for a shadow device pipeline"
+  OFF)
 option(PROTEUS_ENABLE_MPI "Enable MPI support for shared caching" OFF)
 option(PROTEUS_ENABLE_MLIR "Enable MLIR backend" OFF)
 option(BUILD_SHARED "Builds the JIT library as shared" OFF)
@@ -106,6 +109,22 @@ if(PROTEUS_ENABLE_CUDA)
   find_package(CUDAToolkit 12 REQUIRED)
 endif()
 
+if(PROTEUS_ENABLE_NVCC_SHADOW)
+  if(NOT PROTEUS_ENABLE_CUDA)
+    message(FATAL_ERROR
+      "PROTEUS_ENABLE_NVCC_SHADOW requires PROTEUS_ENABLE_CUDA=ON")
+  endif()
+
+  set(PROTEUS_NVCC_SHADOW_CLANG "${LLVM_INSTALL_DIR}/bin/clang++" CACHE FILEPATH
+    "Clang compiler used by the NVCC shadow device pipeline")
+  set(PROTEUS_NVCC_SHADOW_CUDA_ARCH "sm_80" CACHE STRING
+    "CUDA architecture passed to the Clang shadow device compile")
+  set(PROTEUS_NVCC_SHADOW_CUDA_PATH "${CUDAToolkit_ROOT}" CACHE PATH
+    "CUDA toolkit root passed to the Clang shadow device compile")
+
+  include(cmake/ProteusNvccShadow.cmake)
+endif()
+
 include(cmake/SetupLLVM.cmake)
 include(cmake/ProteusFunctions.cmake)
 include(GNUInstallDirs)
@@ -146,6 +165,8 @@ if(NOT PROTEUS_PYTHON_WHEEL)
     "${PROJECT_BINARY_DIR}/proteusConfigVersion.cmake"
     "${PROJECT_BINARY_DIR}/proteusConfig.cmake"
     "${PROJECT_SOURCE_DIR}/cmake/ProteusFunctions.cmake"
+    "${PROJECT_SOURCE_DIR}/cmake/ProteusNvccShadow.cmake"
+    "${PROJECT_SOURCE_DIR}/cmake/ProteusNvccShadowEmbed.cmake"
     DESTINATION
     ${CMAKE_INSTALL_LIBDIR}/cmake/proteus)
 endif()

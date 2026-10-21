@@ -100,6 +100,8 @@ public:
 
   HashT getModuleHash(BinaryInfo &BinInfo);
 
+  bool canSpecialize(BinaryInfo &) { return true; }
+
   // Proteus optimizes beforehand only when it owns the pipeline. Parallel
   // codegen forwards the pipeline and pass plugins to LTO, and RTC hands
   // bitcode to hiprtc which optimizes it internally, so pre-optimizing on

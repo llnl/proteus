@@ -175,6 +175,9 @@ std::optional<KernelMetadata> captureKernelMetadata(const void *Kernel) {
     return std::nullopt;
 
   auto &KInfo = OptionalKernelInfo.value().get();
+  if (!Jit.canSpecializeKernel(KInfo))
+    return std::nullopt;
+
   Jit.extractModuleAndBitcode(KInfo);
   auto StaticHash = Jit.getStaticHash(KInfo);
   auto Bitcode = KInfo.getBitcode().getBuffer();

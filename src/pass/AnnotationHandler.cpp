@@ -568,6 +568,10 @@ void AnnotationHandler::parseManifestFileAnnotations(
 }
 
 SmallString<64> AnnotationHandler::getUniqueManifestFilename() {
+  if (!ProteusManifestDir.empty())
+    return {ProteusManifestDir, "/proteus-device-manifest-",
+            getUniqueFileID(M), ".json"};
+
   auto TmpPath = std::filesystem::temp_directory_path();
 
   // Use the parent process id and the unique file id to uniquely identify the

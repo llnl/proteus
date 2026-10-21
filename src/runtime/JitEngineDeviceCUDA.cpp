@@ -28,6 +28,46 @@ JitEngineDeviceCUDA &JitEngineDeviceCUDA::instance() {
   return Jit;
 }
 
+bool JitEngineDeviceCUDA::canSpecialize(BinaryInfo &BinInfo) {
+  auto &ModuleIds = BinInfo.getModuleIds();
+  if (ModuleIds.empty())
+    return false;
+
+  // Shadow modules are registered in host memory and need no CUDA module
+  // query. If any ID is not shadow-registered, check whether this is an
+  // ordinary Clang-CUDA fatbinary carrying the bitcode global.
+  CUmodule CUMod = nullptr;
+  bool CanSpecialize = true;
+  for (const std::string &ModuleId : ModuleIds) {
+    if (!ShadowBitcodeRegistry::instance().lookup(ModuleId).empty())
+      continue;
+
+    if (!CUMod) {
+      FatbinWrapperT *FatbinWrapper = BinInfo.getFatbinWrapper();
+      if (!FatbinWrapper)
+        reportFatalError("Expected FatbinWrapper in map");
+      proteusCuErrCheck(cuModuleLoadData(&CUMod, FatbinWrapper->Binary));
+    }
+
+    CUdeviceptr DevPtr;
+    size_t Bytes;
+    CUresult Result =
+        cuModuleGetGlobal(&DevPtr, &Bytes, CUMod, ModuleId.c_str());
+    if (Result == CUDA_ERROR_NOT_FOUND) {
+      PROTEUS_DBG(Logger::logs("proteus")
+                  << "No device or shadow bitcode for " << ModuleId
+                  << "; using NVCC AOT kernel\n");
+      CanSpecialize = false;
+      break;
+    }
+    proteusCuErrCheck(Result);
+  }
+
+  if (CUMod)
+    proteusCuErrCheck(cuModuleUnload(CUMod));
+  return CanSpecialize;
+}
+
 void JitEngineDeviceCUDA::extractLinkedBitcode(
     LLVMContext &Ctx, CUmodule &CUMod,
     SmallVector<std::unique_ptr<Module>> &LinkedModules,

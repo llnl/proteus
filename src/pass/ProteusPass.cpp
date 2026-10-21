@@ -105,6 +105,17 @@
 using namespace llvm;
 using namespace proteus;
 
+namespace proteus {
+cl::opt<std::string> ProteusCompilationId(
+    "proteus-compilation-id",
+    cl::desc("Stable compilation ID shared by split host/device pipelines"),
+    cl::init(""));
+cl::opt<std::string> ProteusManifestDir(
+    "proteus-manifest-dir",
+    cl::desc("Directory for split host/device Proteus manifests"),
+    cl::init(""));
+} // namespace proteus
+
 //-----------------------------------------------------------------------------
 // ProteusPass implementation
 //-----------------------------------------------------------------------------
@@ -112,6 +123,10 @@ namespace {
 static cl::opt<bool> ForceProteusAnnotateAll(
     "force-proteus-jit-annotate-all",
     cl::desc("Apply the 'jit' annotation on all GPU kernels"), cl::init(false));
+static cl::opt<std::string> ProteusShadowBitcodeOutput(
+    "proteus-shadow-bitcode-output",
+    cl::desc("Write the extracted per-TU device module to this bitcode file"),
+    cl::init(""));
 
 namespace helpers {
 #if defined(_WIN32)
@@ -333,16 +348,15 @@ private:
     });
   }
 
-  SmallString<64> getUniqueLambdaManifestFilename(Module &M) {
-    auto TmpPath = std::filesystem::temp_directory_path();
+  SmallString<256> getUniqueLambdaManifestFilename(Module &M) {
+    if (!ProteusManifestDir.empty())
+      return {ProteusManifestDir, "/proteus-lambda-manifest-",
+              getUniqueFileID(M), ".json"};
 
-    return {TmpPath.string(),
-            "/",
-            "proteus-lambda-manifest-",
-            std::to_string(helpers::getParentProcessId()),
-            "-",
-            getUniqueFileID(M),
-            ".json"};
+    auto TmpPath = std::filesystem::temp_directory_path();
+    return {TmpPath.string(), "/proteus-lambda-manifest-",
+            std::to_string(helpers::getParentProcessId()), "-",
+            getUniqueFileID(M), ".json"};
   }
 
   static llvm::StringRef getGlobalString(const llvm::GlobalVariable &GV) {
@@ -373,7 +387,7 @@ private:
     if (KernelManifest.empty())
       return;
 
-    SmallString<64> UniqueFilename = getUniqueLambdaManifestFilename(M);
+    auto UniqueFilename = getUniqueLambdaManifestFilename(M);
 
     int FD = -1;
     std::error_code EC = sys::fs::openFileForWrite(UniqueFilename, FD);
@@ -418,7 +432,7 @@ private:
   StringMap<SmallVector<LambdaManifestRecord, 4>>
   parseLambdaManifestFile(Module &M) {
     StringMap<SmallVector<LambdaManifestRecord, 4>> KernelManifest;
-    SmallString<64> UniqueFilename = getUniqueLambdaManifestFilename(M);
+    auto UniqueFilename = getUniqueLambdaManifestFilename(M);
     if (!sys::fs::exists(UniqueFilename))
       return KernelManifest;
 
@@ -965,6 +979,23 @@ private:
     SmallVector<char> Bitcode;
     raw_svector_ostream OS(Bitcode);
     WriteBitcodeToFile(EmbedM, OS);
+
+    // In NVCC-shadow mode the build embeds this extracted module directly in
+    // a host registration object. The ordinary Clang-CUDA path continues to
+    // embed the same bytes in a device global below.
+    if (Id == "tu" && !ProteusShadowBitcodeOutput.empty()) {
+      std::error_code EC;
+      raw_fd_ostream ShadowOS(ProteusShadowBitcodeOutput, EC,
+                              sys::fs::OF_None);
+      if (EC)
+        reportFatalError("Could not create shadow bitcode output " +
+                         ProteusShadowBitcodeOutput + ": " + EC.message());
+      ShadowOS.write(Bitcode.data(), Bitcode.size());
+      ShadowOS.close();
+      if (ShadowOS.has_error())
+        reportFatalError("Could not write shadow bitcode output " +
+                         ProteusShadowBitcodeOutput);
+    }
 
     HashT HashValue = hash(StringRef{Bitcode.data(), Bitcode.size()});
 

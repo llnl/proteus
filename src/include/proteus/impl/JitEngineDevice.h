@@ -320,6 +320,11 @@ public:
                 void **KernelArgs, uint64_t ShmemSize,
                 typename DeviceTraits<ImplT>::DeviceStream_t Stream);
 
+  bool canSpecializeKernel(JITKernelInfo &KernelInfo) {
+    return static_cast<ImplT &>(*this).canSpecialize(
+        KernelInfo.getBinaryInfo());
+  }
+
   std::pair<std::unique_ptr<Module>, std::unique_ptr<MemoryBuffer>>
   extractKernelModule(BinaryInfo &BinInfo, StringRef KernelName,
                       LLVMContext &Ctx) {

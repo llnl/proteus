@@ -8,7 +8,12 @@ elseif(PROTEUS_ENABLE_CUDA)
     enable_language(CUDA)
     message(STATUS "CUDA compiler ${CMAKE_CUDA_COMPILER_ID}")
 
-    if(NOT ${CMAKE_CUDA_COMPILER_ID} STREQUAL "Clang")
+    if(PROTEUS_ENABLE_NVCC_SHADOW)
+        if(NOT CMAKE_CUDA_COMPILER_ID STREQUAL "NVIDIA")
+            message(FATAL_ERROR
+                "PROTEUS_ENABLE_NVCC_SHADOW requires NVCC as the CUDA compiler")
+        endif()
+    elseif(NOT CMAKE_CUDA_COMPILER_ID STREQUAL "Clang")
         message(FATAL_ERROR "JIT is compatible only with Clang CUDA compilation")
     endif()
 endif()

@@ -8,6 +8,7 @@
 #include <llvm/ADT/SetVector.h>
 #include <llvm/Demangle/Demangle.h>
 #include <llvm/IR/Module.h>
+#include <llvm/Support/CommandLine.h>
 #include <llvm/TargetParser/Triple.h>
 
 #define DEBUG_TYPE "proteus-pass"
@@ -38,6 +39,13 @@ constexpr char const *RegisterFatBinaryName = nullptr;
 namespace proteus {
 
 using namespace llvm;
+
+// The NVCC shadow pipeline compiles the host and device halves in separate
+// compiler invocations. CMake supplies these options to both invocations so
+// they use the same module identity and manifest location instead of relying
+// on a common parent process and source-file inode.
+extern cl::opt<std::string> ProteusCompilationId;
+extern cl::opt<std::string> ProteusManifestDir;
 
 struct JitFunctionInfo {
   SmallSetVector<RuntimeConstantInfo, 16> ConstantArgs;
@@ -70,6 +78,9 @@ bool inline isDeviceCompilation(Module &M) {
 }
 
 inline std::string getUniqueFileID(Module &M) {
+  if (!ProteusCompilationId.empty())
+    return ProteusCompilationId;
+
   llvm::sys::fs::UniqueID ID;
   if (auto EC = llvm::sys::fs::getUniqueID(M.getSourceFileName(), ID))
     reportFatalError("Could not get unique id for source file " + EC.message());

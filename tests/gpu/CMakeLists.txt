@@ -13,7 +13,7 @@ function(CREATE_GPU_TEST exe check_source)
     add_executable(${exe}.${lang} ${check_source} ${ARGN})
     set_source_files_properties(${check_source} ${ARGN} PROPERTIES LANGUAGE ${lang})
     target_link_libraries(${exe}.${lang} PUBLIC proteus)
-    proteus_attach_pass_plugin_rebuild_dep(${exe}.${lang} ${check_source} ${ARGN})
+    proteus_attach_gpu_pass_pipeline(${exe}.${lang} ${check_source} ${ARGN})
 
     add_test(NAME ${exe}.${lang} COMMAND ${LIT} -vv -D EXT=${lang} -DFILECHECK=${FILECHECK} ${check_source})
     set_tests_properties(${exe}.${lang} PROPERTIES LABELS "gpu;gpu-basic")
@@ -23,7 +23,7 @@ function(CREATE_GPU_TEST_RDC exe check_source)
     add_executable(${exe}.${lang}.rdc ${check_source} ${ARGN})
     set_source_files_properties(${check_source} ${ARGN} PROPERTIES LANGUAGE ${lang})
     target_link_libraries(${exe}.${lang}.rdc PUBLIC proteus)
-    proteus_attach_pass_plugin_rebuild_dep(${exe}.${lang}.rdc ${check_source} ${ARGN})
+    proteus_attach_gpu_pass_pipeline(${exe}.${lang}.rdc ${check_source} ${ARGN})
 
     if(PROTEUS_ENABLE_HIP)
         # This is unsupported see: https://gitlab.kitware.com/cmake/cmake/-/issues/23210
@@ -45,7 +45,9 @@ function(CREATE_GPU_TEST_RDC exe check_source)
         )
         add_dependencies(${exe}.${lang}.rdc ProteusPassOffload)
     elseif(PROTEUS_ENABLE_CUDA)
-        target_compile_options(${exe}.${lang}.rdc PRIVATE --no-offload-new-driver)
+        if(NOT PROTEUS_ENABLE_NVCC_SHADOW)
+            target_compile_options(${exe}.${lang}.rdc PRIVATE --no-offload-new-driver)
+        endif()
 
         set_target_properties(${exe}.${lang}.rdc PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
     else()
@@ -94,7 +96,9 @@ function(CREATE_GPU_LIBRARY lib source)
 
         target_link_options(${lib} PUBLIC -fgpu-rdc --hip-link)
     elseif(PROTEUS_ENABLE_CUDA)
-        target_compile_options(${lib} PRIVATE --no-offload-new-driver)
+        if(NOT PROTEUS_ENABLE_NVCC_SHADOW)
+            target_compile_options(${lib} PRIVATE --no-offload-new-driver)
+        endif()
         set_target_properties(${lib} PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
     else()
         message(FATAL_ERROR "PROTEUS_ENABLE_HIP or PROTEUS_ENABLE_CUDA must be defined for GPU tests")
@@ -106,7 +110,7 @@ function(CREATE_PROTEUS_GPU_LIBRARY lib source)
 
     set_source_files_properties(${source} ${ARGN} PROPERTIES LANGUAGE ${lang})
     target_link_libraries(${lib} PUBLIC proteus)
-    proteus_attach_pass_plugin_rebuild_dep(${lib} ${source} ${ARGN})
+    proteus_attach_gpu_pass_pipeline(${lib} ${source} ${ARGN})
 
     if(PROTEUS_ENABLE_HIP)
         # This is unsupported see: https://gitlab.kitware.com/cmake/cmake/-/issues/23210
@@ -119,8 +123,10 @@ function(CREATE_PROTEUS_GPU_LIBRARY lib source)
 
         target_link_options(${lib} PUBLIC -fgpu-rdc --hip-link)
     elseif(PROTEUS_ENABLE_CUDA)
-        target_compile_options(${lib} PRIVATE --no-offload-new-driver)
-        set_target_properties(${lib} PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+        if(NOT PROTEUS_ENABLE_NVCC_SHADOW)
+            target_compile_options(${lib} PRIVATE --no-offload-new-driver)
+            set_target_properties(${lib} PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+        endif()
     else()
         message(FATAL_ERROR "PROTEUS_ENABLE_HIP or PROTEUS_ENABLE_CUDA must be defined for GPU tests")
     endif()
@@ -131,7 +137,7 @@ function(CREATE_PROTEUS_GPU_SHARED_LIBRARY lib source)
 
     set_source_files_properties(${source} ${ARGN} PROPERTIES LANGUAGE ${lang})
     target_link_libraries(${lib} PUBLIC proteus)
-    proteus_attach_pass_plugin_rebuild_dep(${lib} ${source} ${ARGN})
+    proteus_attach_gpu_pass_pipeline(${lib} ${source} ${ARGN})
 
     if(PROTEUS_ENABLE_HIP)
         target_compile_options(
@@ -142,8 +148,10 @@ function(CREATE_PROTEUS_GPU_SHARED_LIBRARY lib source)
 
         target_link_options(${lib} PUBLIC -fgpu-rdc --hip-link)
     elseif(PROTEUS_ENABLE_CUDA)
-        target_compile_options(${lib} PRIVATE --no-offload-new-driver)
-        set_target_properties(${lib} PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+        if(NOT PROTEUS_ENABLE_NVCC_SHADOW)
+            target_compile_options(${lib} PRIVATE --no-offload-new-driver)
+            set_target_properties(${lib} PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
+        endif()
     else()
         message(FATAL_ERROR "PROTEUS_ENABLE_HIP or PROTEUS_ENABLE_CUDA must be defined for GPU tests")
     endif()
@@ -151,24 +159,34 @@ endfunction()
 
 function(CREATE_GPU_TEST_FORCE exe check_source)
     CREATE_GPU_TEST(${exe} ${check_source} ${ARGN})
-    # Add flags for forced annotations.
-    target_compile_options(
-        ${exe}.${lang}
-        PUBLIC
-            "-fplugin=$<TARGET_FILE:ProteusPass>"
-            "SHELL:-Xclang -mllvm -Xclang -force-proteus-jit-annotate-all"
-    )
+    if(PROTEUS_ENABLE_NVCC_SHADOW)
+        set_property(TARGET ${exe}.${lang} APPEND PROPERTY
+            PROTEUS_NVCC_SHADOW_OPTIONS
+            -mllvm -force-proteus-jit-annotate-all)
+    else()
+        # Add flags for forced annotations.
+        target_compile_options(
+            ${exe}.${lang}
+            PUBLIC
+                "-fplugin=$<TARGET_FILE:ProteusPass>"
+                "SHELL:-Xclang -mllvm -Xclang -force-proteus-jit-annotate-all"
+        )
+    endif()
 endfunction()
 
 function(CREATE_GPU_TEST_RDC_FORCE exe check_source)
     CREATE_GPU_TEST_RDC(${exe} ${check_source} ${ARGN})
-    # Add flags for forced annotations.
-    target_compile_options(
-        ${exe}.${lang}.rdc
-        PUBLIC
-            "-fplugin=$<TARGET_FILE:ProteusPass>"
-            "SHELL:-Xclang -mllvm -Xclang -force-proteus-jit-annotate-all"
-    )
+    if(PROTEUS_ENABLE_NVCC_SHADOW)
+        message(FATAL_ERROR "RDC is not supported by the NVCC shadow pipeline")
+    else()
+        # Add flags for forced annotations.
+        target_compile_options(
+            ${exe}.${lang}.rdc
+            PUBLIC
+                "-fplugin=$<TARGET_FILE:ProteusPass>"
+                "SHELL:-Xclang -mllvm -Xclang -force-proteus-jit-annotate-all"
+        )
+    endif()
 endfunction()
 
 if(PROTEUS_ENABLE_HIP)
@@ -181,7 +199,12 @@ elseif(PROTEUS_ENABLE_CUDA)
     enable_language(CUDA)
     message(STATUS "CUDA compiler ${CMAKE_CUDA_COMPILER_ID}")
 
-    if(NOT ${CMAKE_CUDA_COMPILER_ID} STREQUAL "Clang")
+    if(PROTEUS_ENABLE_NVCC_SHADOW)
+        if(NOT CMAKE_CUDA_COMPILER_ID STREQUAL "NVIDIA")
+            message(FATAL_ERROR
+                "PROTEUS_ENABLE_NVCC_SHADOW requires NVCC as the CUDA compiler")
+        endif()
+    elseif(NOT CMAKE_CUDA_COMPILER_ID STREQUAL "Clang")
         message(FATAL_ERROR "JIT is compatible only with Clang CUDA compilation")
     endif()
 endif()
@@ -312,6 +335,7 @@ CREATE_GPU_TEST(kernel_lambda kernel_lambda.cpp)
 CREATE_GPU_TEST(kernel_lambda_api kernel_lambda_api.cpp)
 CREATE_GPU_TEST_FORCE(force_annotations force_annotations.cpp)
 
+if(NOT PROTEUS_ENABLE_NVCC_SHADOW)
 CREATE_GPU_TEST_RDC(kernel kernel.cpp)
 CREATE_GPU_TEST_RDC(kernel_metadata kernel_metadata.cpp)
 CREATE_GPU_TEST_RDC(kernel_pass_pipeline kernel_pass_pipeline.cpp)
@@ -379,6 +403,7 @@ CREATE_GPU_TEST_RDC(kernel_tuned_dims kernel_tuned_dims.cpp)
 CREATE_GPU_TEST_RDC(kernel_lambda kernel_lambda.cpp)
 CREATE_GPU_TEST_RDC(kernel_lambda_api kernel_lambda_api.cpp)
 CREATE_GPU_TEST_RDC_FORCE(force_annotations force_annotations.cpp)
+endif()
 
 if(PROTEUS_ENABLE_HIP)
     if(LLVM_VERSION_MAJOR GREATER_EQUAL 18)

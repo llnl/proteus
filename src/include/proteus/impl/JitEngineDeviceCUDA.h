@@ -48,6 +48,10 @@ public:
 
   HashT getModuleHash(BinaryInfo &BinInfo);
 
+  // Returns false when an NVCC fatbinary has no matching shadow IR. Callers
+  // must execute the original AOT kernel in that case.
+  bool canSpecialize(BinaryInfo &BinInfo);
+
   // CUDA codegen never runs the Proteus pipeline itself.
   static bool optimizesBeforeCodegen(CodegenOption) { return true; }
 

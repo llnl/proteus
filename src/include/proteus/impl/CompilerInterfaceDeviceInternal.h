@@ -33,6 +33,12 @@ inline auto __proteus_launch_kernel_internal(void *Kernel, dim3 GridDim,
   }
 
   auto &KernelInfo = OptionalKernelInfo.value().get();
+  if (!Jit.canSpecializeKernel(KernelInfo)) {
+    return proteus::launchKernelDirect(
+        Kernel, GridDim, BlockDim, KernelArgs, ShmemSize,
+        static_cast<typename JitDeviceImplT::DeviceStream_t>(Stream));
+  }
+
   const auto &CGConfig = Config::get().getCGConfig(KernelInfo.getName());
   if (const auto &TunedGridDim = CGConfig.gridDim())
     GridDim = dim3((*TunedGridDim)[0], (*TunedGridDim)[1], (*TunedGridDim)[2]);
