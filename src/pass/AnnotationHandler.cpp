@@ -148,6 +148,10 @@ static Argument *getOriginatingArgument(Value *V,
         "Expected instrumentation annotation to be in the entry basic block");
 
   const BasicBlock &EntryBB = AnnotCall->getFunction()->getEntryBlock();
+  // LLVM 23 passes by-value AMDGPU objects to jit_object through an
+  // addrspacecast of the private alloca. Normalize the destination before
+  // matching the memcpy that initialized that alloca.
+  V = stripAllCasts(V);
   for (auto &I : EntryBB) {
     // Iterate up to the instrumentation function call.
     if (&I == AnnotCall)
@@ -156,12 +160,10 @@ static Argument *getOriginatingArgument(Value *V,
     Value *Src = nullptr;
     if (match(&I, m_Intrinsic<Intrinsic::memcpy>(m_Specific(V), m_Value(Src),
                                                  m_Value(), m_Value()))) {
-      if (auto *Arg = dyn_cast<Argument>(Src))
+      if (auto *Arg = dyn_cast<Argument>(stripAllCasts(Src)))
         return Arg;
     }
   }
-
-  V = stripAllCasts(V);
 
   if (auto *Arg = dyn_cast<Argument>(V)) {
     return Arg;

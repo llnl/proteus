@@ -166,9 +166,9 @@ inline std::string composeOptimizationPassPipeline(
 inline std::string normalizeOptimizationPassPipeline(StringRef PassPipeline) {
 #if LLVM_VERSION_MAJOR > 22
   std::string Normalized = PassPipeline.str();
-  for (auto [Old, New] : {std::pair<StringRef, StringRef>{"default<Os>",
-                                                           "default<O2>"},
-                          {"default<Oz>", "default<O2>"}}) {
+  for (auto [Old, New] :
+       {std::pair<StringRef, StringRef>{"default<Os>", "default<O2>"},
+        {"default<Oz>", "default<O2>"}}) {
     size_t Pos = 0;
     while ((Pos = Normalized.find(Old.str(), Pos)) != std::string::npos) {
       Normalized.replace(Pos, Old.size(), New.str());

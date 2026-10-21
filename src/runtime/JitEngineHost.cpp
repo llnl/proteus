@@ -372,8 +372,7 @@ JitEngineHost::JitEngineHost() {
 #if LLVM_VERSION_MAJOR >= 21
 #if LLVM_VERSION_MAJOR > 22
           .setObjectLinkingLayerCreator(
-              [&](ExecutionSession &ES,
-                  jitlink::JITLinkMemoryManager &) {
+              [&](ExecutionSession &ES, jitlink::JITLinkMemoryManager &) {
                 auto GetMemMgr = [](const MemoryBuffer &) {
                   return std::make_unique<SectionMemoryManager>();
                 };

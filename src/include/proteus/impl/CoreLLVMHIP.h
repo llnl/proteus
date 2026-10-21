@@ -261,8 +261,8 @@ codegenParallel(Module &M, StringRef DeviceArch,
       proteus::detail::hasJITPassPluginInsertion(Plugins))
     Conf.OptPipeline = proteus::detail::composeOptimizationPassPipeline(
         OptConfig.PassPipeline, OptConfig.OptLevel, Plugins);
-  Conf.OptPipeline = proteus::detail::normalizeOptimizationPassPipeline(
-      Conf.OptPipeline);
+  Conf.OptPipeline =
+      proteus::detail::normalizeOptimizationPassPipeline(Conf.OptPipeline);
   for (const auto &PluginPath :
        proteus::detail::getUniqueJITPassPluginPaths(Plugins))
 #if LLVM_VERSION_MAJOR > 22
