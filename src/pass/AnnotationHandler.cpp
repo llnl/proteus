@@ -148,19 +148,18 @@ static Argument *getOriginatingArgument(Value *V,
         "Expected instrumentation annotation to be in the entry basic block");
 
   const BasicBlock &EntryBB = AnnotCall->getFunction()->getEntryBlock();
-  // LLVM 23 passes by-value AMDGPU objects to jit_object through an
-  // addrspacecast of the private alloca. Normalize the destination before
-  // matching the memcpy that initialized that alloca.
+  // AMDGPU IR may pass by-value objects to jit_object through an addrspacecast
+  // of the private alloca. Normalize both destinations before matching the
+  // memcpy that initialized that alloca.
   V = stripAllCasts(V);
   for (auto &I : EntryBB) {
     // Iterate up to the instrumentation function call.
     if (&I == AnnotCall)
       break;
 
-    Value *Src = nullptr;
-    if (match(&I, m_Intrinsic<Intrinsic::memcpy>(m_Specific(V), m_Value(Src),
-                                                 m_Value(), m_Value()))) {
-      if (auto *Arg = dyn_cast<Argument>(stripAllCasts(Src)))
+    if (auto *Memcpy = dyn_cast<MemCpyInst>(&I);
+        Memcpy && stripAllCasts(Memcpy->getRawDest()) == V) {
+      if (auto *Arg = dyn_cast<Argument>(stripAllCasts(Memcpy->getRawSource())))
         return Arg;
     }
   }
@@ -263,15 +262,14 @@ tryGatherCoercedArguments(Value *Obj, const Instruction *AnnotCall) {
     if (&I == AnnotCall)
       break;
 
-    Value *Src = nullptr;
-
     if (auto *Arg = MatchStore(I, AI)) {
       CoercedArgs.insert(Arg);
-    } else if (match(&I, m_Intrinsic<Intrinsic::memcpy>(m_Specific(AI),
-                                                        m_Value(Src), m_Value(),
-                                                        m_Value()))) {
+    } else if (auto *Memcpy = dyn_cast<MemCpyInst>(&I);
+               Memcpy && stripAllCasts(Memcpy->getRawDest()) == AI) {
       if (!CoercedArgs.empty())
         reportFatalError("Expected empty coerced arguments");
+
+      Value *Src = Memcpy->getRawSource();
 
       // The source of the copy is the by-value kernel argument in current
       // LLVM/Clang.  Older IR used stores into another temporary, which is

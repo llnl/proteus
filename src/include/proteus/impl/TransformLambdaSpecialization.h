@@ -649,9 +649,9 @@ public:
         if (!Match) {
           // Unsupported runtime-constant type for dispatch; fall back to the
           // unspecialized call.
-          BranchInst::Create(FallbackBB, CurCheckBB);
+          B.CreateBr(FallbackBB);
         } else {
-          BranchInst::Create(VariantBB, NextCheckBB, Match, CurCheckBB);
+          B.CreateCondBr(Match, VariantBB, NextCheckBB);
         }
       }
 

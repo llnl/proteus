@@ -181,6 +181,26 @@ inline std::string normalizeOptimizationPassPipeline(StringRef PassPipeline) {
 #endif
 }
 
+inline void applySizeOptimizationAttribute(Module &M,
+                                           Attribute::AttrKind AttrKind) {
+  for (Function &F : M)
+    F.addFnAttr(AttrKind);
+}
+
+inline void applySizeOptimizationAttribute(Module &M, char OptLevel) {
+  if (OptLevel == 'z')
+    applySizeOptimizationAttribute(M, Attribute::MinSize);
+  else if (OptLevel == 's')
+    applySizeOptimizationAttribute(M, Attribute::OptimizeForSize);
+}
+
+inline void applySizeOptimizationAttribute(Module &M, StringRef PassPipeline) {
+  if (PassPipeline.contains("default<Oz>"))
+    applySizeOptimizationAttribute(M, Attribute::MinSize);
+  else if (PassPipeline.contains("default<Os>"))
+    applySizeOptimizationAttribute(M, Attribute::OptimizeForSize);
+}
+
 inline bool
 hasJITPassPluginInsertion(const std::vector<JITPassPluginConfig> &Plugins) {
   return std::any_of(Plugins.begin(), Plugins.end(),
@@ -244,6 +264,11 @@ inline void runOptimizationPassPipeline(
   PB.registerLoopAnalyses(LAM);
   PB.crossRegisterProxies(LAM, FAM, CGAM, MAM);
   ModulePassManager Passes;
+#if LLVM_VERSION_MAJOR > 22
+  // Preserve the pre-LLVM 23 Os/Oz semantics while normalizing their removed
+  // textual pipelines to O2 below.
+  applySizeOptimizationAttribute(M, PassPipeline);
+#endif
   const std::string NormalizedPipeline =
       normalizeOptimizationPassPipeline(PassPipeline);
   if (auto E = PB.parsePassPipeline(Passes, NormalizedPipeline))
@@ -282,6 +307,10 @@ inline void runOptimizationPassPipeline(
   PB.crossRegisterProxies(LAM, FAM, CGAM, MAM);
 
   OptimizationLevel OptSetting;
+#if LLVM_VERSION_MAJOR > 22
+  // Preserve the pre-LLVM 23 Os/Oz semantics with O2 plus function attrs.
+  applySizeOptimizationAttribute(M, OptLevel);
+#endif
   switch (OptLevel) {
   case '0':
     OptSetting = OptimizationLevel::O0;
@@ -297,8 +326,7 @@ inline void runOptimizationPassPipeline(
     break;
   case 's':
 #if LLVM_VERSION_MAJOR > 22
-    // LLVM 23 removed the size-oriented optimization levels. O2 is the
-    // closest remaining pipeline and keeps this option optimizing code.
+    // LLVM 23 uses O2 plus the optsize function attribute.
     OptSetting = OptimizationLevel::O2;
 #else
     OptSetting = OptimizationLevel::Os;
@@ -306,8 +334,7 @@ inline void runOptimizationPassPipeline(
     break;
   case 'z':
 #if LLVM_VERSION_MAJOR > 22
-    // LLVM 23 removed the size-oriented optimization levels. O2 is the
-    // closest remaining pipeline and keeps this option optimizing code.
+    // LLVM 23 uses O2 plus the minsize function attribute.
     OptSetting = OptimizationLevel::O2;
 #else
     OptSetting = OptimizationLevel::Oz;
