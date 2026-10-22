@@ -180,10 +180,7 @@ public:
         SmallString<128> S;
         raw_svector_ostream OS(S);
         OS << "[ArgSpec] Replaced Function " << F.getName() << " ArgNo "
-           << ArgNo << " with value ";
-
-        OS << *C->stripPointerCasts();
-        OS << "\n";
+           << ArgNo << " with value " << *C->stripPointerCasts() << "\n";
 
         return S;
       };
