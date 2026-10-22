@@ -1,6 +1,6 @@
 // clang-format off
 // RUN: rm -rf "%t.$$.proteus"
-// RUN: PROTEUS_CACHE_DIR="%t.$$.proteus" PROTEUS_TRACE_OUTPUT="specialization;cache-stats" %build/types | %FILECHECK %s --check-prefixes=CHECK,CHECK-FIRST
+// RUN: PROTEUS_CACHE_DIR="%t.$$.proteus" PROTEUS_TRACE_OUTPUT="specialization;cache-stats" %build/types | %FILECHECK %s --check-prefixes=CHECK,CHECK-FIRST,%LLVM_FP80_CHECK_PREFIX
 // Second run uses the object cache.
 // RUN: PROTEUS_CACHE_DIR="%t.$$.proteus" PROTEUS_TRACE_OUTPUT="cache-stats" %build/types | %FILECHECK %s --check-prefixes=CHECK,CHECK-SECOND
 // RUN: rm -rf "%t.$$.proteus"
@@ -54,7 +54,8 @@ int main() {
 // CHECK: Arg 7
 // CHECK-FIRST: [ArgSpec] Replaced Function _Z4testIdEvT_ ArgNo 0 with value double 8.000000e+00
 // CHECK: Arg 8
-// CHECK-FIRST: [ArgSpec] Replaced Function _Z4testI{{e|g}}EvT_ ArgNo 0 with value {{x86_fp80 0xK40029000000000000000|ppc_fp128 0xM40220000000000000000000000000000|double 9.000000e\+00}}
+// CHECK-LLVM22: [ArgSpec] Replaced Function _Z4testI{{e|g}}EvT_ ArgNo 0 with value {{x86_fp80 0xK40029000000000000000|ppc_fp128 0xM40220000000000000000000000000000|double 9.000000e\+00}}
+// CHECK-LLVM23: [ArgSpec] Replaced Function _Z4testI{{e|g}}EvT_ ArgNo 0 with value {{x86_fp80 9\.000000e\+00|ppc_fp128 0xM40220000000000000000000000000000|double 9.000000e\+00}}
 // CHECK: Arg 9
 // CHECK-FIRST: [ArgSpec] Replaced Function _Z4testIbEvT_ ArgNo 0 with value i1 true
 // CHECK: Arg 1
