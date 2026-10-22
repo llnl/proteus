@@ -139,9 +139,15 @@ struct ClobberQueryDenseMapInfo {
   }
 
   static ClobberQuery getTombstoneKey() {
+#if LLVM_VERSION_MAJOR >= 23
+    // LLVM 23 removed DenseMap's separate tombstone-key API. DenseMap only
+    // uses getEmptyKey() for its empty buckets now.
+    return getEmptyKey();
+#else
     return {DenseMapInfo<Function *>::getTombstoneKey(),
             DenseMapInfo<Value *>::getTombstoneKey(),
             DenseMapInfo<Instruction *>::getTombstoneKey(), 0, TrackedRange{}};
+#endif
   }
 
   static unsigned getHashValue(const ClobberQuery &Query) {
