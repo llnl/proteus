@@ -42,7 +42,7 @@ var searchData=
   ['dispatchresult_39',['dispatchresult',['../structproteus_1_1DispatchResult.html#a5d06b77b074b4ee086119e8b9157ee97',1,'proteus::DispatchResult::DispatchResult()'],['../structproteus_1_1DispatchResult.html',1,'proteus::DispatchResult']]],
   ['div_40',['Div',['../namespaceproteus.html#a3518c876bedf0d51909bb3dca16870b7a43d11850893d2fe84a1e618121c1cc0a',1,'proteus']]],
   ['dominatingwrite_41',['DominatingWrite',['../structproteus_1_1LambdaPtrUseAnalysis.html#a470ee9ff582440f468bb5541b8b16767',1,'proteus::LambdaPtrUseAnalysis']]],
-  ['double_42',['double',['../namespaceproteus.html#ad44857f031a4f66111485d3db4210016ad909d38d705ce75386dd86e611a82f5b',1,'proteus::Double'],['../namespaceproteus.html#a321b5206e698d88e9dbf55b4c1c69ee1afbb7ffff2022b3722f23a91dbde6faf1',1,'proteus::DOUBLE']]],
+  ['double_42',['double',['../namespaceproteus.html#a321b5206e698d88e9dbf55b4c1c69ee1afbb7ffff2022b3722f23a91dbde6faf1',1,'proteus::DOUBLE'],['../namespaceproteus.html#ad44857f031a4f66111485d3db4210016ad909d38d705ce75386dd86e611a82f5b',1,'proteus::Double']]],
   ['doubleval_43',['DoubleVal',['../unionproteus_1_1RuntimeConstantValue.html#a0908db799ab8f4bf64de438529feacde',1,'proteus::RuntimeConstantValue']]],
   ['dump_44',['dump',['../classproteus_1_1Config.html#a9973134e8b3af8f03645649360e70ae1',1,'proteus::Config::dump()'],['../classproteus_1_1CodeGenerationConfig.html#a18becaeaa7be4977dd71d7c5057c2b0c',1,'proteus::CodeGenerationConfig::dump()']]],
   ['dumpsymbolinfo_45',['dumpSymbolInfo',['../classproteus_1_1JitEngineHost.html#a9f5d0a0c079f2ffc91ca9c1360202880',1,'proteus::JitEngineHost']]],

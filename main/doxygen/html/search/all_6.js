@@ -14,7 +14,7 @@ var searchData=
   ['findfunctionswithu64metadata_11',['findfunctionswithu64metadata',['../namespaceproteus.html#a25440d2db365849cd9f0537fff22026b',1,'proteus::findFunctionsWithU64Metadata(llvm::Module &amp;M, llvm::StringRef Key, llvm::SmallVectorImpl&lt; std::pair&lt; llvm::Function *, std::uint64_t &gt; &gt; &amp;Out)'],['../namespaceproteus.html#a0650dfa0a786bad71274000778122fe4',1,'proteus::findFunctionsWithU64Metadata(llvm::Module &amp;M, llvm::StringRef Key, llvm::SmallVectorImpl&lt; std::uint64_t &gt; &amp;Out)']]],
   ['findtransitiveclosure_12',['findTransitiveClosure',['../structproteus_1_1LinkingCloner.html#a9d6748ddf0ce1c9dbbc392c105fab4e4',1,'proteus::LinkingCloner']]],
   ['fingerprint_13',['Fingerprint',['../structproteus_1_1JITPassPluginConfig.html#a9fb2cced62c3faae341d08cb9e05a6c5',1,'proteus::JITPassPluginConfig']]],
-  ['float_14',['float',['../namespaceproteus.html#a321b5206e698d88e9dbf55b4c1c69ee1a507e5083e798be72d1a894a48ca74f40',1,'proteus::FLOAT'],['../namespaceproteus.html#ad44857f031a4f66111485d3db4210016a22ae0e2b89e5e3d477f988cc36d3272b',1,'proteus::Float']]],
+  ['float_14',['float',['../namespaceproteus.html#ad44857f031a4f66111485d3db4210016a22ae0e2b89e5e3d477f988cc36d3272b',1,'proteus::Float'],['../namespaceproteus.html#a321b5206e698d88e9dbf55b4c1c69ee1a507e5083e798be72d1a894a48ca74f40',1,'proteus::FLOAT']]],
   ['floatval_15',['FloatVal',['../unionproteus_1_1RuntimeConstantValue.html#abd6458ab22921ea8b88756af09e2d8b8',1,'proteus::RuntimeConstantValue']]],
   ['fn_16',['Fn',['../classproteus_1_1ForLoopBuilder.html#a0ff168e0ae563a73c94d7efb258f0964',1,'proteus::ForLoopBuilder']]],
   ['fnsig_17',['FnSig',['../structproteus_1_1FnSig.html',1,'proteus']]],

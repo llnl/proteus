@@ -164,73 +164,84 @@ $(document).ready(function() { init_codefold(0); });
 <div class="line"><a id="l00059" name="l00059"></a><span class="lineno">   59</span>      <span class="keywordflow">return</span> llvm::sys::fs::exists(Path);</div>
 <div class="line"><a id="l00060" name="l00060"></a><span class="lineno">   60</span>    };</div>
 <div class="line"><a id="l00061" name="l00061"></a><span class="lineno">   61</span> </div>
-<div class="line"><a id="l00062" name="l00062"></a><span class="lineno">   62</span>    <span class="keyword">auto</span> PickFirstExisting =</div>
-<div class="line"><a id="l00063" name="l00063"></a><span class="lineno">   63</span>        [&amp;](std::initializer_list&lt;llvm::StringRef&gt; Candidates)</div>
-<div class="line"><a id="l00064" name="l00064"></a><span class="lineno">   64</span>        -&gt; llvm::StringRef {</div>
-<div class="line"><a id="l00065" name="l00065"></a><span class="lineno">   65</span>      <span class="keywordflow">for</span> (<span class="keyword">auto</span> C : Candidates) {</div>
-<div class="line"><a id="l00066" name="l00066"></a><span class="lineno">   66</span>        <span class="keywordflow">if</span> (Exists(C))</div>
-<div class="line"><a id="l00067" name="l00067"></a><span class="lineno">   67</span>          <span class="keywordflow">return</span> C;</div>
-<div class="line"><a id="l00068" name="l00068"></a><span class="lineno">   68</span>      }</div>
-<div class="line"><a id="l00069" name="l00069"></a><span class="lineno">   69</span>      <span class="keywordflow">return</span> {};</div>
-<div class="line"><a id="l00070" name="l00070"></a><span class="lineno">   70</span>    };</div>
-<div class="line"><a id="l00071" name="l00071"></a><span class="lineno">   71</span> </div>
-<div class="line"><a id="l00072" name="l00072"></a><span class="lineno">   72</span>    llvm::SmallVector&lt;llvm::SmallString&lt;256&gt;, 8&gt; LibsToLink;</div>
-<div class="line"><a id="l00073" name="l00073"></a><span class="lineno">   73</span>    AppendBitcodePath(LibsToLink, <span class="stringliteral">&quot;ocml.bc&quot;</span>);</div>
-<div class="line"><a id="l00074" name="l00074"></a><span class="lineno">   74</span>    AppendBitcodePath(LibsToLink, <span class="stringliteral">&quot;ockl.bc&quot;</span>);</div>
-<div class="line"><a id="l00075" name="l00075"></a><span class="lineno">   75</span> </div>
-<div class="line"><a id="l00076" name="l00076"></a><span class="lineno">   76</span>    <span class="comment">// ABI: prefer the newest available.</span></div>
-<div class="line"><a id="l00077" name="l00077"></a><span class="lineno">   77</span>    <span class="keywordflow">if</span> (<span class="keyword">auto</span> Abi = PickFirstExisting({<span class="stringliteral">&quot;oclc_abi_version_600.bc&quot;</span>,</div>
-<div class="line"><a id="l00078" name="l00078"></a><span class="lineno">   78</span>                                      <span class="stringliteral">&quot;oclc_abi_version_500.bc&quot;</span>,</div>
-<div class="line"><a id="l00079" name="l00079"></a><span class="lineno">   79</span>                                      <span class="stringliteral">&quot;oclc_abi_version_400.bc&quot;</span>});</div>
-<div class="line"><a id="l00080" name="l00080"></a><span class="lineno">   80</span>        !Abi.empty()) {</div>
-<div class="line"><a id="l00081" name="l00081"></a><span class="lineno">   81</span>      AppendBitcodePath(LibsToLink, Abi);</div>
-<div class="line"><a id="l00082" name="l00082"></a><span class="lineno">   82</span>    } <span class="keywordflow">else</span> {</div>
-<div class="line"><a id="l00083" name="l00083"></a><span class="lineno">   83</span>      <a class="code hl_function" href="namespaceproteus.html#a650a5e86664ceef3bc70535384175cee">reportFatalError</a>(</div>
-<div class="line"><a id="l00084" name="l00084"></a><span class="lineno">   84</span>          std::string(<span class="stringliteral">&quot;DispatchHIP: missing oclc ABI bitcode under &quot;</span>) +</div>
-<div class="line"><a id="l00085" name="l00085"></a><span class="lineno">   85</span>          Toolchain.DeviceLibDir + <span class="stringliteral">&quot; (&quot;</span> + Toolchain.Origin +</div>
-<div class="line"><a id="l00086" name="l00086"></a><span class="lineno">   86</span>          <span class="stringliteral">&quot;; expected oclc_abi_version_{600,500,400}.bc)&quot;</span>);</div>
-<div class="line"><a id="l00087" name="l00087"></a><span class="lineno">   87</span>    }</div>
-<div class="line"><a id="l00088" name="l00088"></a><span class="lineno">   88</span> </div>
-<div class="line"><a id="l00089" name="l00089"></a><span class="lineno">   89</span>    <span class="comment">// ISA: derived from device arch like &quot;gfx90a&quot; -&gt; &quot;90a&quot;.</span></div>
-<div class="line"><a id="l00090" name="l00090"></a><span class="lineno">   90</span>    <span class="keyword">const</span> std::string DeviceArch = Jit.getDeviceArch().str();</div>
-<div class="line"><a id="l00091" name="l00091"></a><span class="lineno">   91</span>    <span class="keywordflow">if</span> (!llvm::StringRef{DeviceArch}.starts_with(<span class="stringliteral">&quot;gfx&quot;</span>))</div>
-<div class="line"><a id="l00092" name="l00092"></a><span class="lineno">   92</span>      <a class="code hl_function" href="namespaceproteus.html#a650a5e86664ceef3bc70535384175cee">reportFatalError</a>(<span class="stringliteral">&quot;DispatchHIP: unexpected HIP device arch: &quot;</span> +</div>
-<div class="line"><a id="l00093" name="l00093"></a><span class="lineno">   93</span>                       DeviceArch);</div>
-<div class="line"><a id="l00094" name="l00094"></a><span class="lineno">   94</span>    <span class="keyword">const</span> llvm::StringRef IsaSuffix = llvm::StringRef{DeviceArch}.drop_front(3);</div>
-<div class="line"><a id="l00095" name="l00095"></a><span class="lineno">   95</span>    <span class="keyword">const</span> std::string IsaFile = (<span class="stringliteral">&quot;oclc_isa_version_&quot;</span> + IsaSuffix + <span class="stringliteral">&quot;.bc&quot;</span>).str();</div>
-<div class="line"><a id="l00096" name="l00096"></a><span class="lineno">   96</span>    <span class="keywordflow">if</span> (!Exists(IsaFile))</div>
-<div class="line"><a id="l00097" name="l00097"></a><span class="lineno">   97</span>      <a class="code hl_function" href="namespaceproteus.html#a650a5e86664ceef3bc70535384175cee">reportFatalError</a>(std::string(<span class="stringliteral">&quot;DispatchHIP: missing ISA bitcode file &quot;</span>) +</div>
-<div class="line"><a id="l00098" name="l00098"></a><span class="lineno">   98</span>                       IsaFile + <span class="stringliteral">&quot; under &quot;</span> + Toolchain.DeviceLibDir + <span class="stringliteral">&quot; (&quot;</span> +</div>
-<div class="line"><a id="l00099" name="l00099"></a><span class="lineno">   99</span>                       Toolchain.Origin + <span class="stringliteral">&quot;; DeviceArch=&quot;</span> + DeviceArch + <span class="stringliteral">&quot;)&quot;</span>);</div>
-<div class="line"><a id="l00100" name="l00100"></a><span class="lineno">  100</span>    AppendBitcodePath(LibsToLink, IsaFile);</div>
-<div class="line"><a id="l00101" name="l00101"></a><span class="lineno">  101</span> </div>
-<div class="line"><a id="l00102" name="l00102"></a><span class="lineno">  102</span>    <span class="comment">// Math/FP mode defaults (safe defaults, can be revisited later).</span></div>
-<div class="line"><a id="l00103" name="l00103"></a><span class="lineno">  103</span>    AppendBitcodePath(LibsToLink, <span class="stringliteral">&quot;oclc_unsafe_math_off.bc&quot;</span>);</div>
-<div class="line"><a id="l00104" name="l00104"></a><span class="lineno">  104</span>    AppendBitcodePath(LibsToLink, <span class="stringliteral">&quot;oclc_finite_only_off.bc&quot;</span>);</div>
-<div class="line"><a id="l00105" name="l00105"></a><span class="lineno">  105</span>    AppendBitcodePath(LibsToLink, <span class="stringliteral">&quot;oclc_daz_opt_off.bc&quot;</span>);</div>
-<div class="line"><a id="l00106" name="l00106"></a><span class="lineno">  106</span>    AppendBitcodePath(LibsToLink, <span class="stringliteral">&quot;oclc_correctly_rounded_sqrt_on.bc&quot;</span>);</div>
-<div class="line"><a id="l00107" name="l00107"></a><span class="lineno">  107</span> </div>
-<div class="line"><a id="l00108" name="l00108"></a><span class="lineno">  108</span>    <span class="comment">// Wavefront size selection: RDNA is typically wave32; CDNA/gfx9 wave64.</span></div>
-<div class="line"><a id="l00109" name="l00109"></a><span class="lineno">  109</span>    <span class="keyword">const</span> <span class="keywordtype">bool</span> IsWave32 = llvm::StringRef{DeviceArch}.starts_with(<span class="stringliteral">&quot;gfx10&quot;</span>) ||</div>
-<div class="line"><a id="l00110" name="l00110"></a><span class="lineno">  110</span>                          llvm::StringRef{DeviceArch}.starts_with(<span class="stringliteral">&quot;gfx11&quot;</span>) ||</div>
-<div class="line"><a id="l00111" name="l00111"></a><span class="lineno">  111</span>                          llvm::StringRef{DeviceArch}.starts_with(<span class="stringliteral">&quot;gfx12&quot;</span>);</div>
-<div class="line"><a id="l00112" name="l00112"></a><span class="lineno">  112</span>    AppendBitcodePath(LibsToLink, IsWave32 ? <span class="stringliteral">&quot;oclc_wavefrontsize64_off.bc&quot;</span></div>
-<div class="line"><a id="l00113" name="l00113"></a><span class="lineno">  113</span>                                           : <span class="stringliteral">&quot;oclc_wavefrontsize64_on.bc&quot;</span>);</div>
-<div class="line"><a id="l00114" name="l00114"></a><span class="lineno">  114</span> </div>
-<div class="line"><a id="l00115" name="l00115"></a><span class="lineno">  115</span>    llvm::Linker Linker{M};</div>
-<div class="line"><a id="l00116" name="l00116"></a><span class="lineno">  116</span>    <span class="keywordflow">for</span> (<span class="keyword">const</span> <span class="keyword">auto</span> &amp;Path : LibsToLink) {</div>
-<div class="line"><a id="l00117" name="l00117"></a><span class="lineno">  117</span>      <span class="keyword">auto</span> LibMod = LoadBitcode(Path);</div>
-<div class="line"><a id="l00118" name="l00118"></a><span class="lineno">  118</span>      Linker.linkInModule(std::move(LibMod),</div>
-<div class="line"><a id="l00119" name="l00119"></a><span class="lineno">  119</span>                          llvm::Linker::Flags::LinkOnlyNeeded);</div>
-<div class="line"><a id="l00120" name="l00120"></a><span class="lineno">  120</span>    }</div>
-<div class="line"><a id="l00121" name="l00121"></a><span class="lineno">  121</span>  }</div>
-<div class="line"><a id="l00122" name="l00122"></a><span class="lineno">  122</span>};</div>
-<div class="line"><a id="l00123" name="l00123"></a><span class="lineno">  123</span> </div>
-<div class="line"><a id="l00124" name="l00124"></a><span class="lineno">  124</span>} <span class="comment">// namespace proteus</span></div>
+<div class="line"><a id="l00062" name="l00062"></a><span class="lineno">   62</span>    <span class="keyword">auto</span> AppendExistingBitcodePath =</div>
+<div class="line"><a id="l00063" name="l00063"></a><span class="lineno">   63</span>        [&amp;](llvm::SmallVectorImpl&lt;llvm::SmallString&lt;256&gt;&gt; &amp;Paths,</div>
+<div class="line"><a id="l00064" name="l00064"></a><span class="lineno">   64</span>            llvm::StringRef Filename) {</div>
+<div class="line"><a id="l00065" name="l00065"></a><span class="lineno">   65</span>          <span class="keywordflow">if</span> (Exists(Filename))</div>
+<div class="line"><a id="l00066" name="l00066"></a><span class="lineno">   66</span>            AppendBitcodePath(Paths, Filename);</div>
+<div class="line"><a id="l00067" name="l00067"></a><span class="lineno">   67</span>        };</div>
+<div class="line"><a id="l00068" name="l00068"></a><span class="lineno">   68</span> </div>
+<div class="line"><a id="l00069" name="l00069"></a><span class="lineno">   69</span>    <span class="keyword">auto</span> PickFirstExisting =</div>
+<div class="line"><a id="l00070" name="l00070"></a><span class="lineno">   70</span>        [&amp;](std::initializer_list&lt;llvm::StringRef&gt; Candidates)</div>
+<div class="line"><a id="l00071" name="l00071"></a><span class="lineno">   71</span>        -&gt; llvm::StringRef {</div>
+<div class="line"><a id="l00072" name="l00072"></a><span class="lineno">   72</span>      <span class="keywordflow">for</span> (<span class="keyword">auto</span> C : Candidates) {</div>
+<div class="line"><a id="l00073" name="l00073"></a><span class="lineno">   73</span>        <span class="keywordflow">if</span> (Exists(C))</div>
+<div class="line"><a id="l00074" name="l00074"></a><span class="lineno">   74</span>          <span class="keywordflow">return</span> C;</div>
+<div class="line"><a id="l00075" name="l00075"></a><span class="lineno">   75</span>      }</div>
+<div class="line"><a id="l00076" name="l00076"></a><span class="lineno">   76</span>      <span class="keywordflow">return</span> {};</div>
+<div class="line"><a id="l00077" name="l00077"></a><span class="lineno">   77</span>    };</div>
+<div class="line"><a id="l00078" name="l00078"></a><span class="lineno">   78</span> </div>
+<div class="line"><a id="l00079" name="l00079"></a><span class="lineno">   79</span>    llvm::SmallVector&lt;llvm::SmallString&lt;256&gt;, 8&gt; LibsToLink;</div>
+<div class="line"><a id="l00080" name="l00080"></a><span class="lineno">   80</span>    AppendBitcodePath(LibsToLink, <span class="stringliteral">&quot;ocml.bc&quot;</span>);</div>
+<div class="line"><a id="l00081" name="l00081"></a><span class="lineno">   81</span>    AppendBitcodePath(LibsToLink, <span class="stringliteral">&quot;ockl.bc&quot;</span>);</div>
+<div class="line"><a id="l00082" name="l00082"></a><span class="lineno">   82</span> </div>
+<div class="line"><a id="l00083" name="l00083"></a><span class="lineno">   83</span>    <span class="comment">// ABI: prefer the newest available.</span></div>
+<div class="line"><a id="l00084" name="l00084"></a><span class="lineno">   84</span>    <span class="keywordflow">if</span> (<span class="keyword">auto</span> Abi = PickFirstExisting({<span class="stringliteral">&quot;oclc_abi_version_600.bc&quot;</span>,</div>
+<div class="line"><a id="l00085" name="l00085"></a><span class="lineno">   85</span>                                      <span class="stringliteral">&quot;oclc_abi_version_500.bc&quot;</span>,</div>
+<div class="line"><a id="l00086" name="l00086"></a><span class="lineno">   86</span>                                      <span class="stringliteral">&quot;oclc_abi_version_400.bc&quot;</span>});</div>
+<div class="line"><a id="l00087" name="l00087"></a><span class="lineno">   87</span>        !Abi.empty()) {</div>
+<div class="line"><a id="l00088" name="l00088"></a><span class="lineno">   88</span>      AppendBitcodePath(LibsToLink, Abi);</div>
+<div class="line"><a id="l00089" name="l00089"></a><span class="lineno">   89</span>    } <span class="keywordflow">else</span> {</div>
+<div class="line"><a id="l00090" name="l00090"></a><span class="lineno">   90</span>      <a class="code hl_function" href="namespaceproteus.html#a650a5e86664ceef3bc70535384175cee">reportFatalError</a>(</div>
+<div class="line"><a id="l00091" name="l00091"></a><span class="lineno">   91</span>          std::string(<span class="stringliteral">&quot;DispatchHIP: missing oclc ABI bitcode under &quot;</span>) +</div>
+<div class="line"><a id="l00092" name="l00092"></a><span class="lineno">   92</span>          Toolchain.DeviceLibDir + <span class="stringliteral">&quot; (&quot;</span> + Toolchain.Origin +</div>
+<div class="line"><a id="l00093" name="l00093"></a><span class="lineno">   93</span>          <span class="stringliteral">&quot;; expected oclc_abi_version_{600,500,400}.bc)&quot;</span>);</div>
+<div class="line"><a id="l00094" name="l00094"></a><span class="lineno">   94</span>    }</div>
+<div class="line"><a id="l00095" name="l00095"></a><span class="lineno">   95</span> </div>
+<div class="line"><a id="l00096" name="l00096"></a><span class="lineno">   96</span>    <span class="comment">// ISA: derived from device arch like &quot;gfx90a&quot; -&gt; &quot;90a&quot;.</span></div>
+<div class="line"><a id="l00097" name="l00097"></a><span class="lineno">   97</span>    <span class="keyword">const</span> std::string DeviceArch = Jit.getDeviceArch().str();</div>
+<div class="line"><a id="l00098" name="l00098"></a><span class="lineno">   98</span>    <span class="keywordflow">if</span> (!llvm::StringRef{DeviceArch}.starts_with(<span class="stringliteral">&quot;gfx&quot;</span>))</div>
+<div class="line"><a id="l00099" name="l00099"></a><span class="lineno">   99</span>      <a class="code hl_function" href="namespaceproteus.html#a650a5e86664ceef3bc70535384175cee">reportFatalError</a>(<span class="stringliteral">&quot;DispatchHIP: unexpected HIP device arch: &quot;</span> +</div>
+<div class="line"><a id="l00100" name="l00100"></a><span class="lineno">  100</span>                       DeviceArch);</div>
+<div class="line"><a id="l00101" name="l00101"></a><span class="lineno">  101</span>    <span class="keyword">const</span> llvm::StringRef IsaSuffix = llvm::StringRef{DeviceArch}.drop_front(3);</div>
+<div class="line"><a id="l00102" name="l00102"></a><span class="lineno">  102</span>    <span class="keyword">const</span> std::string IsaFile = (<span class="stringliteral">&quot;oclc_isa_version_&quot;</span> + IsaSuffix + <span class="stringliteral">&quot;.bc&quot;</span>).str();</div>
+<div class="line"><a id="l00103" name="l00103"></a><span class="lineno">  103</span>    <span class="keywordflow">if</span> (!Exists(IsaFile))</div>
+<div class="line"><a id="l00104" name="l00104"></a><span class="lineno">  104</span>      <a class="code hl_function" href="namespaceproteus.html#a650a5e86664ceef3bc70535384175cee">reportFatalError</a>(std::string(<span class="stringliteral">&quot;DispatchHIP: missing ISA bitcode file &quot;</span>) +</div>
+<div class="line"><a id="l00105" name="l00105"></a><span class="lineno">  105</span>                       IsaFile + <span class="stringliteral">&quot; under &quot;</span> + Toolchain.DeviceLibDir + <span class="stringliteral">&quot; (&quot;</span> +</div>
+<div class="line"><a id="l00106" name="l00106"></a><span class="lineno">  106</span>                       Toolchain.Origin + <span class="stringliteral">&quot;; DeviceArch=&quot;</span> + DeviceArch + <span class="stringliteral">&quot;)&quot;</span>);</div>
+<div class="line"><a id="l00107" name="l00107"></a><span class="lineno">  107</span>    AppendBitcodePath(LibsToLink, IsaFile);</div>
+<div class="line"><a id="l00108" name="l00108"></a><span class="lineno">  108</span> </div>
+<div class="line"><a id="l00109" name="l00109"></a><span class="lineno">  109</span>    <span class="comment">// Math/FP mode defaults (safe defaults, can be revisited later).</span></div>
+<div class="line"><a id="l00110" name="l00110"></a><span class="lineno">  110</span>    <span class="comment">// These configuration libraries are optional across ROCm releases.</span></div>
+<div class="line"><a id="l00111" name="l00111"></a><span class="lineno">  111</span>    <span class="comment">// In particular, ROCm 10 does not ship the DAZ and correctly-rounded</span></div>
+<div class="line"><a id="l00112" name="l00112"></a><span class="lineno">  112</span>    <span class="comment">// sqrt variants, while clang simply omits them from its link command.</span></div>
+<div class="line"><a id="l00113" name="l00113"></a><span class="lineno">  113</span>    AppendExistingBitcodePath(LibsToLink, <span class="stringliteral">&quot;oclc_unsafe_math_off.bc&quot;</span>);</div>
+<div class="line"><a id="l00114" name="l00114"></a><span class="lineno">  114</span>    AppendExistingBitcodePath(LibsToLink, <span class="stringliteral">&quot;oclc_finite_only_off.bc&quot;</span>);</div>
+<div class="line"><a id="l00115" name="l00115"></a><span class="lineno">  115</span>    AppendExistingBitcodePath(LibsToLink, <span class="stringliteral">&quot;oclc_daz_opt_off.bc&quot;</span>);</div>
+<div class="line"><a id="l00116" name="l00116"></a><span class="lineno">  116</span>    AppendExistingBitcodePath(LibsToLink, <span class="stringliteral">&quot;oclc_correctly_rounded_sqrt_on.bc&quot;</span>);</div>
+<div class="line"><a id="l00117" name="l00117"></a><span class="lineno">  117</span> </div>
+<div class="line"><a id="l00118" name="l00118"></a><span class="lineno">  118</span>    <span class="comment">// Wavefront size selection: RDNA is typically wave32; CDNA/gfx9 wave64.</span></div>
+<div class="line"><a id="l00119" name="l00119"></a><span class="lineno">  119</span>    <span class="keyword">const</span> <span class="keywordtype">bool</span> IsWave32 = llvm::StringRef{DeviceArch}.starts_with(<span class="stringliteral">&quot;gfx10&quot;</span>) ||</div>
+<div class="line"><a id="l00120" name="l00120"></a><span class="lineno">  120</span>                          llvm::StringRef{DeviceArch}.starts_with(<span class="stringliteral">&quot;gfx11&quot;</span>) ||</div>
+<div class="line"><a id="l00121" name="l00121"></a><span class="lineno">  121</span>                          llvm::StringRef{DeviceArch}.starts_with(<span class="stringliteral">&quot;gfx12&quot;</span>);</div>
+<div class="line"><a id="l00122" name="l00122"></a><span class="lineno">  122</span>    AppendExistingBitcodePath(LibsToLink, IsWave32</div>
+<div class="line"><a id="l00123" name="l00123"></a><span class="lineno">  123</span>                                              ? <span class="stringliteral">&quot;oclc_wavefrontsize64_off.bc&quot;</span></div>
+<div class="line"><a id="l00124" name="l00124"></a><span class="lineno">  124</span>                                              : <span class="stringliteral">&quot;oclc_wavefrontsize64_on.bc&quot;</span>);</div>
 <div class="line"><a id="l00125" name="l00125"></a><span class="lineno">  125</span> </div>
-<div class="line"><a id="l00126" name="l00126"></a><span class="lineno">  126</span><span class="preprocessor">#endif</span></div>
-<div class="line"><a id="l00127" name="l00127"></a><span class="lineno">  127</span> </div>
-<div class="line"><a id="l00128" name="l00128"></a><span class="lineno">  128</span><span class="preprocessor">#endif </span><span class="comment">// PROTEUS_FRONTEND_DISPATCHER_HIP_H</span></div>
+<div class="line"><a id="l00126" name="l00126"></a><span class="lineno">  126</span>    llvm::Linker Linker{M};</div>
+<div class="line"><a id="l00127" name="l00127"></a><span class="lineno">  127</span>    <span class="keywordflow">for</span> (<span class="keyword">const</span> <span class="keyword">auto</span> &amp;Path : LibsToLink) {</div>
+<div class="line"><a id="l00128" name="l00128"></a><span class="lineno">  128</span>      <span class="keyword">auto</span> LibMod = LoadBitcode(Path);</div>
+<div class="line"><a id="l00129" name="l00129"></a><span class="lineno">  129</span>      Linker.linkInModule(std::move(LibMod),</div>
+<div class="line"><a id="l00130" name="l00130"></a><span class="lineno">  130</span>                          llvm::Linker::Flags::LinkOnlyNeeded);</div>
+<div class="line"><a id="l00131" name="l00131"></a><span class="lineno">  131</span>    }</div>
+<div class="line"><a id="l00132" name="l00132"></a><span class="lineno">  132</span>  }</div>
+<div class="line"><a id="l00133" name="l00133"></a><span class="lineno">  133</span>};</div>
+<div class="line"><a id="l00134" name="l00134"></a><span class="lineno">  134</span> </div>
+<div class="line"><a id="l00135" name="l00135"></a><span class="lineno">  135</span>} <span class="comment">// namespace proteus</span></div>
+<div class="line"><a id="l00136" name="l00136"></a><span class="lineno">  136</span> </div>
+<div class="line"><a id="l00137" name="l00137"></a><span class="lineno">  137</span><span class="preprocessor">#endif</span></div>
+<div class="line"><a id="l00138" name="l00138"></a><span class="lineno">  138</span> </div>
+<div class="line"><a id="l00139" name="l00139"></a><span class="lineno">  139</span><span class="preprocessor">#endif </span><span class="comment">// PROTEUS_FRONTEND_DISPATCHER_HIP_H</span></div>
 <div class="ttc" id="aDispatcherDevice_8h_html"><div class="ttname"><a href="DispatcherDevice_8h.html">DispatcherDevice.h</a></div></div>
 <div class="ttc" id="aError_8h_html"><div class="ttname"><a href="Error_8h.html">Error.h</a></div></div>
 <div class="ttc" id="aHIPToolchain_8h_html"><div class="ttname"><a href="HIPToolchain_8h.html">HIPToolchain.h</a></div></div>
@@ -240,7 +251,7 @@ $(document).ready(function() { init_codefold(0); });
 <div class="ttc" id="anamespaceproteus_html_a08485a05eb684e821e1004eefb75362f"><div class="ttname"><a href="namespaceproteus.html#a08485a05eb684e821e1004eefb75362f">proteus::TargetModelType</a></div><div class="ttdeci">TargetModelType</div><div class="ttdef"><b>Definition</b> TargetModel.h:8</div></div>
 <div class="ttc" id="anamespaceproteus_html_a08485a05eb684e821e1004eefb75362fa5e4576beae2ab86d6ad1b8b1700d2e11"><div class="ttname"><a href="namespaceproteus.html#a08485a05eb684e821e1004eefb75362fa5e4576beae2ab86d6ad1b8b1700d2e11">proteus::TargetModelType::HIP</a></div><div class="ttdeci">@ HIP</div></div>
 <div class="ttc" id="anamespaceproteus_html_a650a5e86664ceef3bc70535384175cee"><div class="ttname"><a href="namespaceproteus.html#a650a5e86664ceef3bc70535384175cee">proteus::reportFatalError</a></div><div class="ttdeci">void reportFatalError(const llvm::Twine &amp;Reason, const char *FILE, unsigned Line)</div><div class="ttdef"><b>Definition</b> Error.cpp:14</div></div>
-<div class="ttc" id="anamespaceproteus_html_a8e65804b7a3b913ea78fa24e79bc3673"><div class="ttname"><a href="namespaceproteus.html#a8e65804b7a3b913ea78fa24e79bc3673">proteus::resolveHIPToolchain</a></div><div class="ttdeci">const ResolvedHIPToolchain &amp; resolveHIPToolchain()</div><div class="ttdef"><b>Definition</b> HIPToolchain.cpp:273</div></div>
+<div class="ttc" id="anamespaceproteus_html_a8e65804b7a3b913ea78fa24e79bc3673"><div class="ttname"><a href="namespaceproteus.html#a8e65804b7a3b913ea78fa24e79bc3673">proteus::resolveHIPToolchain</a></div><div class="ttdeci">const ResolvedHIPToolchain &amp; resolveHIPToolchain()</div><div class="ttdef"><b>Definition</b> HIPToolchain.cpp:276</div></div>
 </div><!-- fragment --></div><!-- contents -->
 <!-- start footer part -->
 <hr class="footer"/><address class="footer"><small>
