@@ -72,9 +72,16 @@ elif [ "${CI_MACHINE}" == "tioga" ] || [ "${CI_MACHINE}" == "tuolumne" ]; then
   ml load rocm/${PROTEUS_CI_ROCM_VERSION}
 
   if [ -n "${ROCM_PATH:-}" ]; then
+    ROCM_PATH="$(cd "${ROCM_PATH}" && pwd -P)"
+    echo "=> Requested ROCm ${PROTEUS_CI_ROCM_VERSION}"
     echo "=> ROCM_PATH ${ROCM_PATH}"
   else
     echo "=> Failed to find ROCM_PATH"
+    exit 1
+  fi
+
+  if [[ "${ROCM_PATH}" != *"${PROTEUS_CI_ROCM_VERSION}"* ]]; then
+    echo "=> ROCm module mismatch: requested ${PROTEUS_CI_ROCM_VERSION}, got ${ROCM_PATH}"
     exit 1
   fi
 
@@ -98,7 +105,16 @@ CMAKE_OPTIONS="-DLLVM_INSTALL_DIR=$LLVM_INSTALL_DIR"
 CMAKE_OPTIONS+=" -DCMAKE_BUILD_TYPE=Release"
 CMAKE_OPTIONS+=" -DCMAKE_C_COMPILER=$LLVM_INSTALL_DIR/bin/clang -DCMAKE_CXX_COMPILER=$LLVM_INSTALL_DIR/bin/clang++"
 CMAKE_OPTIONS+=" -DENABLE_DEVELOPER_COMPILER_FLAGS=on"
-CMAKE_OPTIONS+=" -DPROTEUS_ENABLE_MLIR=on"
+if [ "${PROTEUS_CI_ROCM_VERSION:-}" = "10.0" ] \
+   && [ ! -f "${ROCM_PATH}/lib/llvm/lib/objects-Release/obj.MLIRCAPIDebug/Debug.cpp.o" ]; then
+  # The current site ROCm 10.0 installation has an incomplete MLIR CMake
+  # package: MLIRTargets.cmake exports this object, but it was not installed.
+  # Keep testing the LLVM 23/HIP configuration while the package is repaired.
+  echo "=> Disabling MLIR: ROCm 10.0 MLIR package is incomplete"
+  CMAKE_OPTIONS+=" -DPROTEUS_ENABLE_MLIR=off"
+else
+  CMAKE_OPTIONS+=" -DPROTEUS_ENABLE_MLIR=on"
+fi
 CMAKE_OPTIONS+=" -DPROTEUS_ENABLE_PYTHON=on"
 CMAKE_OPTIONS+=" -DENABLE_TESTS=on"
 CMAKE_OPTIONS+=" -DENABLE_COVERAGE=$([ "${ENABLE_CODECOV_UPLOAD}" = "1" ] && echo on || echo off)"

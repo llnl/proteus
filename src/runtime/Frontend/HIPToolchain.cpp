@@ -156,6 +156,18 @@ std::string readHIPVersionFromHeader(llvm::StringRef Path) {
 }
 
 std::string readHIPVersionFromRoot(llvm::StringRef Root) {
+  // .info/version is the ROCm distribution version, which need not match
+  // the HIP API/runtime version.  For example, ROCm 10 installations may
+  // package HIP 7.15.  Validate against the same HIP version CMake detects.
+  for (llvm::StringRef RelativePath :
+       {"include/hip/hip_version.h",
+        "include/hip/amd_detail/amd_hip_version.h"}) {
+    llvm::SmallString<256> HeaderPath(Root);
+    llvm::sys::path::append(HeaderPath, RelativePath);
+    if (llvm::sys::fs::is_regular_file(HeaderPath))
+      return readHIPVersionFromHeader(HeaderPath);
+  }
+
   llvm::SmallString<256> VersionFile(Root);
   llvm::sys::path::append(VersionFile, ".info", "version");
   if (llvm::sys::fs::is_regular_file(VersionFile)) {
@@ -164,15 +176,6 @@ std::string readHIPVersionFromRoot(llvm::StringRef Root) {
       return *Version;
     reportFatalError("ROCm version file: could not parse version from " +
                      VersionFile.str().str());
-  }
-
-  for (llvm::StringRef RelativePath :
-       {"include/hip/hip_version.h",
-        "include/hip/amd_detail/amd_hip_version.h"}) {
-    llvm::SmallString<256> HeaderPath(Root);
-    llvm::sys::path::append(HeaderPath, RelativePath);
-    if (llvm::sys::fs::is_regular_file(HeaderPath))
-      return readHIPVersionFromHeader(HeaderPath);
   }
 
   reportFatalError("Could not locate HIP/ROCm version metadata under " +

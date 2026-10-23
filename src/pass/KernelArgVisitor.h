@@ -481,8 +481,19 @@ public:
 
   void visitAddrSpaceCastInst(AddrSpaceCastInst &ASC) {
     WorkList.push_back({ASC.getPointerOperand(), &ASC});
-    auto Res =
-        getDominatingUse(DL, &ASC, MemoryAnalysisPtrUse, Offset, LambdaCB);
+    // LLVM 23 materializes by-value AMDGPU arguments in addrspace(5), copies
+    // the argument into that alloca, and only then casts the alloca to the
+    // generic pointer address space.  Starting the forward use walk at the
+    // cast misses the initializing memcpy because that memcpy uses the
+    // alloca, not the cast result. Analyze the underlying alloca so its users
+    // (including the memcpy) remain visible to the clobber analysis.
+    Value *AnalysisBase = &ASC;
+    if (auto *Alloca =
+            dyn_cast<AllocaInst>(getUnderlyingObject(ASC.getPointerOperand())))
+      AnalysisBase = Alloca;
+
+    auto Res = getDominatingUse(DL, AnalysisBase, MemoryAnalysisPtrUse, Offset,
+                                LambdaCB);
     if (!Res)
       return;
 

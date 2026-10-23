@@ -158,6 +158,8 @@ meta-only:
       - PROTEUS_CI_ROCM_VERSION: "7.1.1"
       - PROTEUS_CI_ROCM_VERSION: "7.2.0"
         PROTEUS_CODECOV_VERSION_SELECTED: "1"
+      # ROCm 10.0 provides the LLVM 23 toolchain on Tioga and Tuolumne.
+      - PROTEUS_CI_ROCM_VERSION: "10.0"
   trigger:
     include:
       - local: '.gitlab/custom-jobs-and-variables.yml'

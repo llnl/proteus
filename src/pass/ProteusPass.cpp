@@ -187,7 +187,13 @@ public:
       DEBUG(Logger::logs("proteus-pass")
             << "=== Pre Original Device Module\n"
             << M << "=== End of Pre Original Device Module\n");
-      emitLambdaDeviceCallsiteManifest(M);
+      // HIP LTO runs the pass on a synthetic merged module (currently named
+      // "ld-temp.o") without a source file on disk.  Lambda manifests are
+      // translation-unit artifacts and were already emitted when the LTO
+      // input modules were compiled, so do not regenerate one from the LTO
+      // module or attempt to derive a filesystem identity for it.
+      if (!IsLTO)
+        emitLambdaDeviceCallsiteManifest(M);
       emitJitModuleDevice(M, IsLTO);
       return true;
     }

@@ -370,6 +370,28 @@ JitEngineHost::JitEngineHost() {
   LLJITPtr = ExitOnErr(
       LLJITBuilder()
 #if LLVM_VERSION_MAJOR >= 21
+#if LLVM_VERSION_MAJOR > 22
+          .setObjectLinkingLayerCreator(
+              [&](ExecutionSession &ES, jitlink::JITLinkMemoryManager &) {
+                auto GetMemMgr = [](const MemoryBuffer &) {
+                  return std::make_unique<SectionMemoryManager>();
+                };
+                auto ObjLinkingLayer =
+                    std::make_unique<RTDyldObjectLinkingLayer>(ES, GetMemMgr);
+
+                // Register the event listener.
+                ObjLinkingLayer->registerJITEventListener(
+                    *JITEventListener::createGDBRegistrationListener());
+
+                // Make sure the debug info sections aren't stripped.
+                ObjLinkingLayer->setProcessAllSections(true);
+
+                if (Config::get().ProteusDebugOutput) {
+                  ObjLinkingLayer->setNotifyLoaded(notifyLoaded);
+                }
+                return std::unique_ptr<ObjectLayer>(std::move(ObjLinkingLayer));
+              })
+#else
           .setObjectLinkingLayerCreator([&](ExecutionSession &ES) {
             auto GetMemMgr = [](const MemoryBuffer &) {
               return std::make_unique<SectionMemoryManager>();
@@ -389,6 +411,7 @@ JitEngineHost::JitEngineHost() {
             }
             return ObjLinkingLayer;
           })
+#endif
 #else
           .setObjectLinkingLayerCreator(
               [&](ExecutionSession &ES, const Triple &) {

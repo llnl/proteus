@@ -59,6 +59,13 @@ protected:
       return llvm::sys::fs::exists(Path);
     };
 
+    auto AppendExistingBitcodePath =
+        [&](llvm::SmallVectorImpl<llvm::SmallString<256>> &Paths,
+            llvm::StringRef Filename) {
+          if (Exists(Filename))
+            AppendBitcodePath(Paths, Filename);
+        };
+
     auto PickFirstExisting =
         [&](std::initializer_list<llvm::StringRef> Candidates)
         -> llvm::StringRef {
@@ -100,17 +107,21 @@ protected:
     AppendBitcodePath(LibsToLink, IsaFile);
 
     // Math/FP mode defaults (safe defaults, can be revisited later).
-    AppendBitcodePath(LibsToLink, "oclc_unsafe_math_off.bc");
-    AppendBitcodePath(LibsToLink, "oclc_finite_only_off.bc");
-    AppendBitcodePath(LibsToLink, "oclc_daz_opt_off.bc");
-    AppendBitcodePath(LibsToLink, "oclc_correctly_rounded_sqrt_on.bc");
+    // These configuration libraries are optional across ROCm releases.
+    // In particular, ROCm 10 does not ship the DAZ and correctly-rounded
+    // sqrt variants, while clang simply omits them from its link command.
+    AppendExistingBitcodePath(LibsToLink, "oclc_unsafe_math_off.bc");
+    AppendExistingBitcodePath(LibsToLink, "oclc_finite_only_off.bc");
+    AppendExistingBitcodePath(LibsToLink, "oclc_daz_opt_off.bc");
+    AppendExistingBitcodePath(LibsToLink, "oclc_correctly_rounded_sqrt_on.bc");
 
     // Wavefront size selection: RDNA is typically wave32; CDNA/gfx9 wave64.
     const bool IsWave32 = llvm::StringRef{DeviceArch}.starts_with("gfx10") ||
                           llvm::StringRef{DeviceArch}.starts_with("gfx11") ||
                           llvm::StringRef{DeviceArch}.starts_with("gfx12");
-    AppendBitcodePath(LibsToLink, IsWave32 ? "oclc_wavefrontsize64_off.bc"
-                                           : "oclc_wavefrontsize64_on.bc");
+    AppendExistingBitcodePath(LibsToLink, IsWave32
+                                              ? "oclc_wavefrontsize64_off.bc"
+                                              : "oclc_wavefrontsize64_on.bc");
 
     llvm::Linker Linker{M};
     for (const auto &Path : LibsToLink) {

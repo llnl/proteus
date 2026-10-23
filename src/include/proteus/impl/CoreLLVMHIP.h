@@ -230,7 +230,12 @@ codegenParallel(Module &M, StringRef DeviceArch,
   Conf.CPU = DeviceArch;
 
   // Propagate attributes from TargetMachine to LTO Config.
-  std::string FeatureStr = TM->getMCSubtargetInfo()->getFeatureString().str();
+  std::string FeatureStr =
+#if LLVM_VERSION_MAJOR > 22
+      TM->getMCSubtargetInfo().getFeatureString().str();
+#else
+      TM->getMCSubtargetInfo()->getFeatureString().str();
+#endif
   if (!FeatureStr.empty()) {
     SmallVector<StringRef> Features;
     StringRef(FeatureStr).split(Features, ',');
@@ -249,6 +254,10 @@ codegenParallel(Module &M, StringRef DeviceArch,
   Conf.VerifyEach = false;
   Conf.DiagHandler = DiagnosticHandler;
   Conf.OptLevel = OptConfig.OptLevel;
+#if LLVM_VERSION_MAJOR > 22
+  if (OptConfig.OptLevel == 's' || OptConfig.OptLevel == 'z')
+    Conf.OptLevel = 2;
+#endif
   const auto Plugins = getJITPassPluginConfigs();
   // Parallel codegen lets LTO own optimization, so custom textual pipelines
   // must be forwarded to the LTO configuration instead of run beforehand.
@@ -256,9 +265,23 @@ codegenParallel(Module &M, StringRef DeviceArch,
       proteus::detail::hasJITPassPluginInsertion(Plugins))
     Conf.OptPipeline = proteus::detail::composeOptimizationPassPipeline(
         OptConfig.PassPipeline, OptConfig.OptLevel, Plugins);
+#if LLVM_VERSION_MAJOR > 22
+  // Preserve the pre-LLVM 23 Os/Oz semantics before LTO normalizes the
+  // removed size pipelines to O2.
+  if (Conf.OptPipeline.empty())
+    proteus::detail::applySizeOptimizationAttribute(M, OptConfig.OptLevel);
+  else
+    proteus::detail::applySizeOptimizationAttribute(M, Conf.OptPipeline);
+#endif
+  Conf.OptPipeline =
+      proteus::detail::normalizeOptimizationPassPipeline(Conf.OptPipeline);
   for (const auto &PluginPath :
        proteus::detail::getUniqueJITPassPluginPaths(Plugins))
+#if LLVM_VERSION_MAJOR > 22
+    Conf.PassPluginFilenames.push_back(PluginPath);
+#else
     Conf.PassPlugins.push_back(PluginPath);
+#endif
   Conf.CGOptLevel = static_cast<CodeGenOptLevel>(OptConfig.CodegenOptLevel);
 
   unsigned ParallelCodeGenParallelismLevel =
