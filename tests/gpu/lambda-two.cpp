@@ -15,8 +15,7 @@
 
 __device__ static void printInt(int I) { printf("Integer = %d\n", I); }
 
-template <typename T, typename L>
-__global__ __attribute__((annotate("jit"))) static void kernel(T LB, L LB2) {
+template <typename T, typename L> __global__ static void kernel(T LB, L LB2) {
   std::size_t I = blockIdx.x + threadIdx.x;
   if (I == 0) {
     LB(I);

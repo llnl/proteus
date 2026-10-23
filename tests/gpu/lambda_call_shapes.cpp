@@ -28,15 +28,14 @@ chooseSameBody(F *Body, bool FirstPath) {
 // Different return paths carry different kernel arguments.  Picking the first
 // ReturnInst (or first reaching store to a lowered return slot) is unsound.
 template <typename F>
-__global__ __attribute__((annotate("jit"))) static void
-kernelMultipleReturns(F First, F Second, bool UseSecond) {
+__global__ static void kernelMultipleReturns(F First, F Second,
+                                             bool UseSecond) {
   (*chooseBody(&First, &Second, UseSecond))();
 }
 
 // Distinct CFG paths and SSA loads still have one semantic pointer source.
 template <typename F>
-__global__ __attribute__((annotate("jit"))) static void
-kernelSameReturns(F Body, bool FirstPath) {
+__global__ static void kernelSameReturns(F Body, bool FirstPath) {
   (*chooseSameBody(&Body, FirstPath))();
 }
 
@@ -63,14 +62,13 @@ selectDifferentBody(F *First, F *Second, bool UseSecond) {
 }
 
 template <typename F>
-__global__ __attribute__((annotate("jit"))) static void
-kernelSelectSame(F Body, bool AlternatePath) {
+__global__ static void kernelSelectSame(F Body, bool AlternatePath) {
   (*selectSameBody(&Body, AlternatePath))();
 }
 
 template <typename F>
-__global__ __attribute__((annotate("jit"))) static void
-kernelSelectDifferent(F First, F Second, bool UseSecond) {
+__global__ static void kernelSelectDifferent(F First, F Second,
+                                             bool UseSecond) {
   (*selectDifferentBody(&First, &Second, UseSecond))();
 }
 
@@ -84,9 +82,7 @@ invokeIndirect(F *Body) {
 
 // getCalledFunction() is null for an indirect call.  The provenance analysis
 // must decline this shape instead of dereferencing the null callee.
-template <typename F>
-__global__ __attribute__((annotate("jit"))) static void
-kernelIndirectCall(F Body) {
+template <typename F> __global__ static void kernelIndirectCall(F Body) {
   invokeIndirect(&Body);
 }
 

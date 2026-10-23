@@ -22,9 +22,7 @@ clearPrefix(MemoryBox<F> *Box) {
   __builtin_memset(Box, 0, sizeof(std::uint64_t));
 }
 
-template <typename F>
-__global__ __attribute__((annotate("jit"))) static void
-kernelNonoverlapMemset(F Body) {
+template <typename F> __global__ static void kernelNonoverlapMemset(F Body) {
   MemoryBox<F> Box{{1, 2}, Body};
   clearPrefix(&Box);
   Box.Body();
@@ -38,8 +36,8 @@ copyDynamic(MemoryBox<F> *Destination, const MemoryBox<F> *Source,
 }
 
 template <typename F>
-__global__ __attribute__((annotate("jit"))) static void
-kernelDynamicMemcpy(F DestinationBody, F SourceBody, std::size_t Bytes) {
+__global__ static void kernelDynamicMemcpy(F DestinationBody, F SourceBody,
+                                           std::size_t Bytes) {
   MemoryBox<F> Destination{{3, 4}, DestinationBody};
   MemoryBox<F> Source{{5, 6}, SourceBody};
   copyDynamic(&Destination, &Source, Bytes);
@@ -63,8 +61,7 @@ moveBody(MoveDestination<F> *Destination, const MoveSource<F> *Source) {
 }
 
 template <typename F>
-__global__ __attribute__((annotate("jit"))) static void
-kernelOffsetMemmove(F DestinationBody, F SourceBody) {
+__global__ static void kernelOffsetMemmove(F DestinationBody, F SourceBody) {
   MoveDestination<F> Destination{{7, 8, 9}, DestinationBody};
   MoveSource<F> Source{10, SourceBody};
   moveBody(&Destination, &Source);

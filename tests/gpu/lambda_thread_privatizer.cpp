@@ -46,8 +46,7 @@ __host__ __device__ __attribute__((noinline)) void invoke_body(Params &&, F &Fn,
 }
 
 template <typename F>
-__global__ __attribute__((annotate("jit"))) void
-kernel_thread_privatizer(F Fn, ParamPack Params) {
+__global__ void kernel_thread_privatizer(F Fn, ParamPack Params) {
   auto Private = Privatizer<F>::thread_privatize(Fn);
   F *Priv = Private.get_priv();
   LaunchContext Ctx{10};

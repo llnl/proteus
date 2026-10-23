@@ -20,8 +20,7 @@ template <typename T> struct Functor {
   }
 };
 
-template <typename T>
-__global__ __attribute__((annotate("jit"))) void kernel1d(int N, T LB) {
+template <typename T> __global__ void kernel1d(int N, T LB) {
   const int I = blockIdx.x * blockDim.x + threadIdx.x;
   if (I < N) {
     LB(I);
