@@ -492,8 +492,8 @@ public:
             dyn_cast<AllocaInst>(getUnderlyingObject(ASC.getPointerOperand())))
       AnalysisBase = Alloca;
 
-    auto Res =
-        getDominatingUse(DL, AnalysisBase, MemoryAnalysisPtrUse, Offset, LambdaCB);
+    auto Res = getDominatingUse(DL, AnalysisBase, MemoryAnalysisPtrUse, Offset,
+                                LambdaCB);
     if (!Res)
       return;
 
