@@ -37,26 +37,21 @@ branchThenInvoke(F First, F Second, bool UseSecond) {
 }
 
 template <typename F>
-__global__ __attribute__((annotate("jit"))) static void
-kernelStoreOrder(F Initial, F Other) {
+__global__ static void kernelStoreOrder(F Initial, F Other) {
   invokeThenOverwrite(Initial, Other);
 }
 
 template <typename F>
-__global__ __attribute__((annotate("jit"))) static void
-kernelLatestStore(F Initial, F Replacement) {
+__global__ static void kernelLatestStore(F Initial, F Replacement) {
   overwriteThenInvoke(Initial, Replacement);
 }
 
 template <typename F>
-__global__ __attribute__((annotate("jit"))) static void
-kernelBranchStore(F First, F Second, bool UseSecond) {
+__global__ static void kernelBranchStore(F First, F Second, bool UseSecond) {
   branchThenInvoke(First, Second, UseSecond);
 }
 
-template <typename F>
-__global__ __attribute__((annotate("jit"))) static void
-kernelMutatedCapture(F Body) {
+template <typename F> __global__ static void kernelMutatedCapture(F Body) {
   // Force a second write to the captured integer itself.  Specializing from
   // the parameter initializer instead of this nearest write miscompiles the
   // call even though no pointer spill is involved.
@@ -72,8 +67,7 @@ replaceCaptureThenInvoke(F Body, int Replacement) {
 }
 
 template <typename F>
-__global__ __attribute__((annotate("jit"))) static void
-kernelCaptureFromArg(F Body, int Replacement) {
+__global__ static void kernelCaptureFromArg(F Body, int Replacement) {
   replaceCaptureThenInvoke(Body, Replacement);
 }
 

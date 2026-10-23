@@ -537,6 +537,14 @@ private:
 
   void emitLambdaDeviceCallsiteManifest(Module &M) {
     StringMap<SmallVector<LambdaManifestRecord, 4>> KernelManifest;
+    auto MarkKernel = [&](Function *Kernel) {
+      KernelManifest[Kernel->getName()];
+      // HIP RDC finds kernel modules through this metadata at device LTO.
+      if (!Kernel->hasMetadata("proteus.jit")) {
+        MDString *Tag = MDString::get(M.getContext(), "proteus.jit");
+        Kernel->setMetadata("proteus.jit", MDNode::get(M.getContext(), Tag));
+      }
+    };
     SmallVector<std::pair<Function *, uint64_t>, 16> FunctorOperatorMethods;
     findFunctionsWithU64Metadata(M, "proteus.wrapper_call",
                                  FunctorOperatorMethods);
@@ -549,9 +557,32 @@ private:
       if (CBToAnalyze.empty())
         continue;
 
+      // A kernel calling a registered lambda needs a JIT entry even when we
+      // cannot locate the lambda's capture within its arguments.  Discover
+      // callers independently of the offset analysis so those kernels can
+      // still use the unspecialized JIT path.
+      SmallVector<Function *, 16> Callers;
+      SmallPtrSet<Function *, 16> SeenCallers;
+      for (CallBase *CB : CBToAnalyze)
+        Callers.push_back(CB->getFunction());
+      while (!Callers.empty()) {
+        Function *Caller = Callers.pop_back_val();
+        if (!SeenCallers.insert(Caller).second)
+          continue;
+        if (isDeviceKernel(Caller)) {
+          MarkKernel(Caller);
+          continue;
+        }
+        for (User *U : Caller->users()) {
+          auto *Call = dyn_cast<CallBase>(U);
+          if (Call && Call->getCalledOperand()->stripPointerCasts() == Caller)
+            Callers.push_back(Call->getFunction());
+        }
+      }
+
       DenseMap<CallBase *, LambdaKernelArgAnalysis> CallBaseToArgOffset;
-      // If analysis fails we log the error in the above function call, and
-      // fallback to unspecialized IR at runtime.
+      // If capture offset analysis fails, the manifest entries above still
+      // register the kernels for the unspecialized JIT path.
       if (!analyzeLambdaUses(M, CallBaseToArgOffset, CBToAnalyze))
         continue;
 
@@ -562,6 +593,7 @@ private:
 
         uint32_t CallsiteIndex = NextCallsiteIndex++;
         setLambdaCallsiteMetadata(*CB, FunctorId, CallsiteIndex);
+        MarkKernel(It->second.KernelFunction);
         auto &Records = KernelManifest[It->second.KernelFunction->getName()];
         Records.push_back(LambdaManifestRecord{
             FunctorId, CallsiteIndex, It->second.KernelArgIndex,
@@ -722,9 +754,9 @@ private:
   void instrumentLambdaLaunchCallsites(
       Module &M, const DenseMap<Value *, GlobalVariable *> &StubToKernelMap) {
     auto KernelManifest = parseLambdaManifestFile(M);
-    auto LambdaSchema = parseLambdaSchemaMetadata(M);
-    if (KernelManifest.empty() || LambdaSchema.empty())
+    if (KernelManifest.empty())
       return;
+    auto LambdaSchema = parseLambdaSchemaMetadata(M);
     for (auto It = StubToKernelMap.begin(); It != StubToKernelMap.end(); ++It) {
       auto [Stub, KernelGV] = *It;
       StringRef KernelSym = getGlobalString(*KernelGV);
@@ -739,6 +771,12 @@ private:
       if (!StubFn)
         reportFatalError("Expected stub function for lambda registration "
                          "helper generation");
+      // Preserve any explicit kernel runtime constants already parsed from
+      // annotations, and enable unannotated kernels with registered lambdas.
+      JitFunctionInfoMap.insert({StubFn, JitFunctionInfo{{}, ""}});
+
+      if (ManifestIt->getValue().empty() || LambdaSchema.empty())
+        continue;
       auto *LaunchCB = getStubLaunchCB(M, StubFn);
 
       auto *RegFuncTy = FunctionType::get(Types.VoidTy, {Types.PtrTy}, false);

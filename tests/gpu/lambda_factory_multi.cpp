@@ -13,10 +13,7 @@
 
 __device__ void printInt(int I) { printf("Integer = %d\n", I); }
 
-template <typename T>
-__global__ __attribute__((annotate("jit"))) void kernel(T LB) {
-  LB();
-}
+template <typename T> __global__ void kernel(T LB) { LB(); }
 
 auto declareLambda(int rc1, int rc2) {
   return [=, C = proteus::jit_variable(rc1), D = 5,
@@ -37,8 +34,8 @@ auto declareLambdaThree(int rc1, int rc2, int rc3) {
 }
 
 template <typename T> void run(T &&LB) {
-  proteus::register_lambda(LB);
-  kernel<<<1, 1>>>(LB);
+  auto Registered = proteus::register_lambda(LB);
+  kernel<<<1, 1>>>(Registered);
   gpuErrCheck(gpuDeviceSynchronize());
 }
 

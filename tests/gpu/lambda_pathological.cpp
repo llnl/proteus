@@ -19,29 +19,22 @@
 #include "gpu_common.h"
 #include <proteus/JitInterface.h>
 
-template <typename Lambda>
-__global__ __attribute__((annotate("jit"))) void kernel(Lambda Body) {
-  Body();
-}
+template <typename Lambda> __global__ void kernel(Lambda Body) { Body(); }
 
-template <typename L1, typename L2>
-__global__ __attribute__((annotate("jit"))) void kernel_case1(L1 A, L2 B) {
+template <typename L1, typename L2> __global__ void kernel_case1(L1 A, L2 B) {
   helper_multi_caller(&A);
   helper_multi_caller(&B);
 }
 
-template <typename Lambda>
-__global__ __attribute__((annotate("jit"))) void kernel_case3(Lambda Body) {
+template <typename Lambda> __global__ void kernel_case3(Lambda Body) {
   helper_slot(&Body, true);
 }
 
-template <typename Lambda>
-__global__ __attribute__((annotate("jit"))) void kernel_case4(Lambda Body) {
+template <typename Lambda> __global__ void kernel_case4(Lambda Body) {
   helper_uintptr(&Body);
 }
 
-template <typename Lambda>
-__global__ __attribute__((annotate("jit"))) void kernel_case5(Lambda Body) {
+template <typename Lambda> __global__ void kernel_case5(Lambda Body) {
   helper_box(&Body);
 }
 
@@ -100,13 +93,11 @@ static void case1() {
 
 // Case 2: helper reused from distinct kernels.
 // This stresses mixing multiple kernel parents through a shared device helper.
-template <typename Lambda>
-__global__ __attribute__((annotate("jit"))) void kernel_case2_a(Lambda Body) {
+template <typename Lambda> __global__ void kernel_case2_a(Lambda Body) {
   helper_multi_caller(&Body);
 }
 
-template <typename Lambda>
-__global__ __attribute__((annotate("jit"))) void kernel_case2_b(Lambda Body) {
+template <typename Lambda> __global__ void kernel_case2_b(Lambda Body) {
   helper_multi_caller(&Body);
 }
 

@@ -29,9 +29,7 @@ invokeThroughPointerField(PointerFieldContext<F> *Context, int Offset) {
     (*Context->Body)(Index);
 }
 
-template <typename F>
-__global__ __attribute__((annotate("jit"))) static void
-kernelPointerFieldLoad(F Body) {
+template <typename F> __global__ static void kernelPointerFieldLoad(F Body) {
   int First = 2;
   int Second = 3;
   int Limit = 7;

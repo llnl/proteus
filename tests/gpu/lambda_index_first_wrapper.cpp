@@ -24,8 +24,7 @@ invokeWithIndexFirstSlot(F Body, int I) {
   invokeInner(Inner);
 }
 
-template <typename F>
-__global__ __attribute__((annotate("jit"))) static void kernel(F Wrapped) {
+template <typename F> __global__ static void kernel(F Wrapped) {
   if (threadIdx.x == 0)
     Wrapped(5);
 }

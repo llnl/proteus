@@ -11,15 +11,13 @@
 #include "gpu_common.h"
 #include "proteus/JitInterface.h"
 
-template <typename T>
-__global__ __attribute__((annotate("jit"))) void kernel(T LB) {
+template <typename T> __global__ void kernel(T LB) {
   std::size_t I = blockIdx.x + threadIdx.x;
   if (I == 0)
     LB();
 }
 
-template <typename T>
-__global__ __attribute__((annotate("jit"))) void kernel(size_t N, T LB) {
+template <typename T> __global__ void kernel(size_t N, T LB) {
   std::size_t I = blockDim.x * blockIdx.x + threadIdx.x;
   if (I < N)
     LB(I);

@@ -35,8 +35,7 @@ makeShiftedEnvelope(F Body, std::uint64_t Prefix) {
 // The registered lambda starts at offset zero in the kernel argument, but at
 // offset eight in the returned aggregate.  Crossing the matching insertvalue
 // must therefore rebase the tracked offset from eight to zero.
-template <typename F>
-__global__ __attribute__((annotate("jit"))) static void kernelShift(F Body) {
+template <typename F> __global__ static void kernelShift(F Body) {
   static_assert(offsetof(ShiftedEnvelope<F>, Body) == 8);
   auto Envelope = makeShiftedEnvelope(Body, 0x1111111111111111ULL);
   Envelope();
@@ -44,9 +43,7 @@ __global__ __attribute__((annotate("jit"))) static void kernelShift(F Body) {
 
 // Applying the same transformation twice catches visitors that repair one
 // aggregate boundary but retain stale state at the next one.
-template <typename F>
-__global__ __attribute__((annotate("jit"))) static void
-kernelDoubleShift(F Body) {
+template <typename F> __global__ static void kernelDoubleShift(F Body) {
   static_assert(offsetof(ShiftedEnvelope<F>, Body) == 8);
   auto First = makeShiftedEnvelope(Body, 0x2222222222222222ULL);
   auto Second = makeShiftedEnvelope(First.Body, 0x3333333333333333ULL);
@@ -73,8 +70,7 @@ makePaddedEnvelope(F Body, std::uint64_t Suffix) {
 // Body.  The analysis has to skip the suffix insert and use the DataLayout
 // offset of Body rather than assuming tightly packed fields.
 template <typename F>
-__global__ __attribute__((annotate("jit"))) static void
-kernelPadded(F Body, std::uint64_t Suffix) {
+__global__ static void kernelPadded(F Body, std::uint64_t Suffix) {
   static_assert(offsetof(PaddedEnvelope<F>, Body) == 16);
   auto Envelope = makePaddedEnvelope(Body, Suffix);
   Envelope();

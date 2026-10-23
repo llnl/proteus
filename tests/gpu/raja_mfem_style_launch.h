@@ -4,7 +4,7 @@
 
 namespace MockMfemInterface {
 template <typename DBODY> void rajaWrap(const int N, DBODY &&DBody) {
-  MockRajaInterface::forall(N, std::forward<DBODY>(DBody));
+  MockRajaInterface::forall<true>(N, std::forward<DBODY>(DBody));
 }
 
 template <typename d_lambda>
