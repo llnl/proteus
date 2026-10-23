@@ -148,20 +148,21 @@ static Argument *getOriginatingArgument(Value *V,
         "Expected instrumentation annotation to be in the entry basic block");
 
   const BasicBlock &EntryBB = AnnotCall->getFunction()->getEntryBlock();
+  // AMDGPU IR may pass by-value objects to jit_object through an addrspacecast
+  // of the private alloca. Normalize both destinations before matching the
+  // memcpy that initialized that alloca.
+  V = stripAllCasts(V);
   for (auto &I : EntryBB) {
     // Iterate up to the instrumentation function call.
     if (&I == AnnotCall)
       break;
 
-    Value *Src = nullptr;
-    if (match(&I, m_Intrinsic<Intrinsic::memcpy>(m_Specific(V), m_Value(Src),
-                                                 m_Value(), m_Value()))) {
-      if (auto *Arg = dyn_cast<Argument>(Src))
+    if (auto *Memcpy = dyn_cast<MemCpyInst>(&I);
+        Memcpy && stripAllCasts(Memcpy->getRawDest()) == V) {
+      if (auto *Arg = dyn_cast<Argument>(stripAllCasts(Memcpy->getRawSource())))
         return Arg;
     }
   }
-
-  V = stripAllCasts(V);
 
   if (auto *Arg = dyn_cast<Argument>(V)) {
     return Arg;
@@ -175,6 +176,12 @@ static Argument *getOriginatingArgument(Value *V,
 
 static SmallPtrSet<Argument *, 16>
 tryGatherCoercedArguments(Value *Obj, const Instruction *AnnotCall) {
+  // The annotation receives the generic (addrspace 0) pointer.  For objects
+  // passed by value Clang materializes the object in the alloca address space
+  // and inserts an addrspacecast before calling jit_object.  Strip that cast
+  // before looking for the stack slot; otherwise this routine aborts even
+  // though the underlying value is an alloca.
+  Obj = stripAllCasts(Obj);
   AllocaInst *AI = dyn_cast<AllocaInst>(Obj);
   if (!AI)
     reportFatalError("Expected object in local alloca");
@@ -255,15 +262,20 @@ tryGatherCoercedArguments(Value *Obj, const Instruction *AnnotCall) {
     if (&I == AnnotCall)
       break;
 
-    Value *Src = nullptr;
-
     if (auto *Arg = MatchStore(I, AI)) {
       CoercedArgs.insert(Arg);
-    } else if (match(&I, m_Intrinsic<Intrinsic::memcpy>(m_Specific(AI),
-                                                        m_Value(Src), m_Value(),
-                                                        m_Value()))) {
+    } else if (auto *Memcpy = dyn_cast<MemCpyInst>(&I);
+               Memcpy && stripAllCasts(Memcpy->getRawDest()) == AI) {
       if (!CoercedArgs.empty())
         reportFatalError("Expected empty coerced arguments");
+
+      Value *Src = Memcpy->getRawSource();
+
+      // The source of the copy is the by-value kernel argument in current
+      // LLVM/Clang.  Older IR used stores into another temporary, which is
+      // why the store walk below is still retained.
+      if (auto *Arg = dyn_cast<Argument>(stripAllCasts(Src)))
+        CoercedArgs.insert(Arg);
 
       // Restart detection for the Src operand.
       const Instruction &E = I;

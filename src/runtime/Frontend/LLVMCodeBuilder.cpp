@@ -506,7 +506,7 @@ void LLVMCodeBuilder::beginFor(IRValue *IterSlot, IRType IterTy,
   }
 
   if (Hints.Unroll) {
-    auto *BackEdgeBr = dyn_cast<BranchInst>(Latch->getTerminator());
+    Instruction *BackEdgeBr = Latch->getTerminator();
     LLVMContext &Ctx = BackEdgeBr->getContext();
 
     SmallVector<Metadata *, 4> LoopMDOperands;

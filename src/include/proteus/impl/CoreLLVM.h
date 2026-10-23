@@ -112,9 +112,17 @@ inline std::string getDefaultOptimizationPipeline(char OptLevel) {
   case '3':
     return "default<O3>";
   case 's':
+#if LLVM_VERSION_MAJOR > 22
+    return "default<O2>";
+#else
     return "default<Os>";
+#endif
   case 'z':
+#if LLVM_VERSION_MAJOR > 22
+    return "default<O2>";
+#else
     return "default<Oz>";
+#endif
   default:
     reportFatalError(std::string("Unsupported optimization level ") + OptLevel);
   }
@@ -148,6 +156,49 @@ inline std::string composeOptimizationPassPipeline(
   }
 
   return Pipeline;
+}
+
+// LLVM 23 removed the textual Os/Oz pipeline names.  Keep accepting these
+// names in PROTEUS_OPT_PIPELINE for compatibility with existing callers, but
+// translate them only at the point where LLVM parses the pipeline.  The
+// caller-facing trace can therefore continue to report the requested
+// pipeline.
+inline std::string normalizeOptimizationPassPipeline(StringRef PassPipeline) {
+#if LLVM_VERSION_MAJOR > 22
+  std::string Normalized = PassPipeline.str();
+  for (auto [Old, New] :
+       {std::pair<StringRef, StringRef>{"default<Os>", "default<O2>"},
+        {"default<Oz>", "default<O2>"}}) {
+    size_t Pos = 0;
+    while ((Pos = Normalized.find(Old.str(), Pos)) != std::string::npos) {
+      Normalized.replace(Pos, Old.size(), New.str());
+      Pos += New.size();
+    }
+  }
+  return Normalized;
+#else
+  return PassPipeline.str();
+#endif
+}
+
+inline void applySizeOptimizationAttribute(Module &M,
+                                           Attribute::AttrKind AttrKind) {
+  for (Function &F : M)
+    F.addFnAttr(AttrKind);
+}
+
+inline void applySizeOptimizationAttribute(Module &M, char OptLevel) {
+  if (OptLevel == 'z')
+    applySizeOptimizationAttribute(M, Attribute::MinSize);
+  else if (OptLevel == 's')
+    applySizeOptimizationAttribute(M, Attribute::OptimizeForSize);
+}
+
+inline void applySizeOptimizationAttribute(Module &M, StringRef PassPipeline) {
+  if (PassPipeline.contains("default<Oz>"))
+    applySizeOptimizationAttribute(M, Attribute::MinSize);
+  else if (PassPipeline.contains("default<Os>"))
+    applySizeOptimizationAttribute(M, Attribute::OptimizeForSize);
 }
 
 inline bool
@@ -213,7 +264,14 @@ inline void runOptimizationPassPipeline(
   PB.registerLoopAnalyses(LAM);
   PB.crossRegisterProxies(LAM, FAM, CGAM, MAM);
   ModulePassManager Passes;
-  if (auto E = PB.parsePassPipeline(Passes, PassPipeline))
+#if LLVM_VERSION_MAJOR > 22
+  // Preserve the pre-LLVM 23 Os/Oz semantics while normalizing their removed
+  // textual pipelines to O2 below.
+  applySizeOptimizationAttribute(M, PassPipeline);
+#endif
+  const std::string NormalizedPipeline =
+      normalizeOptimizationPassPipeline(PassPipeline);
+  if (auto E = PB.parsePassPipeline(Passes, NormalizedPipeline))
     reportFatalError("Error: " + toString(std::move(E)));
 
   Passes.run(M, MAM);
@@ -249,6 +307,10 @@ inline void runOptimizationPassPipeline(
   PB.crossRegisterProxies(LAM, FAM, CGAM, MAM);
 
   OptimizationLevel OptSetting;
+#if LLVM_VERSION_MAJOR > 22
+  // Preserve the pre-LLVM 23 Os/Oz semantics with O2 plus function attrs.
+  applySizeOptimizationAttribute(M, OptLevel);
+#endif
   switch (OptLevel) {
   case '0':
     OptSetting = OptimizationLevel::O0;
@@ -263,10 +325,20 @@ inline void runOptimizationPassPipeline(
     OptSetting = OptimizationLevel::O3;
     break;
   case 's':
+#if LLVM_VERSION_MAJOR > 22
+    // LLVM 23 uses O2 plus the optsize function attribute.
+    OptSetting = OptimizationLevel::O2;
+#else
     OptSetting = OptimizationLevel::Os;
+#endif
     break;
   case 'z':
+#if LLVM_VERSION_MAJOR > 22
+    // LLVM 23 uses O2 plus the minsize function attribute.
+    OptSetting = OptimizationLevel::O2;
+#else
     OptSetting = OptimizationLevel::Oz;
+#endif
     break;
   default:
     reportFatalError(std::string("Unsupported optimization level ") + OptLevel);

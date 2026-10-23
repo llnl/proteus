@@ -31,6 +31,14 @@ function(CREATE_CPU_TEST exe check_source)
     set_tests_properties(${exe} PROPERTIES LABELS "cpu")
 endfunction()
 
+# FileCheck reads the test source directly, so select the expected FP80 text
+# form through a lit substitution rather than a C++ preprocessor condition.
+if(LLVM_VERSION_MAJOR GREATER_EQUAL 23)
+    set(LLVM_FP80_CHECK_PREFIX "CHECK-LLVM23")
+else()
+    set(LLVM_FP80_CHECK_PREFIX "CHECK-LLVM22")
+endif()
+
 file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/lit.cfg.py "
 import lit.formats
 import os
@@ -54,6 +62,8 @@ FILECHECK = lit_config.params['FILECHECK']
 config.substitutions.append(('%FILECHECK', FILECHECK))
 config.substitutions.append(('%target_arch', platform.machine()))
 config.substitutions.append(('%build', '${CMAKE_CURRENT_BINARY_DIR}'))
+config.substitutions.append(
+    ('%LLVM_FP80_CHECK_PREFIX', '${LLVM_FP80_CHECK_PREFIX}'))
 "
 )
 
