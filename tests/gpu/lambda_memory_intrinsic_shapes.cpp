@@ -115,6 +115,10 @@ int main() {
 // CHECK: [KernelConfig] ID:{{.*}}kernelDynamicMemcpy
 // CHECK-NOT: [LambdaSpec]
 // CHECK: dynamic memcpy 199
-// CHECK: [LambdaSpec] Replacing slot 0 with i32 227
+// The helper's source and destination formals are not noalias. When tracing
+// the source, MemorySSA may therefore select the memmove as a possible write,
+// and the analysis must not walk past it to expose a stale initializer.
+// CHECK: [KernelConfig] ID:{{.*}}kernelOffsetMemmove
+// CHECK-NOT: [LambdaSpec]
 // CHECK: offset memmove 227
 // clang-format on
