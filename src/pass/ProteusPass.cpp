@@ -982,9 +982,21 @@ private:
     Constant *JitModule = ConstantDataArray::get(
         M.getContext(),
         ArrayRef<uint8_t>((const uint8_t *)Bitcode.data(), Bitcode.size()));
-    if (M.getNamedGlobal(GVName))
+    if (M.getNamedGlobal(GVName)) {
+#ifdef PROTEUS_PSEUDO_GPU
+      // Upstream clang's HIP device pipeline registers pass-plugin pipeline
+      // callbacks twice (ROCm clang runs the pass once), so pseudo-GPU
+      // compiles re-run this pass on an already-processed module. The first
+      // embedding is authoritative; skip the duplicate so the device compile
+      // can emit its module.
+      DEBUG(Logger::logs("proteus-pass")
+            << "Skipping duplicate jit module global " << GVName << "\n");
+      return;
+#else
       reportFatalError("Expected unique name for jit module global variable " +
                        GVName);
+#endif
+    }
     auto *GV =
         new GlobalVariable(M, JitModule->getType(), /* isConstant */ true,
                            GlobalValue::ExternalLinkage, JitModule, GVName);
