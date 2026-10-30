@@ -15,10 +15,7 @@
 
 __host__ __device__ void printInt(int I) { printf("Integer = %d\n", I); }
 
-template <typename T>
-__global__ __attribute__((annotate("jit"))) void kernel(T LB) {
-  LB();
-}
+template <typename T> __global__ void kernel(T LB) { LB(); }
 
 template <typename L1, typename L2, typename L3> struct Abstraction {
   L1 lambda_1;

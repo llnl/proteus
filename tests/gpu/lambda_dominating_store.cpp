@@ -13,8 +13,8 @@
 #include <proteus/JitInterface.h>
 
 template <typename Lambda>
-__global__ __attribute__((annotate("jit"))) void
-kernel_store(Lambda Body, Lambda Body2, Lambda Body3, bool UseSecond) {
+__global__ void kernel_store(Lambda Body, Lambda Body2, Lambda Body3,
+                             bool UseSecond) {
   helper(&Body, &Body2, &Body3, UseSecond);
 }
 

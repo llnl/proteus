@@ -16,20 +16,17 @@ template <typename F>
 __device__ __attribute__((noinline)) void helper_changed_rc(F *Body, bool Cond);
 
 template <typename Lambda>
-__global__ __attribute__((annotate("jit"))) void
-kernel_phi(Lambda Body, Lambda, bool CollapseToKernelArgTwo) {
+__global__ void kernel_phi(Lambda Body, Lambda, bool CollapseToKernelArgTwo) {
   helper_slot(&Body, &Body, true, CollapseToKernelArgTwo);
 }
 
 template <typename Lambda>
-__global__ __attribute__((annotate("jit"))) void
-kernel_phi_arg1(Lambda, Lambda Body, bool Cond) {
+__global__ void kernel_phi_arg1(Lambda, Lambda Body, bool Cond) {
   helper_arg1(&Body, &Body, Cond);
 }
 
 template <typename Lambda>
-__global__ __attribute__((annotate("jit"))) void
-kernel_phi_changed_rc(Lambda Body, bool Cond) {
+__global__ void kernel_phi_changed_rc(Lambda Body, bool Cond) {
   helper_changed_rc(&Body, Cond);
 }
 

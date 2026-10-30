@@ -83,7 +83,6 @@ DaxpyLambda();
 ```cuda title="Device"
 template <typename Lambda>
 __global__
-__attribute__((annotate("jit")))
 void kernel(Lambda &&Func) {
   Func();
 }
@@ -96,9 +95,9 @@ auto DaxpyLambda = proteus::register_lambda(
 kernel<<<blocks, threads>>>(DaxpyLambda);
 ```
 
-!!! note
-    For device lambdas, the kernel that executes the Proteus-registered lambda
-    must be annotated with `jit`.
+Proteus automatically JIT-compiles a kernel that calls a registered device
+lambda. Explicit kernel annotations remain available for specializing kernel
+arguments or kernels without registered lambdas.
 
 ## C++ Annotations API
 

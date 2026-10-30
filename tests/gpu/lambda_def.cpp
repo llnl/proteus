@@ -11,10 +11,7 @@
 #include "gpu_common.h"
 #include <proteus/JitInterface.h>
 
-template <typename T>
-__global__ __attribute__((annotate("jit"))) void kernel(T LB) {
-  LB();
-}
+template <typename T> __global__ void kernel(T LB) { LB(); }
 
 template <typename T> void run(T &&LB) {
   kernel<<<1, 1>>>(proteus::register_lambda(LB));

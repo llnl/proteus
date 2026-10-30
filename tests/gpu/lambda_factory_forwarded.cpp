@@ -12,10 +12,7 @@
 
 __host__ __device__ void printInt(int I) { printf("Integer = %d\n", I); }
 
-template <typename T>
-__global__ __attribute__((annotate("jit"))) void kernel(T LB) {
-  LB();
-}
+template <typename T> __global__ void kernel(T LB) { LB(); }
 
 auto declareLambda(int rc1, int rc2) {
   return proteus::register_lambda(
