@@ -21,7 +21,7 @@
       
       
       <link rel="icon" href="../../assets/proteus-logo.png">
-      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.7">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.8.0">
     
     
       
@@ -29,10 +29,10 @@
       
     
     
-      <link rel="stylesheet" href="../../assets/stylesheets/main.ec1eaa64.min.css">
+      <link rel="stylesheet" href="../../assets/stylesheets/main.57a0d79d.min.css">
       
         
-        <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.fb2fffe2.min.css">
       
       
 
@@ -1175,7 +1175,6 @@ with <code>proteus::jit_variable</code>.</p>
 </code></pre></div>
 <div class="highlight"><span class="filename">Device</span><pre><span></span><code><span class="k">template</span><span class="w"> </span><span class="o">&lt;</span><span class="k">typename</span><span class="w"> </span><span class="nc">Lambda</span><span class="o">&gt;</span>
 <span class="kr">__global__</span>
-<span class="n">__attribute__</span><span class="p">((</span><span class="n">annotate</span><span class="p">(</span><span class="s">"jit"</span><span class="p">)))</span>
 <span class="kt">void</span><span class="w"> </span><span class="n">kernel</span><span class="p">(</span><span class="n">Lambda</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="n">Func</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
 <span class="w">  </span><span class="n">Func</span><span class="p">();</span>
 <span class="p">}</span>
@@ -1187,11 +1186,9 @@ with <code>proteus::jit_variable</code>.</p>
 <span class="w">    </span><span class="p">});</span>
 <span class="n">kernel</span><span class="o">&lt;&lt;&lt;</span><span class="n">blocks</span><span class="p">,</span><span class="w"> </span><span class="n">threads</span><span class="o">&gt;&gt;&gt;</span><span class="p">(</span><span class="n">DaxpyLambda</span><span class="p">);</span>
 </code></pre></div>
-<div class="admonition note">
-<p class="admonition-title">Note</p>
-<p>For device lambdas, the kernel that executes the Proteus-registered lambda
-must be annotated with <code>jit</code>.</p>
-</div>
+<p>Proteus automatically JIT-compiles a kernel that calls a registered device
+lambda. Explicit kernel annotations remain available for specializing kernel
+arguments or kernels without registered lambdas.</p>
 <h2 id="c-annotations-api">C++ Annotations API</h2>
 <p>Beyond attribute-based annotations, Proteus also provides a C++ API for
 specialization through annotation functions.
@@ -1302,10 +1299,10 @@ There is no need to also use the <code>annotate</code> attribute.</p>
     
       
       
-      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["toc.integrate"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"alias": true, "default": "latest", "provider": "mike"}}</script>
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["toc.integrate"], "search": "../../assets/javascripts/workers/search.a7633da7.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"alias": true, "default": "latest", "provider": "mike"}}</script>
     
     
-      <script src="../../assets/javascripts/bundle.d7400e89.min.js"></script>
+      <script src="../../assets/javascripts/bundle.c21346df.min.js"></script>
       
     
   </body>
