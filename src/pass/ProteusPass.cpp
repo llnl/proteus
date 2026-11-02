@@ -287,9 +287,9 @@ private:
 
     proteus::pruneDanglingNVVMAnnotations(M);
 
-    // Keep line-table debug info so that recorded device modules retain the
+    // Keep source locations so that recorded device modules retain the
     // kernel's source file and line information.
-    stripNonLineTableDebugInfo(M);
+    proteus::stripDebugInfoToLineDirectives(M);
   }
 
   void runOptimizationPassPipeline(Module &M) {
@@ -1125,9 +1125,9 @@ private:
 
       proteus::pruneDanglingNVVMAnnotations(*PrunedLTOModule);
 
-      // Keep line-table debug info so that recorded device modules retain the
+      // Keep source locations so that recorded device modules retain the
       // kernel's source file and line information.
-      stripNonLineTableDebugInfo(*PrunedLTOModule);
+      proteus::stripDebugInfoToLineDirectives(*PrunedLTOModule);
 
       if (verifyModule(*PrunedLTOModule, &errs()))
         reportFatalError(

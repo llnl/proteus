@@ -467,6 +467,54 @@ inline void pruneDanglingNVVMAnnotations(Module &M) {
     Annotations->addOperand(Entry);
 }
 
+inline DICompileUnit *
+cloneWithEmissionKind(DICompileUnit *CU,
+                      DICompileUnit::DebugEmissionKind EmissionKind) {
+  return DICompileUnit::getDistinct(
+      CU->getContext(), CU->getSourceLanguage(), CU->getFile(),
+      CU->getProducer(), CU->isOptimized(), CU->getFlags(),
+      CU->getRuntimeVersion(), CU->getSplitDebugFilename(), EmissionKind,
+      CU->getEnumTypes(), CU->getRetainedTypes(), CU->getGlobalVariables(),
+      CU->getImportedEntities(), CU->getMacros(), CU->getDWOId(),
+      CU->getSplitDebugInlining(), CU->getDebugInfoForProfiling(),
+      CU->getNameTableKind(), CU->getRangesBaseAddress(), CU->getSysRoot(),
+      CU->getSDK());
+}
+
+// Reduces debug info to source locations emitted as .file/.loc directives.
+// Backends emit DWARF debug sections for LineTablesOnly and FullDebug compile
+// units, and NVPTX also marks the PTX target as debug, which makes ptxas
+// compile the kernel without optimization.
+inline void stripDebugInfoToLineDirectives(Module &M) {
+  // Remove variables and types, which only FullDebug compile units carry.
+  if (any_of(M.debug_compile_units(), [](DICompileUnit *CU) {
+        return CU->getEmissionKind() == DICompileUnit::FullDebug;
+      }))
+    stripNonLineTableDebugInfo(M);
+
+  DenseMap<DICompileUnit *, DICompileUnit *> LoweredCUs;
+  for (DICompileUnit *CU : M.debug_compile_units())
+    if (CU->getEmissionKind() == DICompileUnit::LineTablesOnly)
+      LoweredCUs[CU] =
+          cloneWithEmissionKind(CU, DICompileUnit::DebugDirectivesOnly);
+  if (LoweredCUs.empty())
+    return;
+
+  // Subprograms of inlined callees are reachable only through the inlinedAt
+  // chains of debug locations, so walk the whole module to find them.
+  DebugInfoFinder Finder;
+  Finder.processModule(M);
+  for (DISubprogram *SP : Finder.subprograms())
+    if (auto It = LoweredCUs.find(SP->getUnit()); It != LoweredCUs.end())
+      SP->replaceUnit(It->second);
+
+  NamedMDNode *CUList = M.getNamedMetadata("llvm.dbg.cu");
+  for (unsigned I = 0; I < CUList->getNumOperands(); ++I)
+    if (auto It = LoweredCUs.find(cast<DICompileUnit>(CUList->getOperand(I)));
+        It != LoweredCUs.end())
+      CUList->setOperand(I, It->second);
+}
+
 inline void runCleanupPassPipeline(Module &M) {
   TIMESCOPE("proteus::runCleanupPassPipeline");
   PassBuilder PB;
@@ -490,9 +538,9 @@ inline void runCleanupPassPipeline(Module &M) {
 
   pruneDanglingNVVMAnnotations(M);
 
-  // Keep line-table debug info so that recorded device modules retain the
+  // Keep source locations so that recorded device modules retain the
   // kernel's source file and line information.
-  stripNonLineTableDebugInfo(M);
+  stripDebugInfoToLineDirectives(M);
 }
 
 inline void findFunctionsWithU64Metadata(
