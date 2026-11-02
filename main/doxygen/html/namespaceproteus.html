@@ -616,6 +616,10 @@ Functions</h2></td></tr>
 <tr class="separator:afd9cd9c5596410363d4e1534f7329799"><td class="memSeparator" colspan="2">&#160;</td></tr>
 <tr class="memitem:ac1aee2db7054dab22ca0bb915ddb4b0b" id="r_ac1aee2db7054dab22ca0bb915ddb4b0b"><td class="memItemLeft" align="right" valign="top">void&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="namespaceproteus.html#ac1aee2db7054dab22ca0bb915ddb4b0b">pruneDanglingNVVMAnnotations</a> (Module &amp;M)</td></tr>
 <tr class="separator:ac1aee2db7054dab22ca0bb915ddb4b0b"><td class="memSeparator" colspan="2">&#160;</td></tr>
+<tr class="memitem:adab42682e4a8d932716e438fca2ea592" id="r_adab42682e4a8d932716e438fca2ea592"><td class="memItemLeft" align="right" valign="top">DICompileUnit *&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="namespaceproteus.html#adab42682e4a8d932716e438fca2ea592">cloneWithEmissionKind</a> (DICompileUnit *CU, DICompileUnit::DebugEmissionKind EmissionKind)</td></tr>
+<tr class="separator:adab42682e4a8d932716e438fca2ea592"><td class="memSeparator" colspan="2">&#160;</td></tr>
+<tr class="memitem:a73d9c2edd3627101256c0c1da7dd693b" id="r_a73d9c2edd3627101256c0c1da7dd693b"><td class="memItemLeft" align="right" valign="top">void&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="namespaceproteus.html#a73d9c2edd3627101256c0c1da7dd693b">stripDebugInfoToLineDirectives</a> (Module &amp;M)</td></tr>
+<tr class="separator:a73d9c2edd3627101256c0c1da7dd693b"><td class="memSeparator" colspan="2">&#160;</td></tr>
 <tr class="memitem:af07e54a445654e28c7a589dab63edc0f" id="r_af07e54a445654e28c7a589dab63edc0f"><td class="memItemLeft" align="right" valign="top">void&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="namespaceproteus.html#af07e54a445654e28c7a589dab63edc0f">runCleanupPassPipeline</a> (Module &amp;M)</td></tr>
 <tr class="separator:af07e54a445654e28c7a589dab63edc0f"><td class="memSeparator" colspan="2">&#160;</td></tr>
 <tr class="memitem:a25440d2db365849cd9f0537fff22026b" id="r_a25440d2db365849cd9f0537fff22026b"><td class="memItemLeft" align="right" valign="top">void&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="namespaceproteus.html#a25440d2db365849cd9f0537fff22026b">findFunctionsWithU64Metadata</a> (llvm::Module &amp;M, llvm::StringRef Key, llvm::SmallVectorImpl&lt; std::pair&lt; llvm::Function *, std::uint64_t &gt; &gt; &amp;Out)</td></tr>
@@ -1754,6 +1758,42 @@ template&lt;typename T , typename U &gt; </div>
           <td></td>
           <td class="paramtype">function_ref&lt; bool(const GlobalValue *)&gt;&#160;</td>
           <td class="paramname"><em>ShouldCloneDefinition</em> = <code>nullptr</code>&#160;</td>
+        </tr>
+        <tr>
+          <td></td>
+          <td>)</td>
+          <td></td><td></td>
+        </tr>
+      </table>
+  </td>
+  <td class="mlabels-right">
+<span class="mlabels"><span class="mlabel">inline</span></span>  </td>
+  </tr>
+</table>
+</div><div class="memdoc">
+
+</div>
+</div>
+<a id="adab42682e4a8d932716e438fca2ea592" name="adab42682e4a8d932716e438fca2ea592"></a>
+<h2 class="memtitle"><span class="permalink"><a href="#adab42682e4a8d932716e438fca2ea592">&#9670;&#160;</a></span>cloneWithEmissionKind()</h2>
+
+<div class="memitem">
+<div class="memproto">
+<table class="mlabels">
+  <tr>
+  <td class="mlabels-left">
+      <table class="memname">
+        <tr>
+          <td class="memname">DICompileUnit * proteus::cloneWithEmissionKind </td>
+          <td>(</td>
+          <td class="paramtype">DICompileUnit *&#160;</td>
+          <td class="paramname"><em>CU</em>, </td>
+        </tr>
+        <tr>
+          <td class="paramkey"></td>
+          <td></td>
+          <td class="paramtype">DICompileUnit::DebugEmissionKind&#160;</td>
+          <td class="paramname"><em>EmissionKind</em>&#160;</td>
         </tr>
         <tr>
           <td></td>
@@ -5790,6 +5830,32 @@ template&lt;typename T &gt; </div>
           <td></td>
         </tr>
       </table>
+</div><div class="memdoc">
+
+</div>
+</div>
+<a id="a73d9c2edd3627101256c0c1da7dd693b" name="a73d9c2edd3627101256c0c1da7dd693b"></a>
+<h2 class="memtitle"><span class="permalink"><a href="#a73d9c2edd3627101256c0c1da7dd693b">&#9670;&#160;</a></span>stripDebugInfoToLineDirectives()</h2>
+
+<div class="memitem">
+<div class="memproto">
+<table class="mlabels">
+  <tr>
+  <td class="mlabels-left">
+      <table class="memname">
+        <tr>
+          <td class="memname">void proteus::stripDebugInfoToLineDirectives </td>
+          <td>(</td>
+          <td class="paramtype">Module &amp;&#160;</td>
+          <td class="paramname"><em>M</em></td><td>)</td>
+          <td></td>
+        </tr>
+      </table>
+  </td>
+  <td class="mlabels-right">
+<span class="mlabels"><span class="mlabel">inline</span></span>  </td>
+  </tr>
+</table>
 </div><div class="memdoc">
 
 </div>

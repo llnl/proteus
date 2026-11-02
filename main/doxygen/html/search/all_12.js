@@ -67,10 +67,11 @@ var searchData=
   ['storevalue_64',['storevalue',['../structproteus_1_1Var_3_01T_00_01std_1_1enable__if__t_3_01is__scalar__arithmetic__v_3_01T_01_4_01_4_01_4.html#a66445314d0bf03667761cbcc074936f5',1,'proteus::Var&lt; T, std::enable_if_t&lt; is_scalar_arithmetic_v&lt; T &gt; &gt; &gt;::storeValue()'],['../structproteus_1_1Var_3_01T_00_01std_1_1enable__if__t_3_01is__pointer__unref__v_3_01T_01_4_01_4_01_4.html#ae861beac8d831ded758a531461e5937c',1,'proteus::Var&lt; T, std::enable_if_t&lt; is_pointer_unref_v&lt; T &gt; &gt; &gt;::storeValue()'],['../structproteus_1_1Var_3_01T_00_01std_1_1enable__if__t_3_01std_1_1is__array__v_3_01T_01_4_01_4_01_4.html#ad76c86813554c0acaa33c8edfb6888c2',1,'proteus::Var&lt; T, std::enable_if_t&lt; std::is_array_v&lt; T &gt; &gt; &gt;::storeValue()']]],
   ['stringify_65',['STRINGIFY',['../CoreLLVM_8h.html#a6df1d22fb5f09eccc23b9f399670cfd7',1,'CoreLLVM.h']]],
   ['stringify_5fhelper_66',['STRINGIFY_HELPER',['../CoreLLVM_8h.html#a2d743b5950d82c9ca4071ca3217a8315',1,'CoreLLVM.h']]],
-  ['strtocg_67',['strToCG',['../namespaceproteus.html#ae111b3c2d5b0cbfb712dc76a485e5cd2',1,'proteus']]],
-  ['sub_68',['Sub',['../namespaceproteus.html#a3518c876bedf0d51909bb3dca16870b7ae80155eceb940c89e2de63ad05868db2',1,'proteus']]],
-  ['success_69',['success',['../classproteus_1_1LambdaArgVisitor.html#abc8a5b407e12480ea368b1d85f9f90ee',1,'proteus::LambdaArgVisitor::success()'],['../classproteus_1_1LambdaInstUseVisitor.html#a3c2221e638b72d349fb474efa3b10206',1,'proteus::LambdaInstUseVisitor::success()']]],
-  ['suffix_70',['suffix',['../classproteus_1_1KernelName.html#a4eaa974374766e2b3e2048f620a72353',1,'proteus::KernelName']]],
-  ['switch_71',['switch',['../CompilerInterfaceDevice_8cpp.html#af51c07e134b06f6d3010b7210a464615',1,'CompilerInterfaceDevice.cpp']]],
-  ['syncthreads_72',['syncThreads',['../namespaceproteus_1_1builtins_1_1gpu.html#aecd2c6ff1d049982fc7a7c9e399701d7',1,'proteus::builtins::gpu']]]
+  ['stripdebuginfotolinedirectives_67',['stripDebugInfoToLineDirectives',['../namespaceproteus.html#a73d9c2edd3627101256c0c1da7dd693b',1,'proteus']]],
+  ['strtocg_68',['strToCG',['../namespaceproteus.html#ae111b3c2d5b0cbfb712dc76a485e5cd2',1,'proteus']]],
+  ['sub_69',['Sub',['../namespaceproteus.html#a3518c876bedf0d51909bb3dca16870b7ae80155eceb940c89e2de63ad05868db2',1,'proteus']]],
+  ['success_70',['success',['../classproteus_1_1LambdaArgVisitor.html#abc8a5b407e12480ea368b1d85f9f90ee',1,'proteus::LambdaArgVisitor::success()'],['../classproteus_1_1LambdaInstUseVisitor.html#a3c2221e638b72d349fb474efa3b10206',1,'proteus::LambdaInstUseVisitor::success()']]],
+  ['suffix_71',['suffix',['../classproteus_1_1KernelName.html#a4eaa974374766e2b3e2048f620a72353',1,'proteus::KernelName']]],
+  ['switch_72',['switch',['../CompilerInterfaceDevice_8cpp.html#af51c07e134b06f6d3010b7210a464615',1,'CompilerInterfaceDevice.cpp']]],
+  ['syncthreads_73',['syncThreads',['../namespaceproteus_1_1builtins_1_1gpu.html#aecd2c6ff1d049982fc7a7c9e399701d7',1,'proteus::builtins::gpu']]]
 ];
