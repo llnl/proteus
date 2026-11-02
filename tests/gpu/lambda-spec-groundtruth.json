@@ -1,0 +1,170 @@
+{
+  "meta": {
+    "generated": "2026-10-15",
+    "commit": "9cffdd4a",
+    "pipeline": "pseudo-gpu-llvm19",
+    "note": "Baseline of MAIN's analysis over main's lambda suite (branch base 2a8f200a). Captured from the pseudo-GPU device pipeline; re-capture from a ROCm run before treating as hardware ground truth. lambda_dominating_store (ill-formed, unregistered) and lambda_large_warning (stub lacks __syncthreads) produce no decisions."
+  },
+  "tests": {
+    "lambda-two": {
+      "specialize": [
+        "kernel"
+      ],
+      "decline": []
+    },
+    "lambda": {
+      "specialize": [
+        "kernel"
+      ],
+      "decline": []
+    },
+    "lambda_call_shapes": {
+      "specialize": [
+        "kernelSameReturns",
+        "kernelSelectSame"
+      ],
+      "decline": [
+        "makeIndirectBody",
+        "makeReturnBody",
+        "makeSelectSameBody"
+      ]
+    },
+    "lambda_def": {
+      "specialize": [
+        "kernel"
+      ],
+      "decline": []
+    },
+    "lambda_factory": {
+      "specialize": [
+        "kernel"
+      ],
+      "decline": []
+    },
+    "lambda_factory_forwarded": {
+      "specialize": [
+        "kernel"
+      ],
+      "decline": []
+    },
+    "lambda_factory_multi": {
+      "specialize": [],
+      "decline": []
+    },
+    "lambda_factory_so_runner": {
+      "specialize": [],
+      "decline": []
+    },
+    "lambda_factory_tu1": {
+      "specialize": [
+        "_GLOBAL__N_1"
+      ],
+      "decline": []
+    },
+    "lambda_factory_tu2": {
+      "specialize": [
+        "_GLOBAL__N_1"
+      ],
+      "decline": []
+    },
+    "lambda_host_device": {
+      "specialize": [
+        "kernel"
+      ],
+      "decline": []
+    },
+    "lambda_index_first_wrapper": {
+      "specialize": [
+        "kernel"
+      ],
+      "decline": []
+    },
+    "lambda_insertvalue_offsets": {
+      "specialize": [
+        "kernelDoubleShift",
+        "kernelPadded",
+        "kernelShift"
+      ],
+      "decline": []
+    },
+    "lambda_memory_intrinsic_shapes": {
+      "specialize": [
+        "kernelNonoverlapMemset",
+        "kernelOffsetMemmove"
+      ],
+      "decline": [
+        "makeDynamicBody"
+      ]
+    },
+    "lambda_mfem_style_launch": {
+      "specialize": [
+        "MockRajaInterface"
+      ],
+      "decline": []
+    },
+    "lambda_multiple": {
+      "specialize": [
+        "kernel"
+      ],
+      "decline": []
+    },
+    "lambda_pathological": {
+      "specialize": [
+        "kernel_case1",
+        "kernel_case2_a",
+        "kernel_case2_b",
+        "kernel_case4",
+        "kernel_case5"
+      ],
+      "decline": []
+    },
+    "lambda_phi_analysis": {
+      "specialize": [
+        "kernel_phi",
+        "kernel_phi_arg1",
+        "kernel_phi_changed_rc"
+      ],
+      "decline": []
+    },
+    "lambda_pointer_field_load": {
+      "specialize": [
+        "kernelPointerFieldLoad"
+      ],
+      "decline": []
+    },
+    "lambda_provenance_shapes": {
+      "specialize": [
+        "kernelArrayMember",
+        "kernelMemcpySource",
+        "kernelNegativeGep",
+        "kernelOffsetMemcpy",
+        "kernelPartialMemcpy",
+        "kernelReturnedInteriorPointer"
+      ],
+      "decline": []
+    },
+    "lambda_spec_test": {
+      "specialize": [
+        "kernel"
+      ],
+      "decline": []
+    },
+    "lambda_store_order": {
+      "specialize": [
+        "kernelCaptureFromArg",
+        "kernelLatestStore",
+        "kernelStoreOrder"
+      ],
+      "decline": [
+        "makeAmbiguousBody",
+        "makeMutatedBody"
+      ]
+    },
+    "lambda_thread_privatizer": {
+      "specialize": [
+        "kernel_thread_privatizer"
+      ],
+      "decline": []
+    }
+  }
+}

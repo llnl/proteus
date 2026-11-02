@@ -1,0 +1,79 @@
+name: Lambda specialization decisions
+
+# Pseudo-GPU verification of the lambda kernel-arg analysis: compile every
+# lambda GPU test through the real HIP device pipeline (clang -x hip
+# targeting amdgcn) with ProteusPass loaded, on a plain CPU container -- no
+# GPU or ROCm -- and fail on any drift of specialize/decline decisions
+# against tests/gpu/lambda-spec-groundtruth.json.
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/ci-lambda-spec.yml"
+      - "CMakeLists.txt"
+      - "include/**"
+      - "src/**"
+      - "tests/gpu/**"
+      - "tools/lambda-spec-ci/**"
+      - "tools/pseudo-gpu/**"
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/ci-lambda-spec.yml"
+      - "CMakeLists.txt"
+      - "include/**"
+      - "src/**"
+      - "tests/gpu/**"
+      - "tools/lambda-spec-ci/**"
+      - "tools/pseudo-gpu/**"
+
+jobs:
+  lambda-spec:
+    name: pseudo-GPU decision check (LLVM ${{ matrix.llvm }})
+    runs-on: ubuntu-latest
+    container: ubuntu:24.04
+    strategy:
+      matrix:
+        llvm: [19]
+    steps:
+      - name: Install toolchain
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y \
+            wget gnupg software-properties-common cmake ninja-build \
+            python3 git zlib1g-dev
+          wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key \
+            | tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc
+          add-apt-repository -y \
+            "deb http://apt.llvm.org/noble/ llvm-toolchain-noble-${{ matrix.llvm }} main"
+          apt-get update
+          apt-get install -y clang-${{ matrix.llvm }} llvm-${{ matrix.llvm }}-dev \
+            libclang-${{ matrix.llvm }}-dev libzstd-dev libedit-dev libcurl4-openssl-dev
+
+      - uses: actions/checkout@v4
+
+      - name: Build ProteusPass (pseudo-GPU mode)
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER=clang-${{ matrix.llvm }} \
+            -DCMAKE_CXX_COMPILER=clang++-${{ matrix.llvm }} \
+            -DLLVM_INSTALL_DIR=/usr/lib/llvm-${{ matrix.llvm }} \
+            -DPROTEUS_PSEUDO_GPU=ON
+          cmake --build build --target ProteusPass -j "$(nproc)"
+
+      - name: Sweep lambda suite and check decisions
+        run: |
+          bash tools/lambda-spec-ci/run_sweep.sh \
+            clang++-${{ matrix.llvm }} \
+            "$(pwd)/build/src/pass/libProteusPass.so" \
+            "$(pwd)/build/lambda-spec-logs"
+
+      - name: Upload traces on failure
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: lambda-spec-logs-llvm${{ matrix.llvm }}
+          path: build/lambda-spec-logs
+          retention-days: 7
