@@ -60,7 +60,8 @@ atexit.register(lambda: shutil.rmtree(exec_root, ignore_errors=False))
 
 FILECHECK = lit_config.params['FILECHECK']
 config.substitutions.append(('%FILECHECK', FILECHECK))
-config.substitutions.append(('%target_arch', platform.machine()))
+# Linux reports AArch64 as 'aarch64', macOS as 'arm64'; both use the AAPCS64 ABI.
+config.substitutions.append(('%target_arch', {'aarch64': 'arm64'}.get(platform.machine(), platform.machine())))
 config.substitutions.append(('%build', '${CMAKE_CURRENT_BINARY_DIR}'))
 config.substitutions.append(
     ('%LLVM_FP80_CHECK_PREFIX', '${LLVM_FP80_CHECK_PREFIX}'))
