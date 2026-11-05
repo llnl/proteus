@@ -15,6 +15,7 @@
 #include "proteus/impl/GlobalVarInfo.h"
 #include "proteus/impl/LambdaRegistry.h"
 #include "proteus/impl/TransformArgumentSpecialization.h"
+#include "proteus/impl/TransformCollapseCasesSpecialization.h"
 #include "proteus/impl/TransformLambdaSpecialization.h"
 #include "proteus/impl/TransformSharedArray.h"
 
@@ -286,6 +287,7 @@ inline void relinkGlobalsObject(
 inline void specializeIR(
     Module &M, StringRef FnName, StringRef Suffix, dim3 &BlockDim,
     dim3 &GridDim, ArrayRef<RuntimeConstant> RCArray,
+    const VariantSnapshot &Variants,
     const SmallVector<uint64_t> LambdaCalleeInfo,
     const LambdaCallsiteRuntimeConstantsMap &LambdaCallsiteRuntimeConstants,
     bool SpecializeArgs, bool SpecializeDims, bool SpecializeDimsRange,
@@ -305,6 +307,8 @@ inline void specializeIR(
     TransformLambdaSpecialization::transformDeviceKernel(
         M, ID, LambdaCallsiteRuntimeConstants);
   }
+
+  TransformCollapseCasesSpecialization::transform(M, Variants);
 
   // Run the shared array transform after any value specialization (arguments,
   // captures) to propagate any constants.

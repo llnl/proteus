@@ -27,6 +27,7 @@ private:
   dim3 BlockDim;
   dim3 GridDim;
   SmallVector<RuntimeConstant> RCVec;
+  VariantSnapshot Variants;
   SmallVector<uint64_t> LambdaCalleeInfo;
   LambdaCallsiteRuntimeConstantsMap LambdaCallsiteRuntimeConstants;
   std::unordered_map<std::string, GlobalVarInfo> VarNameToGlobalInfo;
@@ -72,6 +73,7 @@ public:
       Dispatcher &Dispatch, MemoryBufferRef Bitcode, HashT HashValue,
       KernelName Name, dim3 BlockDim, dim3 GridDim,
       const SmallVector<RuntimeConstant> &RCVec,
+      const VariantSnapshot &Variants,
       const SmallVector<uint64_t> &LambdaCalleeInfo,
       const LambdaCallsiteRuntimeConstantsMap &LambdaCallsiteRuntimeConstants,
       const std::unordered_map<std::string, GlobalVarInfo> &VarNameToGlobalInfo,
@@ -79,7 +81,7 @@ public:
       bool RelinkGlobalsByCopy)
       : Dispatch(&Dispatch), Bitcode(Bitcode), HashValue(HashValue),
         Name(std::move(Name)), BlockDim(BlockDim), GridDim(GridDim),
-        RCVec(RCVec), LambdaCalleeInfo(LambdaCalleeInfo),
+        RCVec(RCVec), Variants(Variants), LambdaCalleeInfo(LambdaCalleeInfo),
         LambdaCallsiteRuntimeConstants(LambdaCallsiteRuntimeConstants),
         VarNameToGlobalInfo(VarNameToGlobalInfo), CGConfig(&CGConfig),
         DumpIR(DumpIR), RelinkGlobalsByCopy(RelinkGlobalsByCopy),
@@ -140,7 +142,7 @@ public:
     PROTEUS_DBG(Logger::logfile(HashValue.toString() + ".input.ll", *M));
 
     proteus::specializeIR(*M, Name.base(), Name.suffix(), BlockDim, GridDim,
-                          RCVec, LambdaCalleeInfo,
+                          RCVec, Variants, LambdaCalleeInfo,
                           LambdaCallsiteRuntimeConstants, SpecializeArgs,
                           SpecializeDims, SpecializeDimsRange,
                           SpecializeLaunchBounds, MinBlocksPerSM);
