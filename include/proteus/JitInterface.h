@@ -15,6 +15,7 @@
 
 #include "proteus/CompilerInterfaceTypes.h"
 #include "proteus/Init.h"
+#include "proteus/VariantSource.h"
 
 #include <cassert>
 #include <cstdint>

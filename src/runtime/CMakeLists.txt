@@ -1,4 +1,5 @@
 set(SOURCES
+  VariantRegistry.cpp
   CompilerInterfaceHost.cpp
   CompilerInterfaceRuntimeConstantInfo.cpp
   CompiledLibrary.cpp
