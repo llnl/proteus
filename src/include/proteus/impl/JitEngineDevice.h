@@ -465,12 +465,15 @@ public:
                      LambdaCallsiteRuntimeConstantsMap &LambdaJitValuesMap) {
     TIMESCOPE(JitEngineDevice, getLambdaJitValues);
     LambdaRegistry &LR = LambdaRegistry::instance();
-    auto LaunchInfo = LR.takeDeviceLaunchInfo();
-    if (LaunchInfo.CallsiteRuntimeConstants.empty()) {
-      return;
+    const auto &LaunchInfo = LR.peekDeviceLaunchInfo();
+    if (!LaunchInfo.CallsiteRuntimeConstants.empty()) {
+      LambdaCalleeInfo.assign(LaunchInfo.LambdaCalleeInfo.begin(),
+                              LaunchInfo.LambdaCalleeInfo.end());
+      for (const auto &[CallsiteIndex, RCs] :
+           LaunchInfo.CallsiteRuntimeConstants)
+        LambdaJitValuesMap.try_emplace(CallsiteIndex, RCs);
     }
-    LambdaCalleeInfo = std::move(LaunchInfo.LambdaCalleeInfo);
-    LambdaJitValuesMap = std::move(LaunchInfo.CallsiteRuntimeConstants);
+    LR.clearDeviceLaunchInfo();
   }
 
   void registerVar(void *Handle, const char *VarName, const void *HostAddr,
