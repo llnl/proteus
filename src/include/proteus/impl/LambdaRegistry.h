@@ -110,6 +110,17 @@ public:
     PendingLaunchInfo.CallsiteRuntimeConstants.clear();
   }
 
+  // Valid until takeDeviceLaunchInfo, clearDeviceLaunchInfo or the next launch.
+  const DeviceLaunchInfo &peekDeviceLaunchInfo() const {
+    return currentDeviceLaunchInfo();
+  }
+
+  void clearDeviceLaunchInfo() {
+    auto &CurrentLaunchInfo = currentDeviceLaunchInfo();
+    CurrentLaunchInfo.LambdaCalleeInfo.clear();
+    CurrentLaunchInfo.CallsiteRuntimeConstants.clear();
+  }
+
   DeviceLaunchInfo takeDeviceLaunchInfo() {
     auto &CurrentLaunchInfo = currentDeviceLaunchInfo();
     DeviceLaunchInfo LaunchInfo = std::move(CurrentLaunchInfo);

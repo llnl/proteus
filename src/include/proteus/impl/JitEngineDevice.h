@@ -27,6 +27,7 @@
 #include "proteus/impl/JitEngineInfoRegistry.h"
 #include "proteus/impl/LambdaCallsite.h"
 #include "proteus/impl/LambdaRegistry.h"
+#include "proteus/impl/LaunchMemo.h"
 #include "proteus/impl/TransformLambdaSpecialization.h"
 #include "proteus/impl/Utils.h"
 
@@ -236,6 +237,19 @@ class JITKernelInfo {
   // LambdaFunctorWrapper annotators and thei unique IDs
   std::optional<SmallVector<uint64_t>> LambdaCalleeInfo;
   std::optional<LambdaCallsiteLocationMap> LambdaCallsiteLocationInfo;
+  // Lets warm launches skip hashing and cache lookups.
+  LaunchMemo Memo;
+
+  // Cache statistics count lookups, so tracing them disables the memo.
+  static LaunchMemo
+  makeLaunchMemo(StringRef Name, ArrayRef<RuntimeConstantInfo *> RCInfoArray) {
+    const Config &C = Config::get();
+    if (C.traceCacheStats() || C.traceKernels())
+      return LaunchMemo();
+    const auto &CGConfig = C.getCGConfig(Name);
+    return LaunchMemo(RCInfoArray, CGConfig.specializeDims() ||
+                                       CGConfig.specializeDimsRange());
+  }
 
 public:
   JITKernelInfo(void *Kernel, BinaryInfo &BinInfo, char const *Name,
@@ -243,7 +257,8 @@ public:
       : Kernel(Kernel), Ctx(std::make_unique<LLVMContext>()), Name(Name),
         RCInfoArray(RCInfoArray), ExtractedModule(std::nullopt),
         Bitcode{std::nullopt}, BinInfo(BinInfo), LambdaCalleeInfo(std::nullopt),
-        LambdaCallsiteLocationInfo(std::nullopt) {}
+        LambdaCallsiteLocationInfo(std::nullopt),
+        Memo(makeLaunchMemo(Name, RCInfoArray)) {}
 
   JITKernelInfo() = default;
   void *getKernel() const {
@@ -272,6 +287,8 @@ public:
     StaticHash = hash(Name);
     StaticHash = hashCombine(StaticHash.value(), ModuleHash);
   }
+
+  LaunchMemo &getLaunchMemo() { return Memo; }
 
   bool hasLambdaCalleeInfo() { return LambdaCalleeInfo.has_value(); }
   const auto &getLambdaCalleeInfo() { return LambdaCalleeInfo.value(); }
@@ -493,10 +510,10 @@ public:
 
   std::optional<std::reference_wrapper<JITKernelInfo>>
   getJITKernelInfo(const void *Func) {
-    if (!containsJITKernelInfo(Func)) {
+    auto It = JITKernelInfoMap.find(Func);
+    if (It == JITKernelInfoMap.end())
       return std::nullopt;
-    }
-    return JITKernelInfoMap[Func];
+    return It->second;
   }
 
   HashT getStaticHash(JITKernelInfo &KernelInfo) {
@@ -579,6 +596,21 @@ JitEngineDevice<ImplT>::compileAndRun(
   TIMESCOPE(JitEngineDevice, compileAndRun);
 
   auto &BinInfo = KernelInfo.getBinaryInfo();
+  const auto &CGConfig = Config::get().getCGConfig(KernelInfo.getName());
+
+  LaunchMemo &Memo = KernelInfo.getLaunchMemo();
+  ArrayRef<char> MemoKey;
+  if (Memo.isEnabled()) {
+    MemoKey =
+        Memo.encode(KernelArgs, GridDim, BlockDim, getJITPassPluginGeneration(),
+                    LambdaRegistry::instance().peekDeviceLaunchInfo());
+    if (void *KernelFunc = Memo.lookup(MemoKey)) {
+      LambdaRegistry::instance().clearDeviceLaunchInfo();
+      return launchKernelFunction(
+          reinterpret_cast<KernelFunction_t>(KernelFunc), GridDim, BlockDim,
+          KernelArgs, ShmemSize, Stream);
+    }
+  }
 
   SmallVector<RuntimeConstant> RCVec =
       getRuntimeConstantValues(KernelArgs, KernelInfo.getRCInfoArray());
@@ -586,7 +618,6 @@ JitEngineDevice<ImplT>::compileAndRun(
   SmallVector<uint64_t> LambdaCalleeInfoToSpecialize;
   LambdaCallsiteRuntimeConstantsMap LambdaJitValuesMap;
   getLambdaJitValues(LambdaCalleeInfoToSpecialize, LambdaJitValuesMap);
-  const auto &CGConfig = Config::get().getCGConfig(KernelInfo.getName());
   // Determine the hash based on dimension specialization.  If we do not
   // specialize IR based on grid dimensions, avoid hashing on those to
   // eliminate repeated compilation overhead.
@@ -599,12 +630,18 @@ JitEngineDevice<ImplT>::compileAndRun(
 
   Dispatcher &Dispatch = getDispatcher();
 
-  if (void *KernelFunc =
-          Dispatch.lookupFunction(KernelInfo.getName(), HashValue))
+  auto Launch = [&](void *KernelFunc) {
+    if (Memo.isEnabled())
+      Memo.insert(MemoKey, KernelFunc);
     return static_cast<DeviceError_t>(Dispatch
                                           .launch(KernelFunc, GridDim, BlockDim,
                                                   KernelArgs, ShmemSize, Stream)
                                           .Ret);
+  };
+
+  if (void *KernelFunc =
+          Dispatch.lookupFunction(KernelInfo.getName(), HashValue))
+    return Launch(KernelFunc);
 
   // NOTE: we don't need a suffix to differentiate kernels, each
   // specialization will be in its own module uniquely identify by HashValue.
@@ -619,11 +656,7 @@ JitEngineDevice<ImplT>::compileAndRun(
   };
 
   if (auto CompiledLib = Dispatch.lookupCompiledLibrary(HashValue))
-    return static_cast<DeviceError_t>(Dispatch
-                                          .launch(LoadKernel(*CompiledLib),
-                                                  GridDim, BlockDim, KernelArgs,
-                                                  ShmemSize, Stream)
-                                          .Ret);
+    return Launch(LoadKernel(*CompiledLib));
 
   MemoryBufferRef KernelBitcode = getBitcode(KernelInfo);
   std::unique_ptr<MemoryBuffer> ObjBuf = nullptr;
@@ -681,11 +714,7 @@ JitEngineDevice<ImplT>::compileAndRun(
   CompiledLibrary Library{std::move(ObjBuf)};
   Library.GlobalsRelinked = true;
 
-  return static_cast<DeviceError_t>(Dispatch
-                                        .launch(LoadKernel(Library), GridDim,
-                                                BlockDim, KernelArgs, ShmemSize,
-                                                Stream)
-                                        .Ret);
+  return Launch(LoadKernel(Library));
 }
 
 template <typename ImplT>
