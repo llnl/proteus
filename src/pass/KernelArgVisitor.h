@@ -133,99 +133,6 @@ public:
   auto getOffset() { return Offset; }
 
 private:
-  bool hasPointeeWriter(Argument &A, Instruction &Boundary) {
-    SmallVector<Value *, 8> PointerAliases{&A};
-    SmallPtrSet<Value *, 16> SeenAliases;
-    Function *F = A.getParent();
-    while (!PointerAliases.empty()) {
-      Value *Alias = PointerAliases.pop_back_val();
-      if (!SeenAliases.insert(Alias).second)
-        continue;
-      for (User *U : Alias->users()) {
-        auto *I = dyn_cast<Instruction>(U);
-        if (!I || I->getFunction() != F || I == &Boundary)
-          continue;
-        if (I->getParent() == Boundary.getParent() &&
-            !I->comesBefore(&Boundary))
-          continue;
-
-        if (isa<GetElementPtrInst>(I) || isa<BitCastInst>(I) ||
-            isa<AddrSpaceCastInst>(I) || isa<PHINode>(I) ||
-            isa<SelectInst>(I)) {
-          PointerAliases.push_back(I);
-          continue;
-        }
-        if (auto *SI = dyn_cast<StoreInst>(I)) {
-          // Follow a spilled pointer only through loads for which this exact
-          // store is MemorySSA's reaching definition.
-          if (SI->getValueOperand() == Alias &&
-              SI->getValueOperand()->getType()->isPointerTy() &&
-              isa<AllocaInst>(getUnderlyingObject(SI->getPointerOperand()))) {
-            for (User *SlotUse : SI->getPointerOperand()->users()) {
-              auto *LI = dyn_cast<LoadInst>(SlotUse);
-              if (!LI || !LI->getType()->isPointerTy() ||
-                  LI->getFunction() != F)
-                continue;
-              MemorySSAClobber ReachingDefinition = ClobberOracle->query(*LI);
-              if (ReachingDefinition.Kind ==
-                      MemorySSAClobberKind::Definition &&
-                  ReachingDefinition.ClobberingInstruction == SI)
-                PointerAliases.push_back(LI);
-            }
-            continue;
-          }
-
-          int64_t StoreOffset = 0;
-          Value *StoreBase = GetPointerBaseWithConstantOffset(
-              SI->getPointerOperand(), StoreOffset, DL);
-          if (StoreBase == &A || StoreBase == Alias ||
-              getUnderlyingObject(SI->getPointerOperand()) == &A ||
-              getUnderlyingObject(SI->getPointerOperand()) == Alias)
-            return true;
-          continue;
-        }
-        if (auto *RMW = dyn_cast<AtomicRMWInst>(I)) {
-          Value *Base = getUnderlyingObject(RMW->getPointerOperand());
-          if (Base == &A || Base == Alias)
-            return true;
-          continue;
-        }
-        if (auto *CX = dyn_cast<AtomicCmpXchgInst>(I)) {
-          Value *Base = getUnderlyingObject(CX->getPointerOperand());
-          if (Base == &A || Base == Alias)
-            return true;
-          continue;
-        }
-        if (auto *MI = dyn_cast<MemIntrinsic>(I)) {
-          int64_t DestOffset = 0;
-          Value *DestBase = GetPointerBaseWithConstantOffset(
-              MI->getRawDest(), DestOffset, DL);
-          if (DestBase == &A || DestBase == Alias ||
-              getUnderlyingObject(MI->getRawDest()) == &A ||
-              getUnderlyingObject(MI->getRawDest()) == Alias)
-            return true;
-          continue;
-        }
-        if (auto *CB = dyn_cast<CallBase>(I)) {
-          if (CB->onlyReadsMemory())
-            continue;
-          for (Value *Operand : CB->args()) {
-            if (!Operand->getType()->isPointerTy())
-              continue;
-            int64_t ArgOffset = 0;
-            Value *ArgBase =
-                GetPointerBaseWithConstantOffset(Operand, ArgOffset, DL);
-            if (Operand == Alias || ArgBase == &A || ArgBase == Alias ||
-                getUnderlyingObject(Operand) == &A ||
-                getUnderlyingObject(Operand) == Alias)
-              return true;
-          }
-        }
-      }
-    }
-    return false;
-  }
-
   inline std::optional<LambdaKernelArgAnalysis>
   cloneAndAnalyze(Value *Start, Instruction *MemoryAnalysisPtrUse,
                   int64_t StartOffset) {
@@ -422,8 +329,7 @@ public:
       // Preserve the pointee query only for the initial spill of a formal
       // pointer. A later pointer-slot assignment selects a new source; its
       // formal must not be queried at the old invocation boundary.
-      if (!LI.getType()->isPointerTy() ||
-          !isa<Argument>(Res->DominatingWrite))
+      if (!LI.getType()->isPointerTy() || !isa<Argument>(Res->DominatingWrite))
         FollowingInvocationPointee = false;
       return;
     }
@@ -615,38 +521,28 @@ public:
           << "Visiting argument with parent function = \n"
           << *F << "\n");
 
-    // This argument supplies the closure pointer observed by the invocation.
-    // The prefilter follows pointer spills, and the forward visitor accepts a
-    // source only if MemorySSA selects one of its collected write candidates.
-    if (FollowingInvocationPointee && F == LambdaCB->getFunction() &&
-        Offset >= 0 && hasPointeeWriter(A, *LambdaCB)) {
-      // For a field of an aggregate argument, query the exact pointer the
-      // invocation uses. A prefix at A would include unrelated earlier
-      // lambda calls on neighboring fields.
-      Value *LocationPtr = Offset == 0 ? static_cast<Value *>(&A)
-                                       : LambdaCB->getArgOperand(0);
+    // Let the forward visitor collect argument uses before deciding whether
+    // this frame supplies new closure bytes or provenance continues outward.
+    if (FollowingInvocationPointee && A.getType()->isPointerTy() &&
+        F == LambdaCB->getFunction() && Offset >= 0) {
+      Value *LocationPtr =
+          Offset == 0 ? static_cast<Value *>(&A) : LambdaCB->getArgOperand(0);
       MemoryLocation Location(LocationPtr, LocationSize::precise(FunctorSize));
-      MemorySSAClobber Clobber = ClobberOracle->query(Location, *LambdaCB);
-      if (Clobber.Kind == MemorySSAClobberKind::LiveOnEntry) {
-        // No write in this frame reaches the invocation.
-      } else if (Clobber.Kind == MemorySSAClobberKind::Definition) {
-        auto Res = getDominatingUse(DL, &A, LambdaCB, Offset, LambdaCB,
-                                    ClobberOracle, FunctorSize);
-        if (!Res) {
-          fail();
-          return;
-        }
+      auto Res =
+          getDominatingUse(DL, &A, LambdaCB, Offset, LambdaCB, ClobberOracle,
+                           FunctorSize, std::nullopt, Location);
+      if (!Res) {
+        fail();
+        return;
+      }
+      if (Res->Kind == LambdaPtrUseKind::Definition) {
         WorkList.push_back({Res->DominatingWrite, Res->WriteBoundary});
         Offset -= Res->Offset;
         FollowingInvocationPointee = false;
         return;
-      } else {
-        DEBUG(Logger::logs("proteus-pass")
-              << "[Lambda arg analysis]: Cannot identify one write reaching "
-                 "a direct lambda argument; declining specialization\n");
-        fail();
-        return;
       }
+      // No tracked writer, or MemorySSA proved this frame's writes do not
+      // reach the invocation. Continue to the caller/kernel argument below.
     }
 
     auto ArgNum = A.getArgNo();

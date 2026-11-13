@@ -92,7 +92,8 @@ class FunctionMemorySSAState {
             const Value *Base = getUnderlyingObject(Actual);
             if (Base == Formal) {
               Function *Callee = CB->getCalledFunction();
-              if (!Callee || !readsArgumentPointeeOnly(*Callee, Index, Active)) {
+              if (!Callee ||
+                  !readsArgumentPointeeOnly(*Callee, Index, Active)) {
                 Active.erase(&F);
                 return false;
               }
@@ -161,7 +162,7 @@ bool instructionMayModify(Instruction &I, const MemoryLocation &Location) {
   return isModSet(AA.getModRefInfo(&I, Location));
 }
 
-  bool callCannotModifyTrackedLocal(CallBase &CB,
+bool callCannotModifyTrackedLocal(CallBase &CB,
                                   const MemoryLocation &Location) {
   // Respect any precise memory effects already understood by alias analysis.
   if (!isModSet(AA.getModRefInfo(&CB, Location)))

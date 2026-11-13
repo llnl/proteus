@@ -19,6 +19,7 @@
 #include <llvm/ADT/SmallVector.h>
 #include <llvm/Analysis/AssumptionCache.h>
 #include <llvm/Analysis/BasicAliasAnalysis.h>
+#include <llvm/Analysis/CFG.h>
 #include <llvm/Analysis/MemoryLocation.h>
 #include <llvm/Analysis/MemorySSA.h>
 #include <llvm/Analysis/TargetLibraryInfo.h>
@@ -69,6 +70,14 @@ inline std::optional<uint64_t> getTypeStoreSize(const DataLayout &DL,
   return static_cast<uint64_t>(DL.getTypeStoreSize(Ty));
 }
 
+enum class LambdaPtrUseKind {
+  Definition,
+  // A completed argument-use scan found no writes through the tracked
+  // pointer. This is distinct from a location-wide MemorySSA result.
+  NoTrackedWrite,
+  LiveOnEntry,
+};
+
 struct LambdaPtrUseAnalysis {
   Value *DominatingWrite = nullptr;
   // The instruction that directly consumes DominatingWrite. Keeping this a
@@ -79,6 +88,7 @@ struct LambdaPtrUseAnalysis {
   // Sometimes instructions like ptrtoint --> inttoptr change the layout of
   // the kernel args.
   std::optional<RuntimeConstantType> ChangedRCLayout = std::nullopt;
+  LambdaPtrUseKind Kind = LambdaPtrUseKind::Definition;
 };
 
 // The tracked entity begins Offset bytes from Value and occupies Extent bytes.
@@ -236,6 +246,11 @@ private:
   // the entity reached through the loaded pointer. LambdaArgVisitor supplies
   // that post-load range when those two extents differ.
   std::optional<TrackedRange> LoadedPointerRange;
+  // Only the initial argument frame may finish without selecting a writer.
+  // Once a call is selected, its callee must explain that write as usual.
+  std::optional<MemoryLocation> ArgumentLocation;
+  Instruction *ArgumentBoundary = nullptr;
+  SmallPtrSet<Value *, 8> UnresolvedAliases;
   LambdaPtrUseAnalysis Result;
   DataLayout DL;
   SmallVector<UseAnalysisWorkItem> WorkList;
@@ -284,7 +299,8 @@ public:
   // Data about offset comes from the use-def graph traversal, but information
   // about clobbering comes from the MemorySSA IR.  This phase of the analysis
   // attempts to reconcile the results of the two
-  inline Value *resolveCollectedClobbers() {
+  inline Value *resolveCollectedClobbers(
+      std::optional<MemorySSAClobber> KnownClobber = std::nullopt) {
     if (PotentialClobbers.empty()) {
       fail();
       DEBUG(Logger::logs("proteus-pass")
@@ -322,7 +338,9 @@ public:
     // collected candidates, and every store/transfer candidate covers the
     // tracked byte, so an imprecise anchor can only yield a decline.
     MemorySSAClobber SSAResult;
-    if (auto PreciseLocation = getPreciseTrackedLocation(CommonInfo)) {
+    if (KnownClobber) {
+      SSAResult = *KnownClobber;
+    } else if (auto PreciseLocation = getPreciseTrackedLocation(CommonInfo)) {
       SSAResult = queryLocation(*PreciseLocation, *CommonInfo.UseBoundary);
     } else if (StoreInst *AnchorStore = findSmallestCoveringStore()) {
       SSAResult = queryLocation(MemoryLocation::get(AnchorStore),
@@ -595,14 +613,15 @@ public:
   // Constructor used whenever a NeedsDefUseAnalysis Value is encountered. We
   // need to track where the calling LambdaArgVisitor came in from, so that our
   // analysis does not
-  LambdaInstUseVisitor(Value *PtrBegin, Instruction *SeenUse,
-                       CallBase *LambdaCB, const DataLayout &Dl,
-                       int64_t TargetOff,
-                       std::shared_ptr<MemorySSAClobberOracle> Oracle,
-                       uint64_t EntitySize,
-                       std::optional<TrackedRange> PostLoadRange)
+  LambdaInstUseVisitor(
+      Value *PtrBegin, Instruction *SeenUse, CallBase *LambdaCB,
+      const DataLayout &Dl, int64_t TargetOff,
+      std::shared_ptr<MemorySSAClobberOracle> Oracle, uint64_t EntitySize,
+      std::optional<TrackedRange> PostLoadRange,
+      std::optional<MemoryLocation> ArgumentQuery = std::nullopt)
       : ClobberOracle(std::move(Oracle)), TrackedBase(PtrBegin),
-        LoadedPointerRange(PostLoadRange), DL(Dl) {
+        LoadedPointerRange(PostLoadRange), ArgumentLocation(ArgumentQuery),
+        ArgumentBoundary(ArgumentQuery ? SeenUse : nullptr), DL(Dl) {
     // queryMemorySSA() constructs its MemoryLocation from this range. Populate
     // it before the first query so the cache cannot record a zero-byte query.
     ValueRangeMap[PtrBegin] = {TargetOff, EntitySize};
@@ -634,6 +653,13 @@ public:
   }
   auto getLastDef() { return Def; }
   bool seen(Value *Val) {
+    // Uses after the invocation cannot affect it, unless control flow can
+    // return to it (for example, on the next loop iteration).
+    if (ArgumentLocation)
+      if (auto *I = dyn_cast<Instruction>(Val);
+          I && I->getFunction() == ArgumentBoundary->getFunction() &&
+          !isPotentiallyReachable(I, ArgumentBoundary))
+        return true;
     return NeverVisit.contains(Val) ||
            Seen.contains({Val, Current.ReturnTo.get()});
   }
@@ -900,6 +926,34 @@ public:
   }
 
   void resolveCollectedClobbersAndContinue() {
+    if (ArgumentLocation) {
+      if (!UnresolvedAliases.empty() ||
+          llvm::any_of(OwnedContinuations, [](const auto &Continuation) {
+            return !Continuation->Completed;
+          })) {
+        fail();
+        return;
+      }
+      if (PotentialClobbers.empty()) {
+        // Preserve the argument-use policy: only a completed scan, with no
+        // unsupported or unresolved uses, may report no tracked writes.
+        Result.Kind = LambdaPtrUseKind::NoTrackedWrite;
+        AnalysisSuccess = true;
+        return;
+      }
+      MemorySSAClobber Clobber =
+          queryLocation(*ArgumentLocation, *ArgumentBoundary);
+      ArgumentLocation.reset();
+      if (Clobber.Kind == MemorySSAClobberKind::LiveOnEntry) {
+        Result.Kind = LambdaPtrUseKind::LiveOnEntry;
+        AnalysisSuccess = true;
+        return;
+      }
+      // Reuse the query for candidate reconciliation rather than querying
+      // once in LambdaArgVisitor and again in this visitor.
+      continueFromResolvedClobber(resolveCollectedClobbers(Clobber));
+      return;
+    }
     if (PotentialClobbers.empty() && !ParentClobberCandidateStack.empty() &&
         !ParentClobberCandidateStack.back().empty()) {
       PotentialClobbers = std::move(ParentClobberCandidateStack.back());
@@ -1108,18 +1162,49 @@ public:
     // a stale spill from propagating past a later overwrite.
     if (Stored == Current.LastVal && Stored->getType()->isPointerTy()) {
       auto *Storage = dyn_cast<AllocaInst>(getUnderlyingObject(StoreBase));
-      if (!Storage)
+      if (!Storage) {
+        if (ArgumentLocation)
+          fail(); // An escaped pointer prevents a complete argument-use scan.
         return;
+      }
       if (!ValueRangeMap.contains(Stored)) {
         rangeMapFailure(Stored);
         return;
       }
       ValueRangeMap[StoreBase] = ValueRangeMap[Stored];
       for (User *Usr : StoreBase->users()) {
-        auto *LI = dyn_cast<LoadInst>(Usr);
-        if (!LI || seen(LI))
+        if (seen(Usr))
           continue;
+        auto *LI = dyn_cast<LoadInst>(Usr);
+        if (!LI) {
+          if (ArgumentLocation) {
+            // A helper taking the slot's address could load this pointer and
+            // write through it. The proven-reload walk does not model that
+            // escape, so it cannot certify an empty argument-use collection.
+            auto *OtherStore = dyn_cast<StoreInst>(Usr);
+            auto *II = dyn_cast<IntrinsicInst>(Usr);
+            bool SlotWrite =
+                OtherStore && OtherStore->getPointerOperand() == StoreBase;
+            bool Marker =
+                isa<DbgInfoIntrinsic>(Usr) ||
+                (II && (II->getIntrinsicID() == Intrinsic::lifetime_start ||
+                        II->getIntrinsicID() == Intrinsic::lifetime_end));
+            if (!SlotWrite && !Marker) {
+              fail();
+              return;
+            }
+          }
+          continue;
+        }
         MemorySSAClobber ReachingDefinition = ClobberOracle->query(*LI);
+        if (ArgumentLocation &&
+            (ReachingDefinition.Kind == MemorySSAClobberKind::Phi ||
+             ReachingDefinition.Kind == MemorySSAClobberKind::Unknown ||
+             (ReachingDefinition.Kind == MemorySSAClobberKind::Definition &&
+              !isa<StoreInst>(ReachingDefinition.ClobberingInstruction)))) {
+          fail();
+          return;
+        }
         if (ReachingDefinition.Kind != MemorySSAClobberKind::Definition ||
             ReachingDefinition.ClobberingInstruction != &SI)
           continue;
@@ -1213,6 +1298,12 @@ public:
           II->getIntrinsicID() == Intrinsic::lifetime_end)
         return;
     }
+
+    // Read-only scalar/void calls have no pointer-result edge in the
+    // supported use graph. Aggregate returns may contain pointer aliases.
+    if (CB.onlyReadsMemory() && !CB.getType()->isPointerTy() &&
+        !CB.getType()->isAggregateType())
+      return;
 
     Value *DefBeforeCB = getLastDef();
 
@@ -1315,6 +1406,7 @@ public:
       if (It == ValueRangeMap.end()) {
         // Another incoming use may still be on the visitor worklist. Permit
         // that edge to schedule this PHI again.
+        UnresolvedAliases.insert(&Phi);
         markAsUnseen(&Phi);
         return;
       }
@@ -1329,6 +1421,7 @@ public:
       return;
     }
     ValueRangeMap[&Phi] = *IncomingRange;
+    UnresolvedAliases.erase(&Phi);
     pushBackPointerUsers(&Phi);
   }
 
@@ -1336,6 +1429,7 @@ public:
     auto TrueIt = ValueRangeMap.find(Select.getTrueValue());
     auto FalseIt = ValueRangeMap.find(Select.getFalseValue());
     if (TrueIt == ValueRangeMap.end() || FalseIt == ValueRangeMap.end()) {
+      UnresolvedAliases.insert(&Select);
       markAsUnseen(&Select);
       return;
     }
@@ -1344,6 +1438,7 @@ public:
       return;
     }
     ValueRangeMap[&Select] = TrueIt->second;
+    UnresolvedAliases.erase(&Select);
     pushBackPointerUsers(&Select);
   }
 
@@ -1487,6 +1582,48 @@ public:
     pushBackPointerUsers(&ASC);
   }
 
+  void visitPtrToIntInst(PtrToIntInst &PTI) {
+    Value *Ptr = PTI.getPointerOperand();
+    unsigned BitWidth = PTI.getType()->getIntegerBitWidth();
+    if (Ptr != Current.LastVal || !ValueRangeMap.contains(Ptr) ||
+        DL.isNonIntegralPointerType(Ptr->getType()) ||
+        DL.getPointerSizeInBits(Ptr->getType()->getPointerAddressSpace()) !=
+            BitWidth) {
+      fail();
+      return;
+    }
+
+    // ROCm may lower an address-space change through an exact integer
+    // round trip. Any other use of the integer could alter or leak the
+    // address, so it cannot complete an argument-use scan.
+    for (User *Usr : PTI.users()) {
+      if (seen(Usr))
+        continue;
+      auto *ITP = dyn_cast<IntToPtrInst>(Usr);
+      if (!ITP || ITP->getOperand(0) != &PTI ||
+          DL.isNonIntegralPointerType(ITP->getType()) ||
+          DL.getPointerSizeInBits(ITP->getType()->getPointerAddressSpace()) !=
+              BitWidth) {
+        fail();
+        return;
+      }
+    }
+
+    ValueRangeMap[&PTI] = ValueRangeMap[Ptr];
+    pushBackPointerUsers(&PTI);
+  }
+
+  void visitIntToPtrInst(IntToPtrInst &ITP) {
+    if (ITP.getOperand(0) != Current.LastVal ||
+        !isa<PtrToIntInst>(Current.LastVal) ||
+        !ValueRangeMap.contains(Current.LastVal)) {
+      fail();
+      return;
+    }
+    ValueRangeMap[&ITP] = ValueRangeMap[Current.LastVal];
+    pushBackPointerUsers(&ITP);
+  }
+
   void visitMemIntrinsic(MemIntrinsic &I) {
     // Reaching an intrinsic through its source is a read, not a definition of
     // the tracked memory.
@@ -1604,14 +1741,15 @@ getDominatingUse(const DataLayout &DL, Value *ValueNeedingAnalysis,
                  CallBase *LambdaCB,
                  std::shared_ptr<MemorySSAClobberOracle> ClobberOracle,
                  uint64_t TrackedEntitySize,
-                 std::optional<TrackedRange> PostLoadRange = std::nullopt) {
+                 std::optional<TrackedRange> PostLoadRange = std::nullopt,
+                 std::optional<MemoryLocation> ArgumentQuery = std::nullopt) {
   DEBUG(Logger::logs("proteus-pass")
         << "Beginning PtrUse analysis with offset = " << TargetOffset
         << " entity size = " << TrackedEntitySize << "\n");
 
   LambdaInstUseVisitor Visitor(ValueNeedingAnalysis, UseofPtr, LambdaCB, DL,
                                TargetOffset, std::move(ClobberOracle),
-                               TrackedEntitySize, PostLoadRange);
+                               TrackedEntitySize, PostLoadRange, ArgumentQuery);
   // Analysis loop
   while (!Visitor.success() && !Visitor.failed()) {
     while (!Visitor.empty() && !Visitor.success() && !Visitor.failed()) {
@@ -1653,7 +1791,7 @@ getDominatingUse(const DataLayout &DL, Value *ValueNeedingAnalysis,
     return std::nullopt;
   }
   LambdaPtrUseAnalysis Info = Visitor.getAnalysisResult();
-  if (!Info.DominatingWrite)
+  if (!Info.DominatingWrite && Info.Kind == LambdaPtrUseKind::Definition)
     return std::nullopt;
   DEBUG(Logger::logs("proteus-pass")
         << "  [PTR USE ANALYSIS]: Computed offset " << Info.Offset << "\n");
