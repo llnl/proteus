@@ -586,10 +586,16 @@ private:
         }
       }
 
+      auto optionalMeta =
+          getU64Metadata(FunctorOperator, "proteus.functor_size");
+      if (!optionalMeta)
+        reportFatalError("Internal Proteus Error: Missing metadata on functor "
+                         "size.  Please report this bug.");
       DenseMap<CallBase *, LambdaKernelArgAnalysis> CallBaseToArgOffset;
       // If capture offset analysis fails, the manifest entries above still
       // register the kernels for the unspecialized JIT path.
-      if (!analyzeLambdaUses(M, CallBaseToArgOffset, CBToAnalyze))
+      if (!analyzeLambdaUses(M, CallBaseToArgOffset, CBToAnalyze,
+                             *optionalMeta))
         continue;
 
       for (CallBase *CB : CBToAnalyze) {
