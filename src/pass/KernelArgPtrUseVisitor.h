@@ -1097,6 +1097,8 @@ public:
       pushBack(Usr, V, Current.Frame, Current.UseBoundary, Current.TrackedBase);
   }
 
+  void visitArgument(Argument &A) { pushBackPointerUsers(&A); }
+
   void visitStoreInst(StoreInst &SI) {
     Value *Stored = SI.getValueOperand();
     Value *StoreBase = SI.getPointerOperand();
@@ -1574,13 +1576,10 @@ public:
 
     DEBUG(Logger::logs("proteus-pass")
           << "  [PTR use analysis]: Completed intrinsic analysis " << "\n");
-    // LambdaArgVisitor applies Result.Offset by subtracting it from its
-    // current, destination-relative offset.  The value carried across a
-    // transfer is therefore the difference between the destination and
-    // source bases, rather than the source's absolute offset.  For example,
-    // copying a field at byte 8 into a field at byte 24 needs a correction of
-    // 16, so the caller turns 24 into 8.
-    int64_t OffsetCorrection = DstOff - SrcOff;
+    // Express the destination displacement in the visitor root's frame.
+    // A callee formal may already denote a displaced field of that root.
+    int64_t OffsetCorrection =
+        (ValueRangeMap[TrackedBase].Offset - Range.Offset) - SrcOff;
     noteTrackedWrite();
     PotentialClobbers.push_back(
         {.WriteCandidate = &I,
@@ -1626,7 +1625,7 @@ getDominatingUse(const DataLayout &DL, Value *ValueNeedingAnalysis,
       }
       Visitor.markAsSeen(V);
 
-      // Analyze the instruction
+      // An argument can also be the root of a pointer-use walk.
       if (auto *I = dyn_cast<Instruction>(V)) {
         if (auto *LastI = dyn_cast_or_null<Instruction>(CurWorkItem.LastVal);
             LastI && LastI->getFunction() != I->getFunction())
@@ -1638,7 +1637,8 @@ getDominatingUse(const DataLayout &DL, Value *ValueNeedingAnalysis,
         DEBUG(Logger::logs("proteus-pass")
               << "  [PTR use analysis]: Visiting ptr use " << *V << "\n");
         Visitor.visit(*I);
-      }
+      } else if (auto *A = dyn_cast<Argument>(V))
+        Visitor.visitArgument(*A);
       Visitor.finishCurrentWorkItem();
     }
 

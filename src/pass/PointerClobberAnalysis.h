@@ -12,11 +12,11 @@
 #include <llvm/Analysis/TypeBasedAliasAnalysis.h>
 #include <llvm/Analysis/ValueTracking.h>
 #include <llvm/Config/llvm-config.h>
-#include <llvm/IR/CFG.h>
 #include <llvm/IR/Dominators.h>
 #include <llvm/IR/Function.h>
 #include <llvm/IR/Instruction.h>
 #include <llvm/IR/Instructions.h>
+#include <llvm/IR/IntrinsicInst.h>
 #include <llvm/TargetParser/Triple.h>
 
 #include <memory>
@@ -51,6 +51,67 @@ class FunctionMemorySSAState {
   BasicAAResult BAA;
   TypeBasedAAResult TBAA;
   std::unique_ptr<MemorySSA> MSSA;
+
+  // Prove that a wrapper invocation never writes through its closure
+  // argument. MemorySSA otherwise treats an earlier invocation on one field
+  // of an aggregate as a possible write to the next field.
+  static bool readsArgumentPointeeOnly(Function &F, unsigned ArgNo,
+                                       SmallPtrSetImpl<Function *> &Active) {
+    if (F.isDeclaration() || ArgNo >= F.arg_size() || !Active.insert(&F).second)
+      return false;
+    Argument *Formal = F.getArg(ArgNo);
+    for (BasicBlock &BB : F) {
+      for (Instruction &I : BB) {
+        if (auto *SI = dyn_cast<StoreInst>(&I)) {
+          const Value *DestBase = getUnderlyingObject(SI->getPointerOperand());
+          if (!isa<AllocaInst>(DestBase) ||
+              (SI->getValueOperand()->getType()->isPointerTy() &&
+               getUnderlyingObject(SI->getValueOperand()) == Formal)) {
+            Active.erase(&F);
+            return false;
+          }
+          continue;
+        }
+        if (auto *MI = dyn_cast<MemIntrinsic>(&I)) {
+          const Value *DestBase = getUnderlyingObject(MI->getRawDest());
+          if (!isa<AllocaInst>(DestBase)) {
+            Active.erase(&F);
+            return false;
+          }
+          continue;
+        }
+        if (auto *CB = dyn_cast<CallBase>(&I)) {
+          if (CB->isInlineAsm()) {
+            Active.erase(&F);
+            return false;
+          }
+          for (unsigned Index = 0; Index < CB->arg_size(); ++Index) {
+            Value *Actual = CB->getArgOperand(Index);
+            if (!Actual->getType()->isPointerTy())
+              continue;
+            const Value *Base = getUnderlyingObject(Actual);
+            if (Base == Formal) {
+              Function *Callee = CB->getCalledFunction();
+              if (!Callee || !readsArgumentPointeeOnly(*Callee, Index, Active)) {
+                Active.erase(&F);
+                return false;
+              }
+            } else if (isa<LoadInst>(Base) || isa<Argument>(Base)) {
+              Active.erase(&F);
+              return false;
+            }
+          }
+          continue;
+        }
+        if (I.mayWriteToMemory()) {
+          Active.erase(&F);
+          return false;
+        }
+      }
+    }
+    Active.erase(&F);
+    return true;
+  }
 
 public:
   explicit FunctionMemorySSAState(Function &F)
@@ -100,7 +161,7 @@ bool instructionMayModify(Instruction &I, const MemoryLocation &Location) {
   return isModSet(AA.getModRefInfo(&I, Location));
 }
 
-bool callCannotModifyTrackedLocal(CallBase &CB,
+  bool callCannotModifyTrackedLocal(CallBase &CB,
                                   const MemoryLocation &Location) {
   // Respect any precise memory effects already understood by alias analysis.
   if (!isModSet(AA.getModRefInfo(&CB, Location)))
@@ -147,6 +208,15 @@ bool callCannotModifyTrackedLocal(CallBase &CB,
 #endif
                                      &CB, &DT, /*IncludeI=*/false);
 }
+
+bool wrapperCallOnlyReadsClosure(CallBase &CB) {
+  Function *Callee = CB.getCalledFunction();
+  if (!Callee || !Callee->hasMetadata("proteus.wrapper_call") ||
+      CB.arg_size() != 1)
+    return false;
+  SmallPtrSet<Function *, 8> Active;
+  return readsArgumentPointeeOnly(*Callee, 0, Active);
+}
 }; // namespace proteus
 
 enum class MemorySSAClobberKind {
@@ -189,25 +259,36 @@ class MemorySSAClobberOracle {
     return *State;
   }
 
-  static MemoryAccess *
-  getStateBefore(MemorySSA &MSSA, Instruction &Boundary,
-                 SmallPtrSetImpl<BasicBlock *> &VisitedBlocks) {
+  static MemoryAccess *getStateBefore(MemorySSA &MSSA, Instruction &Boundary) {
+    BasicBlock *BB = Boundary.getParent();
+    DominatorTree &DT = MSSA.getDomTree();
+    if (!DT.isReachableFromEntry(BB))
+      return nullptr;
+
     if (auto *BoundaryAccess =
             dyn_cast_or_null<MemoryUseOrDef>(MSSA.getMemoryAccess(&Boundary)))
       return BoundaryAccess->getDefiningAccess();
 
-    for (Instruction *I = Boundary.getPrevNode(); I; I = I->getPrevNode())
-      if (auto *Def = dyn_cast_or_null<MemoryDef>(MSSA.getMemoryAccess(I)))
-        return Def;
+    Instruction *Last = Boundary.getPrevNode();
+    while (true) {
+      for (Instruction *I = Last; I; I = I->getPrevNode())
+        if (auto *Def = dyn_cast_or_null<MemoryDef>(MSSA.getMemoryAccess(I)))
+          return Def;
 
-    BasicBlock *BB = Boundary.getParent();
-    if (MemoryPhi *Phi = MSSA.getMemoryAccess(BB))
-      return Phi;
-    if (!VisitedBlocks.insert(BB).second || pred_empty(BB))
-      return MSSA.getLiveOnEntryDef();
-    if (BasicBlock *Pred = BB->getSinglePredecessor())
-      return getStateBefore(MSSA, *Pred->getTerminator(), VisitedBlocks);
-    return MSSA.getLiveOnEntryDef();
+      if (MemoryPhi *Phi = MSSA.getMemoryAccess(BB))
+        return Phi;
+      if (BB == &BB->getParent()->getEntryBlock())
+        return MSSA.getLiveOnEntryDef();
+
+      // Without a MemoryPhi, the block inherits the memory state from its
+      // immediate dominator, even when it has multiple predecessors. Inspect
+      // the dominator's outgoing state, including a memory-defining terminator.
+      auto *Node = DT.getNode(BB);
+      if (!Node || !Node->getIDom())
+        return nullptr;
+      BB = Node->getIDom()->getBlock();
+      Last = BB->getTerminator();
+    }
   }
 
 public:
@@ -215,8 +296,7 @@ public:
                          Instruction &UseBoundary) {
     FunctionMemorySSAState &State = getState(*UseBoundary.getFunction());
     MemorySSA &MSSA = State.getMemorySSA();
-    SmallPtrSet<BasicBlock *, 8> VisitedBlocks;
-    MemoryAccess *Before = getStateBefore(MSSA, UseBoundary, VisitedBlocks);
+    MemoryAccess *Before = getStateBefore(MSSA, UseBoundary);
     if (!Before)
       return {};
 
@@ -245,7 +325,8 @@ public:
     // clobber walk from the state immediately preceding the call.
     while (auto *Def = dyn_cast_or_null<MemoryDef>(Clobber)) {
       auto *CB = dyn_cast_or_null<CallBase>(Def->getMemoryInst());
-      if (!CB || !State.callCannotModifyTrackedLocal(*CB, Location))
+      if (!CB || (!State.callCannotModifyTrackedLocal(*CB, Location) &&
+                  !State.wrapperCallOnlyReadsClosure(*CB)))
         break;
       Clobber = FindClobber(Def->getDefiningAccess());
     }

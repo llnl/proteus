@@ -303,6 +303,9 @@ CREATE_GPU_TEST_RDC(lambda_declaration_clobber lambda_declaration_clobber.cpp
                     lambda_unknown_clobber_decl.cpp)
 CREATE_GPU_TEST(lambda_inst_visitor_call_clobber lambda_inst_visitor_call_clobber.cpp)
 CREATE_GPU_TEST(lambda_pointee_overwrite lambda_pointee_overwrite.cpp)
+CREATE_GPU_TEST(lambda_argument_helper_overwrite
+                lambda_argument_helper_overwrite.cpp)
+CREATE_GPU_TEST(lambda_argument_write_order lambda_argument_write_order.cpp)
 CREATE_GPU_TEST(lambda_displaced_helper_memcpy lambda_displaced_helper_memcpy.cpp)
 CREATE_GPU_TEST(lambda_callee_join_no_phi lambda_callee_join_no_phi.cpp)
 CREATE_PROTEUS_GPU_SHARED_LIBRARY(lambda_factory_so_tu1 lambda_factory_tu1.cpp)
