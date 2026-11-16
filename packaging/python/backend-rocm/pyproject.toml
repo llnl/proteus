@@ -11,7 +11,7 @@ name = "proteus-python-backend-rocm72"
 dynamic = ["version"]
 description = "ROCm backend wheel for Proteus Python"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 license = "Apache-2.0 WITH LLVM-exception"
 authors = [
   { name = "Giorgis Georgakoudis" },
@@ -21,7 +21,6 @@ classifiers = [
   "Intended Audience :: Developers",
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3 :: Only",
-  "Programming Language :: Python :: 3.10",
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
   "Programming Language :: Python :: 3.13",
