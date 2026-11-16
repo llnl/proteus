@@ -154,7 +154,7 @@ jobs:
         env:
           CIBW_ARCHS_LINUX: x86_64
           CIBW_ARCHS_MACOS: arm64
-          CIBW_BUILD: "cp310-* cp311-* cp312-* cp313-* cp314-*"
+          CIBW_BUILD: "cp311-* cp312-* cp313-* cp314-*"
           CIBW_SKIP: "*-musllinux_* cp31?t-*"
           CIBW_MANYLINUX_X86_64_IMAGE: ${{ format('{0}:{1}', env.PROTEUS_MANYLINUX_LLVM_IMAGE_REPO, env.PROTEUS_LLVM_VERSION) }}
           CIBW_BEFORE_ALL_MACOS: brew install llvm@${{ env.PROTEUS_LLVM_MAJOR }}
@@ -252,7 +252,7 @@ jobs:
       - name: Build CUDA backend wheels
         env:
           CIBW_ARCHS_LINUX: x86_64
-          CIBW_BUILD: "cp310-* cp311-* cp312-* cp313-* cp314-*"
+          CIBW_BUILD: "cp311-* cp312-* cp313-* cp314-*"
           CIBW_SKIP: "*-musllinux_* cp31?t-*"
           CIBW_MANYLINUX_X86_64_IMAGE: proteus-manylinux-cuda-local:${{ github.run_id }}-${{ github.run_attempt }}
           CIBW_BUILD_VERBOSITY: 1
@@ -344,7 +344,7 @@ jobs:
       - name: Build ROCm backend wheels
         env:
           CIBW_ARCHS_LINUX: x86_64
-          CIBW_BUILD: "cp310-* cp311-* cp312-* cp313-* cp314-*"
+          CIBW_BUILD: "cp311-* cp312-* cp313-* cp314-*"
           CIBW_SKIP: "*-musllinux_* cp31?t-*"
           CIBW_MANYLINUX_X86_64_IMAGE: proteus-manylinux-rocm-local:${{ github.run_id }}-${{ github.run_attempt }}
           CIBW_BUILD_VERBOSITY: 1
