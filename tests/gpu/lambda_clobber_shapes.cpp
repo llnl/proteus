@@ -433,6 +433,8 @@ int main() {
 // CHECK: [LambdaSpec] Replacing slot 0 with i32 367
 // CHECK: local after call clobber 367
 // CHECK: [KernelConfig] ID:{{.*}}kernelUnrelatedCallOverwrite
-// CHECK-NOT: [LambdaSpec]
+// The helper writes a distinct local pointer slot. The call-write proof can
+// now establish that it leaves the invoked closure unchanged.
+// CHECK: [LambdaSpec] Replacing slot 0 with i32 379
 // CHECK: unrelated call clobber 379
 // clang-format on

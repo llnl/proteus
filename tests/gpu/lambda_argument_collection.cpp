@@ -17,7 +17,7 @@ readCapture(const F *Body) {
 
 // The scan must finish successfully without a writer: the read-only call
 // precedes the invocation, while the memset cannot reach it. The unrelated
-// printf also must not turn an empty argument-use collection into a decline.
+// printf also must be proven not to modify the closure for specialization.
 template <typename F>
 __device__ __attribute__((noinline, optnone)) static void
 invokeBeforeWrite(F *Target) {
@@ -49,7 +49,7 @@ kernelArgumentOpaqueUse(F Body) {
 
 // The forward walk reaches a select with an untracked incoming pointer. It
 // cannot follow that alias to its memcpy, so the unfinished alias must block
-// a NoTrackedWrite result rather than expose Initial's stale capture.
+// successful outward continuation rather than expose Initial's stale capture.
 template <typename F>
 __device__ __attribute__((noinline, optnone)) static void
 invokeAfterSelectedWrite(F *Target, F *Other, const F *Replacement, bool Flag) {

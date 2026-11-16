@@ -16,6 +16,7 @@
 #include <llvm/ADT/SmallPtrSet.h>
 #include <llvm/ADT/SmallVector.h>
 
+#include <limits>
 #include <llvm/Analysis/ValueTracking.h>
 #include <llvm/IR/CFG.h>
 #include <llvm/IR/Constants.h>
@@ -78,10 +79,21 @@ private:
   // The size of the struct, a pointer to this is passed to the call operator
   uint64_t FunctorSize;
   int64_t Offset;
-  // Only the pointer feeding the invocation needs a pointee-write query.
-  // Once a write supplies new closure bytes, its source is a separate
-  // provenance path and must not be queried at the invocation boundary.
+  // Query a pointer's pointee at the use that consumes its closure bytes.
+  // A memory transfer starts a new such history at its source; ordinary
+  // SSA value transfers do not.
   bool FollowingInvocationPointee = true;
+  // The byte-consuming use can be later than the SSA use that introduced a
+  // pointer (for example, an early spill of a formal followed by memcpy).
+  Instruction *PointeeUseBoundary = nullptr;
+  // A live-on-entry pointer load starts a distinct history for the pointer's
+  // storage. Restore the pointed-to entity when that history reaches a store.
+  struct PendingPointee {
+    TrackedRange Range;
+    Instruction *UseBoundary;
+    bool TrackPointee;
+  };
+  SmallVector<PendingPointee, 2> PendingPointees;
   uint32_t KernelArg = 0;
   Function *KernelFunction = nullptr;
   // instructions like inttoptr can change the runtimeconstant type
@@ -146,6 +158,8 @@ private:
                              DL, ClobberOracle, FunctorSize);
     Visitor.AnalysisDepth = AnalysisDepth + 1;
     Visitor.FollowingInvocationPointee = FollowingInvocationPointee;
+    Visitor.PointeeUseBoundary = PointeeUseBoundary;
+    Visitor.PendingPointees = PendingPointees;
     while (!Visitor.empty() && !Visitor.success() && !Visitor.failed()) {
       auto [V, AccessedFrom] = Visitor.back();
       Visitor.MemoryAnalysisPtrUse = AccessedFrom;
@@ -192,6 +206,10 @@ private:
                              MemoryAnalysisPtrUse, LambdaCB, StartOffset, DL,
                              ClobberOracle, FunctorSize);
     Visitor.AnalysisDepth = AnalysisDepth + 1;
+    // This sub-analysis recovers the returned pointer's identity. Its caller
+    // subsequently checks the mapped pointee at the original consuming use,
+    // including this call's writes; do not query caller memory in this frame.
+    Visitor.FollowingInvocationPointee = false;
     while (!Visitor.empty() && !Visitor.success() && !Visitor.failed()) {
       auto [V, AccessedFrom] = Visitor.back();
       DEBUG(Logger::logs("proteus-pass")
@@ -230,7 +248,7 @@ public:
   LambdaArgVisitor(CallBase *LambdaCB, Module &M, uint64_t FunctorSize_)
       : LambdaCB(LambdaCB), DL(M.getDataLayout()),
         ClobberOracle(std::make_shared<MemorySSAClobberOracle>()),
-        FunctorSize(FunctorSize_), Offset(0) {
+        FunctorSize(FunctorSize_), Offset(0), PointeeUseBoundary(LambdaCB) {
 
     auto *ClosurePtr = LambdaCB->getArgOperand(0);
     WorkList.push_back({ClosurePtr, LambdaCB});
@@ -269,6 +287,26 @@ public:
     DEBUG(Logger::logs("proteus-pass") << "Load inst analysis \n")
     MemorySSAClobber Clobber = ClobberOracle->query(LI);
     if (Clobber.Kind == MemorySSAClobberKind::LiveOnEntry) {
+      if (LI.getType()->isPointerTy() && FollowingInvocationPointee) {
+        // First discharge this frame's writes to the pointee. Following the
+        // address below resolves different bytes: the stored pointer itself.
+        if (!PointeeUseBoundary ||
+            PointeeUseBoundary->getFunction() != LI.getFunction() ||
+            Offset < 0 ||
+            static_cast<uint64_t>(Offset) > UINT64_MAX - FunctorSize ||
+            ClobberOracle
+                    ->query(MemoryLocation(&LI, LocationSize::precise(
+                                                    Offset + FunctorSize)),
+                            *PointeeUseBoundary)
+                    .Kind != MemorySSAClobberKind::LiveOnEntry) {
+          fail();
+          return;
+        }
+        PendingPointees.push_back({{Offset, FunctorSize}, nullptr, true});
+        Offset = 0;
+        FunctorSize = DL.getPointerTypeSize(LI.getType());
+        PointeeUseBoundary = &LI;
+      }
       DEBUG(Logger::logs("proteus-pass")
             << "[Lambda arg analysis]: Load reads live-on-entry memory; "
                "continuing from its address\n");
@@ -326,11 +364,19 @@ public:
 
       WorkList.push_back({Res->DominatingWrite, Res->WriteBoundary});
       Offset = OriginalOffset + AddressOffset - Res->Offset;
-      // Preserve the pointee query only for the initial spill of a formal
-      // pointer. A later pointer-slot assignment selects a new source; its
-      // formal must not be queried at the old invocation boundary.
-      if (!LI.getType()->isPointerTy() || !isa<Argument>(Res->DominatingWrite))
+      if (isa<MemTransferInst>(Res->WriteBoundary)) {
+        if (LI.getType()->isPointerTy()) {
+          PendingPointees.push_back({{OriginalOffset, FunctorSize},
+                                     PointeeUseBoundary,
+                                     FollowingInvocationPointee});
+          FunctorSize = QueryEntitySize;
+          Offset = AddressOffset - Res->Offset;
+        }
+        FollowingInvocationPointee = true;
+        PointeeUseBoundary = Res->WriteBoundary;
+      } else if (!LI.getType()->isPointerTy()) {
         FollowingInvocationPointee = false;
+      }
       return;
     }
 
@@ -398,32 +444,54 @@ public:
     fail();
   }
 
-  // todo: these three methods need to be changed to find a dominating store
+  Instruction *memoryBoundary() const {
+    return FollowingInvocationPointee ? PointeeUseBoundary
+                                      : MemoryAnalysisPtrUse;
+  }
+
+  void restoreStoredPointee(const LambdaPtrUseAnalysis &Res) {
+    if (PendingPointees.empty() || !isa<StoreInst>(Res.WriteBoundary) ||
+        !Res.DominatingWrite->getType()->isPointerTy())
+      return;
+    PendingPointee Pointee = PendingPointees.pop_back_val();
+    Offset += Pointee.Range.Offset;
+    FunctorSize = Pointee.Range.Extent;
+    FollowingInvocationPointee = Pointee.TrackPointee;
+    if (Pointee.UseBoundary)
+      PointeeUseBoundary = Pointee.UseBoundary;
+  }
+
   void visitAllocaInst(AllocaInst &Alloca) {
-    auto Res = getDominatingUse(DL, &Alloca, MemoryAnalysisPtrUse, Offset,
-                                LambdaCB, ClobberOracle, FunctorSize);
+    auto Res = getDominatingUse(DL, &Alloca, memoryBoundary(), Offset, LambdaCB,
+                                ClobberOracle, FunctorSize);
     if (!Res)
       return;
 
     WorkList.push_back({Res->DominatingWrite, Res->WriteBoundary});
-    FollowingInvocationPointee = false;
+    FollowingInvocationPointee = isa<MemTransferInst>(Res->WriteBoundary);
+    if (FollowingInvocationPointee)
+      PointeeUseBoundary = Res->WriteBoundary;
     // Res->Offset converts the current allocation-relative byte offset into
     // the coordinate system of DominatingWrite. For a field store it removes
     // the field displacement; for a memory transfer it translates destination
     // displacement into the corresponding source displacement.
     Offset -= Res->Offset;
+    restoreStoredPointee(*Res);
   }
 
   void visitBitCastInst(BitCastInst &BC) {
-    auto Res = getDominatingUse(DL, &BC, MemoryAnalysisPtrUse, Offset, LambdaCB,
+    auto Res = getDominatingUse(DL, &BC, memoryBoundary(), Offset, LambdaCB,
                                 ClobberOracle, FunctorSize);
     if (!Res)
       return;
     WorkList.push_back({Res->DominatingWrite, Res->WriteBoundary});
-    FollowingInvocationPointee = false;
+    FollowingInvocationPointee = isa<MemTransferInst>(Res->WriteBoundary);
+    if (FollowingInvocationPointee)
+      PointeeUseBoundary = Res->WriteBoundary;
     // Res->Offset converts the current cast-relative byte offset into the
     // coordinate system of DominatingWrite.
     Offset -= Res->Offset;
+    restoreStoredPointee(*Res);
   }
 
   void visitAddrSpaceCastInst(AddrSpaceCastInst &ASC) {
@@ -446,16 +514,19 @@ public:
             dyn_cast<AllocaInst>(getUnderlyingObject(ASC.getPointerOperand())))
       AnalysisBase = Alloca;
 
-    auto Res = getDominatingUse(DL, AnalysisBase, MemoryAnalysisPtrUse, Offset,
+    auto Res = getDominatingUse(DL, AnalysisBase, memoryBoundary(), Offset,
                                 LambdaCB, ClobberOracle, FunctorSize);
     if (!Res)
       return;
 
     WorkList.push_back({Res->DominatingWrite, Res->WriteBoundary});
-    FollowingInvocationPointee = false;
+    FollowingInvocationPointee = isa<MemTransferInst>(Res->WriteBoundary);
+    if (FollowingInvocationPointee)
+      PointeeUseBoundary = Res->WriteBoundary;
     // Res->Offset converts the current cast-relative byte offset into the
     // coordinate system of DominatingWrite.
     Offset -= Res->Offset;
+    restoreStoredPointee(*Res);
   }
 
   void visitIntToPtr(IntToPtrInst &ITP) {
@@ -502,7 +573,8 @@ public:
     }
 
     WorkList.push_back({SrcBase->stripPointerCasts(), &I});
-    FollowingInvocationPointee = false;
+    FollowingInvocationPointee = true;
+    PointeeUseBoundary = &I;
     Offset = Offset - DstOff + SrcOff;
   }
 
@@ -521,16 +593,25 @@ public:
           << "Visiting argument with parent function = \n"
           << *F << "\n");
 
-    // Let the forward visitor collect argument uses before deciding whether
-    // this frame supplies new closure bytes or provenance continues outward.
+    // Before crossing this frame, validate its complete memory history at
+    // the use of these bytes, even when the forward scan finds no writer.
+    bool InPointeeFrame =
+        PointeeUseBoundary && PointeeUseBoundary->getFunction() == F;
     if (FollowingInvocationPointee && A.getType()->isPointerTy() &&
-        F == LambdaCB->getFunction() && Offset >= 0) {
-      Value *LocationPtr =
-          Offset == 0 ? static_cast<Value *>(&A) : LambdaCB->getArgOperand(0);
-      MemoryLocation Location(LocationPtr, LocationSize::precise(FunctorSize));
+        InPointeeFrame) {
+      if (Offset < 0 ||
+          static_cast<uint64_t>(Offset) >
+              std::numeric_limits<uint64_t>::max() - FunctorSize) {
+        fail();
+        return;
+      }
+      // Cover the argument-relative range. The invocation operand can denote
+      // a loaded pointer rather than this argument's storage.
+      uint64_t LocationSize = static_cast<uint64_t>(Offset) + FunctorSize;
+      MemoryLocation Location(&A, llvm::LocationSize::precise(LocationSize));
       auto Res =
-          getDominatingUse(DL, &A, LambdaCB, Offset, LambdaCB, ClobberOracle,
-                           FunctorSize, std::nullopt, Location);
+          getDominatingUse(DL, &A, PointeeUseBoundary, Offset, LambdaCB,
+                           ClobberOracle, FunctorSize, std::nullopt, Location);
       if (!Res) {
         fail();
         return;
@@ -538,11 +619,14 @@ public:
       if (Res->Kind == LambdaPtrUseKind::Definition) {
         WorkList.push_back({Res->DominatingWrite, Res->WriteBoundary});
         Offset -= Res->Offset;
-        FollowingInvocationPointee = false;
+        FollowingInvocationPointee = isa<MemTransferInst>(Res->WriteBoundary);
+        if (FollowingInvocationPointee)
+          PointeeUseBoundary = Res->WriteBoundary;
+        restoreStoredPointee(*Res);
         return;
       }
-      // No tracked writer, or MemorySSA proved this frame's writes do not
-      // reach the invocation. Continue to the caller/kernel argument below.
+      // MemorySSA proved that no write in this frame reaches the use that
+      // consumes these bytes. Continue to the caller/kernel argument below.
     }
 
     auto ArgNum = A.getArgNo();
@@ -554,6 +638,11 @@ public:
         (F->hasMetadata("proteus.jit") &&
          !F->hasMetadata("proteus.wrapper_call") &&
          !F->hasMetadata("proteus.registered_lambda"))) {
+      if (!PendingPointees.empty() ||
+          (FollowingInvocationPointee && !InPointeeFrame)) {
+        fail();
+        return;
+      }
       DEBUG(Logger::logs("proteus-pass")
             << "Found termination case from function " << F->getName() << "\n");
       DEBUG(Logger::logs("proteus-pass").flush());
@@ -593,6 +682,11 @@ public:
     }
 
     CallBase *CB = CallSites.front();
+    // A pointer-slot definition may supply a formal from a nested writer.
+    // Project it back into the consuming frame before querying its pointee.
+    // That query includes the writer call, so its effects are not skipped.
+    if (FollowingInvocationPointee && InPointeeFrame)
+      PointeeUseBoundary = CB;
     DEBUG(Logger::logs("proteus-pass")
           << "Analysis crossed interprocedural boundary at "
           << *CB->getArgOperand(ArgNum) << "\n");

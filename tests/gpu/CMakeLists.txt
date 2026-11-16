@@ -307,6 +307,20 @@ CREATE_GPU_TEST(lambda_argument_helper_overwrite
                 lambda_argument_helper_overwrite.cpp)
 CREATE_GPU_TEST(lambda_argument_write_order lambda_argument_write_order.cpp)
 CREATE_GPU_TEST(lambda_argument_collection lambda_argument_collection.cpp)
+CREATE_GPU_TEST(lambda_unrelated_arithmetic lambda_unrelated_arithmetic.cpp)
+CREATE_GPU_TEST(lambda_arithmetic_argument lambda_arithmetic_argument.cpp)
+foreach(test IN ITEMS lambda_alias_argument lambda_source_history
+                      lambda_caller_history lambda_global_callback
+                      lambda_pointer_history lambda_hidden_call_writes
+                      lambda_print_context)
+    CREATE_GPU_TEST(${test} ${test}.cpp)
+    # These regressions use legal whole-object copies. Keep the frontend
+    # contract in error mode so future diagnostics cannot silently exclude them.
+    get_target_property(strict_options ${test}.${lang} COMPILE_OPTIONS)
+    list(REMOVE_ITEM strict_options
+         "SHELL:-Xclang -plugin-arg-proteus-lambda-checker -Xclang -contract-warn")
+    set_property(TARGET ${test}.${lang} PROPERTY COMPILE_OPTIONS "${strict_options}")
+endforeach()
 CREATE_GPU_TEST(lambda_displaced_helper_memcpy lambda_displaced_helper_memcpy.cpp)
 CREATE_GPU_TEST(lambda_callee_join_no_phi lambda_callee_join_no_phi.cpp)
 CREATE_PROTEUS_GPU_SHARED_LIBRARY(lambda_factory_so_tu1 lambda_factory_tu1.cpp)

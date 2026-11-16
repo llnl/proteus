@@ -72,9 +72,6 @@ inline std::optional<uint64_t> getTypeStoreSize(const DataLayout &DL,
 
 enum class LambdaPtrUseKind {
   Definition,
-  // A completed argument-use scan found no writes through the tracked
-  // pointer. This is distinct from a location-wide MemorySSA result.
-  NoTrackedWrite,
   LiveOnEntry,
 };
 
@@ -185,6 +182,7 @@ struct ReturnContinuation {
   bool SawTrackedWrite = false;
   bool Completed = false;
   std::optional<TrackedRange> ReturnedRange;
+  DenseMap<Value *, TrackedRange> Ranges;
 };
 
 // The basic unit of work on this analysis is a use--an edge connecting two
@@ -229,16 +227,22 @@ getTrackedPointerLocation(const DataLayout &DL, Value *Ptr) {
 // Lambda callsite, we need to determine which definition dominates that ptr.
 class LambdaInstUseVisitor : public InstVisitor<LambdaInstUseVisitor> {
 private:
-  // ValueRangeMap contains the byte range of the entity relative to each
+  // The active range map contains the byte range of the entity relative to each
   // pointer value we're analyzing.
   // For example, let's say that LambdaInstUseVisitor is handed ptr %0 = alloca
   // ptr, and LambdaArgVisitor has already identified that the closure starts at
   // byte
-  // 8. In this case, ValueRangeMap[%0] begins at byte 8. If we encounter a
+  // 8. In this case, valueRanges()[%0] begins at byte 8. If we encounter a
   // store like
   // store ptr %2, ptr%0, align 8, we don't care, because its written outside
   // of the range of the closure.
-  DenseMap<Value *, TrackedRange> ValueRangeMap;
+  DenseMap<Value *, TrackedRange> RootValueRanges;
+  DenseMap<Value *, TrackedRange> &valueRanges() {
+    return Current.ReturnTo ? Current.ReturnTo->Ranges : RootValueRanges;
+  }
+  const DenseMap<Value *, TrackedRange> &valueRanges() const {
+    return Current.ReturnTo ? Current.ReturnTo->Ranges : RootValueRanges;
+  }
   DenseMap<ClobberQuery, MemorySSAClobber, ClobberQueryDenseMapInfo> QueryCache;
   std::shared_ptr<MemorySSAClobberOracle> ClobberOracle;
   Value *TrackedBase = nullptr;
@@ -260,7 +264,6 @@ private:
   SmallVector<UseDefWriteCandidate> PotentialClobbers;
   SmallVector<SmallVector<UseDefWriteCandidate, 4>, 2>
       ParentClobberCandidateStack;
-  SmallPtrSet<CallBase *, 4> ProvenReturnedAliasCalls;
   // The visitor pattern is always setting LastUse to the back of the
   // edge at the front of the worklist (the def that brought us to the
   // current use).
@@ -283,8 +286,8 @@ private:
 
   bool storeCoversTrackedRange(const StoreInst &Store) const {
     auto StoreSize = getTypeStoreSize(DL, Store.getValueOperand()->getType());
-    auto StoredRange = ValueRangeMap.find(Store.getPointerOperand());
-    if (!StoreSize || StoredRange == ValueRangeMap.end() ||
+    auto StoredRange = valueRanges().find(Store.getPointerOperand());
+    if (!StoreSize || StoredRange == valueRanges().end() ||
         StoredRange->second.Extent == 0)
       return false;
 
@@ -624,7 +627,7 @@ public:
         ArgumentBoundary(ArgumentQuery ? SeenUse : nullptr), DL(Dl) {
     // queryMemorySSA() constructs its MemoryLocation from this range. Populate
     // it before the first query so the cache cannot record a zero-byte query.
-    ValueRangeMap[PtrBegin] = {TargetOff, EntitySize};
+    valueRanges()[PtrBegin] = {TargetOff, EntitySize};
     WorkList.push_back({PtrBegin, nullptr, SeenUse, SeenUse->getFunction(),
                         PtrBegin, nullptr});
     // A pointer-transform on the backwards provenance path may also have an
@@ -711,8 +714,9 @@ public:
     }
 
     CallBase *Call = ReturnTo->Call;
-    ValueRangeMap[Call] = *ReturnTo->ReturnedRange;
-    ProvenReturnedAliasCalls.insert(Call);
+    auto &CallerRanges =
+        ReturnTo->Parent ? ReturnTo->Parent->Ranges : RootValueRanges;
+    CallerRanges[Call] = *ReturnTo->ReturnedRange;
     // A query made before the helper was traversed may have cached the call
     // itself as MemorySSA's conservative clobber.
     QueryCache.clear();
@@ -740,7 +744,7 @@ public:
       return false;
     }
 
-    if (!DefBeforeCB || !ValueRangeMap.contains(DefBeforeCB)) {
+    if (!DefBeforeCB || !valueRanges().contains(DefBeforeCB)) {
       rangeMapFailure(DefBeforeCB ? DefBeforeCB : TrackedBase);
       return false;
     }
@@ -752,22 +756,21 @@ public:
         continue;
 
       Argument *ArgToTrack = CalledFunction->getArg(ArgI);
-      // ValueRangeMap is not call-context scoped: a second entry into this
-      // callee with a different range would silently retarget facts computed
-      // for the first entry. Equal ranges recompute identical facts
-      // and are permitted.
-      auto ExistingRange = ValueRangeMap.find(ArgToTrack);
-      if (ExistingRange != ValueRangeMap.end() &&
-          ExistingRange->second != ValueRangeMap[DefBeforeCB]) {
+      // Deferred writing calls share the enclosing continuation's range map.
+      // Re-entry with a different range would retarget in-flight facts.
+      // Pointer-returning calls instead receive their own map below.
+      auto ExistingRange = valueRanges().find(ArgToTrack);
+      if (ExistingRange != valueRanges().end() &&
+          ExistingRange->second != valueRanges()[DefBeforeCB]) {
         DEBUG(Logger::logs("proteus-pass")
               << "    [PTR use analysis]: Conflicting re-entry ranges for "
                  "formal "
               << *ArgToTrack << ": " << ExistingRange->second << " vs "
-              << ValueRangeMap[DefBeforeCB] << "\n");
+              << valueRanges()[DefBeforeCB] << "\n");
         return false;
       }
       FoundArg = true;
-      ValueRangeMap[ArgToTrack] = ValueRangeMap[DefBeforeCB];
+      valueRanges()[ArgToTrack] = valueRanges()[DefBeforeCB];
       for (User *Usr : ArgToTrack->users())
         Deferred.push_back({Usr, ArgToTrack, ReturnInstVec.front(),
                             CalledFunction, ArgToTrack, Current.ReturnTo});
@@ -822,14 +825,14 @@ public:
       // deferred parent writes.
       if (!ParentClobberCandidateStack.empty()) {
         auto StoreSize = getTypeStoreSize(DL, SI->getValueOperand()->getType());
-        auto StoredRange = ValueRangeMap.find(SI->getPointerOperand());
+        auto StoredRange = valueRanges().find(SI->getPointerOperand());
         if (!storeCoversTrackedRange(*SI)) {
           DEBUG({
             auto &OS = Logger::logs("proteus-pass");
             OS << "    [PTR use analysis]: Callee store covers only part of "
                   "the parent clobber query; declining: store-size="
                << (StoreSize ? *StoreSize : 0) << "; query-at-store=";
-            if (StoredRange != ValueRangeMap.end())
+            if (StoredRange != valueRanges().end())
               OS << StoredRange->second;
             else
               OS << "<unknown>";
@@ -934,13 +937,8 @@ public:
         fail();
         return;
       }
-      if (PotentialClobbers.empty()) {
-        // Preserve the argument-use policy: only a completed scan, with no
-        // unsupported or unresolved uses, may report no tracked writes.
-        Result.Kind = LambdaPtrUseKind::NoTrackedWrite;
-        AnalysisSuccess = true;
-        return;
-      }
+      // Even an empty candidate set needs a location-wide query: writes
+      // through other arguments or globals need not be on this use graph.
       MemorySSAClobber Clobber =
           queryLocation(*ArgumentLocation, *ArgumentBoundary);
       ArgumentLocation.reset();
@@ -962,19 +960,11 @@ public:
     continueFromResolvedClobber(resolveCollectedClobbers());
   }
 
-  // Query the oracle for Location at UseBoundary. A pointer-returning call
-  // that this visitor has traversed through to a ReturnInst without finding a
-  // write is an alias edge, not the memory definition we seek; ask the same
-  // question immediately before it.
+  // Returning the tracked pointer does not prove that a call left its
+  // pointee unchanged. Only the oracle's call-write proof may skip a call.
   MemorySSAClobber queryLocation(const MemoryLocation &Location,
                                  Instruction &UseBoundary) {
-    MemorySSAClobber Result = ClobberOracle->query(Location, UseBoundary);
-    while (Result.Kind == MemorySSAClobberKind::Definition &&
-           ProvenReturnedAliasCalls.contains(
-               dyn_cast_or_null<CallBase>(Result.ClobberingInstruction))) {
-      Result = ClobberOracle->query(Location, *Result.ClobberingInstruction);
-    }
-    return Result;
+    return ClobberOracle->query(Location, UseBoundary);
   }
 
   // Resolve Query.Range exactly when traversal found a pointer denoting its
@@ -1051,7 +1041,7 @@ public:
 
   // Return a MemoryLocation denoting exactly the tracked byte, when an
   // already-visited pointer addresses it. Invariant this relies on:
-  // visitGetElementPtrInst only inserts covering GEPs into ValueRangeMap,
+  // visitGetElementPtrInst only inserts covering GEPs into valueRanges(),
   // and a remaining offset of zero means the pointer consumed the entire
   // remaining displacement, i.e. it addresses the tracked byte itself. The
   // smallest result size gives the tightest range at that address;
@@ -1070,7 +1060,7 @@ public:
     Value *BestPtr = nullptr;
     uint64_t BestSize = std::numeric_limits<uint64_t>::max();
 
-    for (const auto &[Ptr, Range] : ValueRangeMap) {
+    for (const auto &[Ptr, Range] : valueRanges()) {
       if (Range.Offset != 0 || !Ptr->getType()->isPointerTy() ||
           getUnderlyingObject(Ptr) != TrackedObject)
         continue;
@@ -1167,11 +1157,11 @@ public:
           fail(); // An escaped pointer prevents a complete argument-use scan.
         return;
       }
-      if (!ValueRangeMap.contains(Stored)) {
+      if (!valueRanges().contains(Stored)) {
         rangeMapFailure(Stored);
         return;
       }
-      ValueRangeMap[StoreBase] = ValueRangeMap[Stored];
+      valueRanges()[StoreBase] = valueRanges()[Stored];
       for (User *Usr : StoreBase->users()) {
         if (seen(Usr))
           continue;
@@ -1221,11 +1211,11 @@ public:
       return;
 
     auto StoreSize = getTypeStoreSize(DL, SI.getValueOperand()->getType());
-    if (!ValueRangeMap.contains(StoreBase)) {
+    if (!valueRanges().contains(StoreBase)) {
       rangeMapFailure(StoreBase);
       return;
     }
-    TrackedRange StoreRange = ValueRangeMap[StoreBase];
+    TrackedRange StoreRange = valueRanges()[StoreBase];
 
     if (!StoreSize ||
         !rangesOverlap(StoreRange.Offset, StoreRange.Extent, 0, *StoreSize))
@@ -1233,11 +1223,11 @@ public:
     // Derive the correction from this use-def path. Offset is visitor-global
     // and may include unrelated sibling GEPs or GEPs visited in a returned-
     // alias helper; it therefore cannot describe this particular store.
-    if (!ValueRangeMap.contains(TrackedBase)) {
+    if (!valueRanges().contains(TrackedBase)) {
       rangeMapFailure(TrackedBase);
       return;
     }
-    int64_t WriteOffset = ValueRangeMap[TrackedBase].Offset - StoreRange.Offset;
+    int64_t WriteOffset = valueRanges()[TrackedBase].Offset - StoreRange.Offset;
     DEBUG(Logger::logs("proteus-pass")
           << "    Found PTRstore applicable to range " << StoreRange
           << " Store size = " << *StoreSize << " ; " << SI << "\n");
@@ -1250,7 +1240,7 @@ public:
                 .TrackedPtr = Current.TrackedBase,
                 .UseBoundary = Current.UseBoundary,
                 .OffsetOfWriteToBasePtr = WriteOffset,
-                .Range = ValueRangeMap.lookup(Current.TrackedBase),
+                .Range = valueRanges().lookup(Current.TrackedBase),
             },
     });
   }
@@ -1268,11 +1258,11 @@ public:
             << LI << "\n");
       return;
     }
-    if (!ValueRangeMap.contains(LI.getPointerOperand())) {
+    if (!valueRanges().contains(LI.getPointerOperand())) {
       rangeMapFailure(LI.getPointerOperand());
       return;
     }
-    TrackedRange InputRange = ValueRangeMap[LI.getPointerOperand()];
+    TrackedRange InputRange = valueRanges()[LI.getPointerOperand()];
     // The caller-supplied post-load range changes coordinates only when
     // dereferencing the original tracked storage. A callee may spill and
     // reload its pointer argument; that reload remains an alias of the same
@@ -1280,12 +1270,12 @@ public:
     bool LoadsFromOriginalTrackedObject =
         getUnderlyingObject(LI.getPointerOperand()) ==
         getUnderlyingObject(TrackedBase);
-    ValueRangeMap[&LI] = LoadsFromOriginalTrackedObject && LoadedPointerRange
+    valueRanges()[&LI] = LoadsFromOriginalTrackedObject && LoadedPointerRange
                              ? *LoadedPointerRange
                              : InputRange;
     DEBUG(Logger::logs("proteus-pass")
           << "    [PTR use analysis]: Pointer load changes tracked range from "
-          << InputRange << " to " << ValueRangeMap[&LI] << "\n");
+          << InputRange << " to " << valueRanges()[&LI] << "\n");
     pushBackPointerUsers(&LI);
   }
 
@@ -1314,7 +1304,7 @@ public:
     // visitor worklist instead of independently tracing returned provenance.
     bool EnteredReturnedAlias = false;
     if (CB.getType()->isPointerTy() && DefBeforeCB &&
-        ValueRangeMap.contains(DefBeforeCB)) {
+        valueRanges().contains(DefBeforeCB)) {
       Function *Callee = CB.getCalledFunction();
       if (Callee && !Callee->isDeclaration()) {
         // Reject recursion through pointer-returning helpers: each entry
@@ -1337,39 +1327,30 @@ public:
         }
         auto Returns = proteus::getReturnInstructions(*Callee);
         if (Returns.size() == 1) {
+          // Each returned-pointer traversal owns its range facts. The same
+          // helper can be entered at different offsets from distinct calls.
+          // Populate all matching formals together so equal actual arguments
+          // remain equal through a callee's pointer PHI/select.
+          auto ReturnTo = std::make_shared<ReturnContinuation>();
+          ReturnTo->Call = &CB;
+          ReturnTo->CallerFrame = Current.Frame;
+          ReturnTo->CallerUseBoundary = Current.UseBoundary;
+          ReturnTo->CallerTrackedBase = Current.TrackedBase;
+          ReturnTo->Parent = Current.ReturnTo;
+          ReturnTo->Ranges = valueRanges();
           for (unsigned ArgI = 0;
                ArgI < CB.arg_size() && ArgI < Callee->arg_size(); ++ArgI) {
             if (CB.getArgOperand(ArgI) != DefBeforeCB)
               continue;
-
             Argument *Formal = Callee->getArg(ArgI);
-            // Same conflict rule as cacheCallBaseWorkItems: ValueRangeMap is
-            // not call-context scoped, so a re-entry with a different range
-            // must decline rather than retarget in-flight facts.
-            auto ExistingRange = ValueRangeMap.find(Formal);
-            if (ExistingRange != ValueRangeMap.end() &&
-                ExistingRange->second != ValueRangeMap[DefBeforeCB]) {
-              DEBUG(Logger::logs("proteus-pass")
-                    << "    [PTR use analysis]: Conflicting re-entry ranges "
-                       "for formal "
-                    << *Formal << ": " << ExistingRange->second << " vs "
-                    << ValueRangeMap[DefBeforeCB] << "\n");
-              fail();
-              return;
-            }
-            ValueRangeMap[Formal] = ValueRangeMap[DefBeforeCB];
-            auto ReturnTo = std::make_shared<ReturnContinuation>(
-                ReturnContinuation{&CB, Current.Frame, Current.UseBoundary,
-                                   Current.TrackedBase, Current.ReturnTo, 0,
-                                   false, false, std::nullopt});
-            // Seen is keyed on raw continuation addresses; keep every
-            // continuation alive for the visitor's lifetime so a freed
-            // allocation cannot be reused and alias stale Seen entries.
-            OwnedContinuations.push_back(ReturnTo);
+            ReturnTo->Ranges[Formal] = valueRanges()[DefBeforeCB];
             for (User *Usr : Formal->users())
               pushBack(Usr, Formal, Callee, Returns.front(), Formal, ReturnTo);
             EnteredReturnedAlias = true;
           }
+          // Seen contains raw continuation addresses; retain their owners.
+          if (EnteredReturnedAlias)
+            OwnedContinuations.push_back(ReturnTo);
         }
       }
     }
@@ -1396,14 +1377,14 @@ public:
              // Unused for calls: a selected CallBase resumes interprocedural
              // traversal instead of producing a value+correction.
              .OffsetOfWriteToBasePtr = 0,
-             .Range = ValueRangeMap.lookup(Current.TrackedBase)}});
+             .Range = valueRanges().lookup(Current.TrackedBase)}});
   }
 
   void visitPHINode(PHINode &Phi) {
     std::optional<TrackedRange> IncomingRange;
     for (Value *Incoming : Phi.incoming_values()) {
-      auto It = ValueRangeMap.find(Incoming);
-      if (It == ValueRangeMap.end()) {
+      auto It = valueRanges().find(Incoming);
+      if (It == valueRanges().end()) {
         // Another incoming use may still be on the visitor worklist. Permit
         // that edge to schedule this PHI again.
         UnresolvedAliases.insert(&Phi);
@@ -1420,15 +1401,15 @@ public:
       fail();
       return;
     }
-    ValueRangeMap[&Phi] = *IncomingRange;
+    valueRanges()[&Phi] = *IncomingRange;
     UnresolvedAliases.erase(&Phi);
     pushBackPointerUsers(&Phi);
   }
 
   void visitSelectInst(SelectInst &Select) {
-    auto TrueIt = ValueRangeMap.find(Select.getTrueValue());
-    auto FalseIt = ValueRangeMap.find(Select.getFalseValue());
-    if (TrueIt == ValueRangeMap.end() || FalseIt == ValueRangeMap.end()) {
+    auto TrueIt = valueRanges().find(Select.getTrueValue());
+    auto FalseIt = valueRanges().find(Select.getFalseValue());
+    if (TrueIt == valueRanges().end() || FalseIt == valueRanges().end()) {
       UnresolvedAliases.insert(&Select);
       markAsUnseen(&Select);
       return;
@@ -1437,23 +1418,23 @@ public:
       fail();
       return;
     }
-    ValueRangeMap[&Select] = TrueIt->second;
+    valueRanges()[&Select] = TrueIt->second;
     UnresolvedAliases.erase(&Select);
     pushBackPointerUsers(&Select);
   }
 
   void visitReturnInst(ReturnInst &RI) {
     if (!Current.ReturnTo || RI.getReturnValue() != Current.LastVal ||
-        !Current.LastVal || !ValueRangeMap.contains(Current.LastVal)) {
+        !Current.LastVal || !valueRanges().contains(Current.LastVal)) {
       fail();
       return;
     }
 
     auto ReturnTo = Current.ReturnTo;
     CallBase *Call = ReturnTo->Call;
-    TrackedRange ReturnedRange = ValueRangeMap[Current.LastVal];
-    auto Existing = ValueRangeMap.find(Call);
-    if (Existing != ValueRangeMap.end() && Existing->second != ReturnedRange) {
+    TrackedRange ReturnedRange = valueRanges()[Current.LastVal];
+    auto Existing = valueRanges().find(Call);
+    if (Existing != valueRanges().end() && Existing->second != ReturnedRange) {
       fail();
       return;
     }
@@ -1497,12 +1478,12 @@ public:
     if (!GEPBase)
       return;
 
-    if (!ValueRangeMap.contains(GEPBase)) {
+    if (!valueRanges().contains(GEPBase)) {
       rangeMapFailure(GEPBase);
       return;
     }
 
-    TrackedRange BaseRange = ValueRangeMap[GEPBase];
+    TrackedRange BaseRange = valueRanges()[GEPBase];
     auto ResultSize = getTypeStoreSize(DL, GEP.getResultElementType());
     DEBUG(if (ResultSize) Logger::logs("proteus-pass")
               << "    GEP size = " << *ResultSize << "\n";)
@@ -1518,9 +1499,9 @@ public:
     // A GEP changes the pointer-relative offset but not the extent of the
     // tracked entity. This also supports constant type-erased byte GEPs: their
     // i8 element type describes pointer arithmetic, not entity size.
-    ValueRangeMap[&GEP] = {BaseRange.Offset - GEPOffset, BaseRange.Extent};
+    valueRanges()[&GEP] = {BaseRange.Offset - GEPOffset, BaseRange.Extent};
     DEBUG(Logger::logs("proteus-pass") << "    " << "Setting map K " << GEP
-                                       << " : " << ValueRangeMap[&GEP] << "\n");
+                                       << " : " << valueRanges()[&GEP] << "\n");
     pushBackPointerUsers(&GEP);
   }
 
@@ -1536,7 +1517,7 @@ public:
                "non-null def\n");
       return;
     }
-    if (!ValueRangeMap.contains(&Alloca)) {
+    if (!valueRanges().contains(&Alloca)) {
       fail();
       DEBUG(Logger::logs("proteus-pass")
             << "    Value offset map not correctly initialized with "
@@ -1553,31 +1534,31 @@ public:
     // If the last Def is nullptr, we have just begun the use analysis.
     // In this case, respect the constructor's offset for the pointer operand.
     if (!Def) {
-      if (!ValueRangeMap.contains(&BC)) {
+      if (!valueRanges().contains(&BC)) {
         rangeMapFailure(&BC);
         return;
       }
-      ValueRangeMap[BC.getOperand(0)] = ValueRangeMap[&BC];
+      valueRanges()[BC.getOperand(0)] = valueRanges()[&BC];
     }
     // AddrSpaceCast does not change the offset we track.
-    ValueRangeMap[&BC] = ValueRangeMap[BC.getOperand(0)];
+    valueRanges()[&BC] = valueRanges()[BC.getOperand(0)];
     pushBackPointerUsers(&BC);
   }
 
   void visitAddrSpaceCastInst(AddrSpaceCastInst &ASC) {
     // The constructor automatically populates the map with ASC's offset
     // if its not present we need to rely on the pointer operand's offset
-    if (!ValueRangeMap.contains(&ASC)) {
-      if (!ValueRangeMap.contains(ASC.getPointerOperand())) {
+    if (!valueRanges().contains(&ASC)) {
+      if (!valueRanges().contains(ASC.getPointerOperand())) {
         rangeMapFailure(ASC.getPointerOperand());
         return;
       }
       // AddrSpaceCast does not change the offset we track.
-      ValueRangeMap[&ASC] = ValueRangeMap[ASC.getPointerOperand()];
+      valueRanges()[&ASC] = valueRanges()[ASC.getPointerOperand()];
     }
     DEBUG(Logger::logs("proteus-pass")
           << "    [PTR use analysis]: Setting range " << ASC << " = "
-          << ValueRangeMap[&ASC]);
+          << valueRanges()[&ASC]);
 
     pushBackPointerUsers(&ASC);
   }
@@ -1585,7 +1566,7 @@ public:
   void visitPtrToIntInst(PtrToIntInst &PTI) {
     Value *Ptr = PTI.getPointerOperand();
     unsigned BitWidth = PTI.getType()->getIntegerBitWidth();
-    if (Ptr != Current.LastVal || !ValueRangeMap.contains(Ptr) ||
+    if (Ptr != Current.LastVal || !valueRanges().contains(Ptr) ||
         DL.isNonIntegralPointerType(Ptr->getType()) ||
         DL.getPointerSizeInBits(Ptr->getType()->getPointerAddressSpace()) !=
             BitWidth) {
@@ -1609,18 +1590,18 @@ public:
       }
     }
 
-    ValueRangeMap[&PTI] = ValueRangeMap[Ptr];
+    valueRanges()[&PTI] = valueRanges()[Ptr];
     pushBackPointerUsers(&PTI);
   }
 
   void visitIntToPtrInst(IntToPtrInst &ITP) {
     if (ITP.getOperand(0) != Current.LastVal ||
         !isa<PtrToIntInst>(Current.LastVal) ||
-        !ValueRangeMap.contains(Current.LastVal)) {
+        !valueRanges().contains(Current.LastVal)) {
       fail();
       return;
     }
-    ValueRangeMap[&ITP] = ValueRangeMap[Current.LastVal];
+    valueRanges()[&ITP] = valueRanges()[Current.LastVal];
     pushBackPointerUsers(&ITP);
   }
 
@@ -1631,7 +1612,7 @@ public:
       return;
 
     if (auto *MS = dyn_cast<MemSetInst>(&I)) {
-      if (!ValueRangeMap.contains(Def)) {
+      if (!valueRanges().contains(Def)) {
         rangeMapFailure(Def);
         return;
       }
@@ -1639,7 +1620,7 @@ public:
       // The memset destroys provenance if it touches ANY byte of the tracked
       // entity [Remaining, Remaining + size), not only its first byte; an
       // interior-slot memset previously slipped through here.
-      TrackedRange Range = ValueRangeMap[Def];
+      TrackedRange Range = valueRanges()[Def];
       if (Len && !(Range.Offset < static_cast<int64_t>(Len->getZExtValue()) &&
                    Range.Offset + static_cast<int64_t>(Range.Extent) > 0))
         return;
@@ -1664,11 +1645,11 @@ public:
 
     auto *MT = cast<MemTransferInst>(&I); // memcpy
 
-    if (!ValueRangeMap.contains(Def)) {
+    if (!valueRanges().contains(Def)) {
       rangeMapFailure(Def);
       return;
     }
-    TrackedRange Range = ValueRangeMap[Def];
+    TrackedRange Range = valueRanges()[Def];
 
     auto *Len = dyn_cast<ConstantInt>(MT->getLength());
     if (!Len) {
@@ -1716,7 +1697,7 @@ public:
     // Express the destination displacement in the visitor root's frame.
     // A callee formal may already denote a displaced field of that root.
     int64_t OffsetCorrection =
-        (ValueRangeMap[TrackedBase].Offset - Range.Offset) - SrcOff;
+        (valueRanges()[TrackedBase].Offset - Range.Offset) - SrcOff;
     noteTrackedWrite();
     PotentialClobbers.push_back(
         {.WriteCandidate = &I,
@@ -1724,7 +1705,7 @@ public:
                          .TrackedPtr = Current.TrackedBase,
                          .UseBoundary = Current.UseBoundary,
                          .OffsetOfWriteToBasePtr = OffsetCorrection,
-                         .Range = ValueRangeMap.lookup(Current.TrackedBase)}});
+                         .Range = valueRanges().lookup(Current.TrackedBase)}});
   }
 
   void visitInstruction(Instruction &I) {
@@ -1743,6 +1724,49 @@ getDominatingUse(const DataLayout &DL, Value *ValueNeedingAnalysis,
                  uint64_t TrackedEntitySize,
                  std::optional<TrackedRange> PostLoadRange = std::nullopt,
                  std::optional<MemoryLocation> ArgumentQuery = std::nullopt) {
+  if (!UseofPtr)
+    return std::nullopt;
+  // Proven unchanged memory needs no provenance candidates. In particular,
+  // unrelated PHIs and escaped pointer slots must not veto this proof. If a
+  // definition remains, the forward visitor still has to interpret precisely
+  // the instruction selected by MemorySSA (including a known writing helper).
+  if (ArgumentQuery && ClobberOracle->query(*ArgumentQuery, *UseofPtr).Kind ==
+                           MemorySSAClobberKind::LiveOnEntry) {
+    LambdaPtrUseAnalysis Result;
+    Result.Kind = LambdaPtrUseKind::LiveOnEntry;
+    return Result;
+  }
+  // Once a covering store is proven to supply the bytes at the real use,
+  // collect its provenance only up to that store. Later harmless calls can
+  // contain pointer expressions outside the forward visitor's vocabulary;
+  // they must not invalidate an already established reaching definition.
+  if (TargetOffset >= 0 &&
+      static_cast<uint64_t>(TargetOffset) <= UINT64_MAX - TrackedEntitySize) {
+    MemoryLocation Covering(
+        ValueNeedingAnalysis,
+        LocationSize::precise(TargetOffset + TrackedEntitySize));
+    auto Clobber = ClobberOracle->query(Covering, *UseofPtr);
+    auto *Store = dyn_cast_or_null<StoreInst>(Clobber.ClobberingInstruction);
+    if (Store && Store->getFunction() == UseofPtr->getFunction()) {
+      int64_t StoreOffset = 0, RootOffset = 0;
+      Value *StoreBase = GetPointerBaseWithConstantOffset(
+          Store->getPointerOperand(), StoreOffset, DL);
+      Value *RootBase = GetPointerBaseWithConstantOffset(ValueNeedingAnalysis,
+                                                         RootOffset, DL);
+      auto StoreSize =
+          getTypeStoreSize(DL, Store->getValueOperand()->getType());
+      int64_t Begin = 0;
+      if (StoreBase == RootBase && StoreSize &&
+          !AddOverflow(RootOffset, TargetOffset, Begin) &&
+          Begin >= StoreOffset &&
+          static_cast<uint64_t>(Begin) - static_cast<uint64_t>(StoreOffset) <=
+              *StoreSize &&
+          TrackedEntitySize <=
+              *StoreSize - (static_cast<uint64_t>(Begin) -
+                            static_cast<uint64_t>(StoreOffset)))
+        UseofPtr = Store->getNextNode();
+    }
+  }
   DEBUG(Logger::logs("proteus-pass")
         << "Beginning PtrUse analysis with offset = " << TargetOffset
         << " entity size = " << TrackedEntitySize << "\n");

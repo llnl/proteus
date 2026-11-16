@@ -5,7 +5,6 @@
 #include <llvm/ADT/SmallPtrSet.h>
 #include <llvm/Analysis/AssumptionCache.h>
 #include <llvm/Analysis/BasicAliasAnalysis.h>
-#include <llvm/Analysis/CaptureTracking.h>
 #include <llvm/Analysis/MemoryLocation.h>
 #include <llvm/Analysis/MemorySSA.h>
 #include <llvm/Analysis/TargetLibraryInfo.h>
@@ -19,6 +18,9 @@
 #include <llvm/IR/IntrinsicInst.h>
 #include <llvm/TargetParser/Triple.h>
 
+#include "CallWriteAnalysis.h"
+
+#include <functional>
 #include <memory>
 
 namespace proteus {
@@ -52,68 +54,6 @@ class FunctionMemorySSAState {
   TypeBasedAAResult TBAA;
   std::unique_ptr<MemorySSA> MSSA;
 
-  // Prove that a wrapper invocation never writes through its closure
-  // argument. MemorySSA otherwise treats an earlier invocation on one field
-  // of an aggregate as a possible write to the next field.
-  static bool readsArgumentPointeeOnly(Function &F, unsigned ArgNo,
-                                       SmallPtrSetImpl<Function *> &Active) {
-    if (F.isDeclaration() || ArgNo >= F.arg_size() || !Active.insert(&F).second)
-      return false;
-    Argument *Formal = F.getArg(ArgNo);
-    for (BasicBlock &BB : F) {
-      for (Instruction &I : BB) {
-        if (auto *SI = dyn_cast<StoreInst>(&I)) {
-          const Value *DestBase = getUnderlyingObject(SI->getPointerOperand());
-          if (!isa<AllocaInst>(DestBase) ||
-              (SI->getValueOperand()->getType()->isPointerTy() &&
-               getUnderlyingObject(SI->getValueOperand()) == Formal)) {
-            Active.erase(&F);
-            return false;
-          }
-          continue;
-        }
-        if (auto *MI = dyn_cast<MemIntrinsic>(&I)) {
-          const Value *DestBase = getUnderlyingObject(MI->getRawDest());
-          if (!isa<AllocaInst>(DestBase)) {
-            Active.erase(&F);
-            return false;
-          }
-          continue;
-        }
-        if (auto *CB = dyn_cast<CallBase>(&I)) {
-          if (CB->isInlineAsm()) {
-            Active.erase(&F);
-            return false;
-          }
-          for (unsigned Index = 0; Index < CB->arg_size(); ++Index) {
-            Value *Actual = CB->getArgOperand(Index);
-            if (!Actual->getType()->isPointerTy())
-              continue;
-            const Value *Base = getUnderlyingObject(Actual);
-            if (Base == Formal) {
-              Function *Callee = CB->getCalledFunction();
-              if (!Callee ||
-                  !readsArgumentPointeeOnly(*Callee, Index, Active)) {
-                Active.erase(&F);
-                return false;
-              }
-            } else if (isa<LoadInst>(Base) || isa<Argument>(Base)) {
-              Active.erase(&F);
-              return false;
-            }
-          }
-          continue;
-        }
-        if (I.mayWriteToMemory()) {
-          Active.erase(&F);
-          return false;
-        }
-      }
-    }
-    Active.erase(&F);
-    return true;
-  }
-
 public:
   explicit FunctionMemorySSAState(Function &F)
       : DL(F.getParent()->getDataLayout()), DT(F), AC(F),
@@ -134,6 +74,31 @@ getMemorySSA() {
 }
 
 bool instructionMayModify(Instruction &I, const MemoryLocation &Location) {
+  // A pointer loaded before a local allocation's address escapes cannot
+  // designate that allocation. BasicAA's whole-function capture answer can
+  // miss this when the allocation is passed to the later invocation itself.
+  // Restrict this refinement to loaded pointer values: a select/GEP may
+  // instead be directly derived from the local allocation.
+  const auto *PointerLoad =
+      dyn_cast<LoadInst>(getUnderlyingObject(Location.Ptr));
+  Value *Destination = nullptr;
+  if (auto *SI = dyn_cast<StoreInst>(&I); SI && !SI->isAtomic())
+    Destination = SI->getPointerOperand();
+  else if (auto *MI = dyn_cast<MemIntrinsic>(&I))
+    Destination = MI->getRawDest();
+  else if (auto *LI = dyn_cast<LifetimeIntrinsic>(&I))
+    Destination = LI->getArgOperand(LI->arg_size() - 1);
+  if (PointerLoad && Destination &&
+      PointerLoad->getFunction() == I.getFunction()) {
+    auto *Local = dyn_cast<AllocaInst>(getUnderlyingObject(Destination));
+    if (Local && !PointerMayBeCapturedBefore(Local, /*ReturnCaptures=*/true,
+#if LLVM_VERSION_MAJOR < 21
+                                             /*StoreCaptures=*/true,
+#endif
+                                             PointerLoad, &DT,
+                                             /*IncludeI=*/false))
+      return false;
+  }
   if (auto *SI = dyn_cast<StoreInst>(&I);
       SI && Location.Size.hasValue() && Location.Size.isPrecise() &&
       !Location.Size.getValue().isScalable()) {
@@ -162,62 +127,9 @@ bool instructionMayModify(Instruction &I, const MemoryLocation &Location) {
   return isModSet(AA.getModRefInfo(&I, Location));
 }
 
-bool callCannotModifyTrackedLocal(CallBase &CB,
-                                  const MemoryLocation &Location) {
-  // Respect any precise memory effects already understood by alias analysis.
-  if (!isModSet(AA.getModRefInfo(&CB, Location)))
-    return true;
+AAResults &getAA() { return AA; }
+DominatorTree &getDominatorTree() { return DT; }
 
-  // Do not use capture tracking to override an explicit inline-assembly
-  // memory clobber. Inline assembly may access memory without exposing the
-  // address as an SSA operand, so the absence of a captured pointer is not
-  // sufficient proof that the tracked allocation is untouched.
-  if (Function *Callee = CB.getCalledFunction()) {
-    for (BasicBlock &BB : *Callee) {
-      for (Instruction &I : BB) {
-        auto *InnerCB = dyn_cast<CallBase>(&I);
-        if (InnerCB && InnerCB->isInlineAsm() && I.mayWriteToMemory())
-          return false;
-      }
-    }
-  }
-
-  // This additional proof is valid only for function-local allocations. A
-  // call cannot access such an allocation unless its address escaped earlier
-  // or an alias is supplied by the call itself.
-  const Value *Object = getUnderlyingObject(Location.Ptr);
-  auto *Alloca = dyn_cast<AllocaInst>(Object);
-  if (!Alloca || CB.hasOperandBundles())
-    return false;
-
-  // `nocapture` would not be enough here: a callee may modify a pointer
-  // argument without retaining it. Require every pointer argument to be
-  // disjoint from the tracked location.
-  for (const Use &Arg : CB.args()) {
-    Value *Actual = Arg.get();
-    if (!Actual->getType()->isPointerTy())
-      continue;
-    if (!AA.isNoAlias(MemoryLocation::getBeforeOrAfter(Actual), Location))
-      return false;
-  }
-
-  // The current call is excluded because its operands were checked above.
-  // Any earlier capture could have made the allocation reachable indirectly.
-  return !PointerMayBeCapturedBefore(Alloca, /*ReturnCaptures=*/true,
-#if LLVM_VERSION_MAJOR < 21
-                                     /*StoreCaptures=*/true,
-#endif
-                                     &CB, &DT, /*IncludeI=*/false);
-}
-
-bool wrapperCallOnlyReadsClosure(CallBase &CB) {
-  Function *Callee = CB.getCalledFunction();
-  if (!Callee || !Callee->hasMetadata("proteus.wrapper_call") ||
-      CB.arg_size() != 1)
-    return false;
-  SmallPtrSet<Function *, 8> Active;
-  return readsArgumentPointeeOnly(*Callee, 0, Active);
-}
 }; // namespace proteus
 
 enum class MemorySSAClobberKind {
@@ -247,9 +159,8 @@ struct MemorySSAClobber {
 //   "Which memory access may clobber this location immediately before this
 //    instruction?"
 //
-// It does not interpret stores, traverse pointer provenance, summarize calls,
-// or cross function boundaries. Those decisions belong to LambdaArgVisitor's
-// frame/provenance traversal.
+// CallWriteAnalysis can prove a selected call harmless by inspecting callee
+// writes. Recovering replacement values and offsets remains the visitors' job.
 class MemorySSAClobberOracle {
   DenseMap<Function *, std::unique_ptr<FunctionMemorySSAState>> States;
 
@@ -318,19 +229,47 @@ public:
       return Walker->getClobberingMemoryAccess(Start, Location);
     };
 
-    MemoryAccess *Clobber = FindClobber(Before);
-
-    // MemorySSA must conservatively model calls whose memory effects have not
-    // yet been inferred. Skip such a call only when we can prove that this
-    // particular local allocation was unavailable to it, then continue the
-    // clobber walk from the state immediately preceding the call.
-    while (auto *Def = dyn_cast_or_null<MemoryDef>(Clobber)) {
-      auto *CB = dyn_cast_or_null<CallBase>(Def->getMemoryInst());
-      if (!CB || (!State.callCannotModifyTrackedLocal(*CB, Location) &&
-                  !State.wrapperCallOnlyReadsClosure(*CB)))
-        break;
-      Clobber = FindClobber(Def->getDefiningAccess());
-    }
+    // Refine a possible call clobber by checking its writes in this call
+    // context. Only a complete proof permits continuing before the call.
+    auto GetDT = [&](Function &F) -> DominatorTree & {
+      return getState(F).getDominatorTree();
+    };
+    CallWriteAnalysis CallWrites(
+        State.getAA(), UseBoundary.getModule()->getDataLayout(), GetDT);
+    SmallPtrSet<MemoryAccess *, 16> Active;
+    unsigned Budget = 256;
+    std::function<MemoryAccess *(MemoryAccess *)> Refine =
+        [&](MemoryAccess *Start) -> MemoryAccess * {
+      MemoryAccess *Clobber = FindClobber(Start);
+      if (!Budget || !Active.insert(Clobber).second)
+        return Clobber;
+      --Budget;
+      MemoryAccess *Result = Clobber;
+      if (auto *Def = dyn_cast<MemoryDef>(Clobber)) {
+        auto *CB = dyn_cast_or_null<CallBase>(Def->getMemoryInst());
+        if (CB && CallWrites.cannotModify(*CB, Location))
+          Result = Refine(Def->getDefiningAccess());
+      } else if (auto *Phi = dyn_cast<MemoryPhi>(Clobber)) {
+        // A call on just one arm can create a MemoryPhi even when inspecting
+        // that call proves it harmless. Join only identical reaching accesses;
+        // distinct stores, unresolved calls, and cycles remain conservative.
+        MemoryAccess *Common = nullptr;
+        for (unsigned I = 0; I < Phi->getNumIncomingValues(); ++I) {
+          MemoryAccess *Incoming = Refine(Phi->getIncomingValue(I));
+          if (!Common)
+            Common = Incoming;
+          else if (Incoming != Common) {
+            Common = Phi;
+            break;
+          }
+        }
+        if (Common)
+          Result = Common;
+      }
+      Active.erase(Clobber);
+      return Result;
+    };
+    MemoryAccess *Clobber = Refine(Before);
     if (!Clobber)
       return {};
     if (MSSA.isLiveOnEntryDef(Clobber))
