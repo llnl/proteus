@@ -214,6 +214,23 @@ config.substitutions.append(('%device_lang', '${lang}'))
 )
 
 CREATE_GPU_TEST(dim_spec_cache_test dim_spec_cache_test.cpp)
+CREATE_GPU_TEST(collapse_cases collapse_cases.cpp collapse_cases_source.cpp)
+CREATE_GPU_TEST_RDC(collapse_cases collapse_cases.cpp collapse_cases_source.cpp)
+
+add_executable(collapse_cases.${lang}.O0 collapse_cases.cpp collapse_cases_source.cpp)
+target_link_libraries(collapse_cases.${lang}.O0 PRIVATE proteus)
+target_compile_options(collapse_cases.${lang}.O0 PRIVATE -O0)
+proteus_attach_pass_plugin_rebuild_dep(collapse_cases.${lang}.O0 collapse_cases.cpp)
+add_test(NAME collapse_cases.${lang}.O0 COMMAND ${LIT} -vv
+    -D EXT=${lang}.O0 -DFILECHECK=${FILECHECK} collapse_cases.cpp)
+set_tests_properties(collapse_cases.${lang}.O0 PROPERTIES LABELS "gpu;gpu-basic")
+
+# Ordinary execution without the extraction plugin must remain correct.
+add_executable(collapse_cases_aot.${lang} collapse_cases.cpp collapse_cases_source.cpp)
+target_link_libraries(collapse_cases_aot.${lang} PRIVATE proteus)
+target_compile_definitions(collapse_cases_aot.${lang} PRIVATE PROTEUS_TEST_AOT)
+add_test(NAME collapse_cases_aot.${lang} COMMAND collapse_cases_aot.${lang})
+set_tests_properties(collapse_cases_aot.${lang} PROPERTIES LABELS "gpu;gpu-basic")
 CREATE_GPU_TEST(kernel kernel.cpp)
 CREATE_GPU_TEST(kernel_metadata kernel_metadata.cpp)
 CREATE_GPU_TEST(kernel_pass_pipeline kernel_pass_pipeline.cpp)

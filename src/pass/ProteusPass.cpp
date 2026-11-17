@@ -38,6 +38,7 @@
 #include "proteus/impl/LambdaCallsite.h"
 #include "proteus/impl/Logger.h"
 #include "proteus/impl/RuntimeConstantTypeHelpers.h"
+#include "proteus/impl/VariantIR.h"
 
 #include <llvm/ADT/DenseSet.h>
 #include <llvm/ADT/SmallPtrSet.h>
@@ -187,6 +188,7 @@ public:
       DEBUG(Logger::logs("proteus-pass")
             << "=== Pre Original Device Module\n"
             << M << "=== End of Pre Original Device Module\n");
+      inlineVariantWrappers(M);
       // HIP LTO runs the pass on a synthetic merged module (currently named
       // "ld-temp.o") without a source file on disk.  Lambda manifests are
       // translation-unit artifacts and were already emitted when the LTO
@@ -195,6 +197,7 @@ public:
       if (!IsLTO)
         emitLambdaDeviceCallsiteManifest(M);
       emitJitModuleDevice(M, IsLTO);
+      lowerVariantMarkers(M);
       return true;
     }
 
@@ -205,6 +208,7 @@ public:
           << "=== Pre Original Host Module\n"
           << M << "=== End of Pre Original Host Module\n");
 
+    lowerVariantMarkers(M);
     instrumentRegisterLinkedBinary(M);
     instrumentRegisterFatBinary(M);
     instrumentRegisterFatBinaryEnd(M);
@@ -1209,6 +1213,7 @@ private:
         return true;
       };
       auto EmitM = CloneModule(M, VMap, ShouldClone);
+      preserveVariantMarkers(*EmitM);
       runCleanupPassPipeline(*EmitM);
       EmitM->setSourceFileName(getCanonicalSourceFileName(M));
 

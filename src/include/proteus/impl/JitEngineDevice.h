@@ -232,6 +232,7 @@ class JITKernelInfo {
   std::optional<std::unique_ptr<MemoryBuffer>> Bitcode;
   std::optional<std::reference_wrapper<BinaryInfo>> BinInfo;
   std::optional<HashT> StaticHash;
+  std::optional<VariantManifest> Variants;
   // LambdaCalleeInfo optionally contains a vector with all annotated
   // LambdaFunctorWrapper annotators and thei unique IDs
   std::optional<SmallVector<uint64_t>> LambdaCalleeInfo;
@@ -265,6 +266,12 @@ public:
     Bitcode = std::move(ExtractedBitcode);
   }
   MemoryBufferRef getBitcode() { return Bitcode.value()->getMemBufferRef(); }
+
+  const VariantManifest &getVariantManifest() {
+    if (!Variants)
+      Variants = variantManifest(getModule());
+    return *Variants;
+  }
 
   bool hasStaticHash() const { return StaticHash.has_value(); }
   const HashT getStaticHash() const { return StaticHash.value(); }
@@ -586,6 +593,8 @@ JitEngineDevice<ImplT>::compileAndRun(
   SmallVector<uint64_t> LambdaCalleeInfoToSpecialize;
   LambdaCallsiteRuntimeConstantsMap LambdaJitValuesMap;
   getLambdaJitValues(LambdaCalleeInfoToSpecialize, LambdaJitValuesMap);
+  getModule(KernelInfo);
+  auto Variants = collectVariantSources(KernelInfo.getVariantManifest());
   const auto &CGConfig = Config::get().getCGConfig(KernelInfo.getName());
   // Determine the hash based on dimension specialization.  If we do not
   // specialize IR based on grid dimensions, avoid hashing on those to
@@ -596,6 +605,13 @@ JitEngineDevice<ImplT>::compileAndRun(
            hashRuntimeSpecializationConfig(CGConfig));
   if (CGConfig.specializeDims() || CGConfig.specializeDimsRange())
     HashValue = hash(HashValue, GridDim.x, GridDim.y, GridDim.z);
+
+  // Budgets and scalar identities are already part of the static module hash.
+  for (const auto &[Tag, Values] : Variants) {
+    HashValue = hash(HashValue, Tag, Values.size());
+    for (auto Value : Values)
+      HashValue = hash(HashValue, Value);
+  }
 
   Dispatcher &Dispatch = getDispatcher();
 
@@ -641,6 +657,7 @@ JitEngineDevice<ImplT>::compileAndRun(
         BlockDim,
         GridDim,
         RCVec,
+        Variants,
         LambdaCalleeInfoToSpecialize,
         LambdaCallsiteRuntimeConstants,
         BinInfo.getVarNameToGlobalInfo(),

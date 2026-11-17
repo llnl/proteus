@@ -76,6 +76,17 @@ function(proteus_attach_pass_plugin_rebuild_dep target)
 endfunction()
 
 add_subdirectory(cpu)
+add_executable(collapse_cases_ir collapse_cases_ir.cpp)
+target_include_directories(collapse_cases_ir PRIVATE
+  ${PROJECT_SOURCE_DIR}/src/include ${LLVM_INSTALL_DIR}/include)
+target_compile_definitions(collapse_cases_ir PRIVATE ${LLVM_DEFINITIONS})
+if(LLVM_LINK_LLVM_DYLIB)
+  target_link_libraries(collapse_cases_ir PRIVATE proteus LLVM)
+else()
+  target_link_libraries(collapse_cases_ir PRIVATE proteus LLVMAsmParser)
+endif()
+add_test(NAME collapse_cases_ir COMMAND collapse_cases_ir)
+set_tests_properties(collapse_cases_ir PROPERTIES LABELS "cpu;unit")
 add_subdirectory(ast)
 
 if(PROTEUS_ENABLE_HIP OR PROTEUS_ENABLE_CUDA)
