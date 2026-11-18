@@ -8,7 +8,6 @@
 #include "proteus/impl/LambdaCallsite.h"
 #include "proteus/impl/Logger.h"
 
-#include <atomic>
 #include <llvm/ADT/DenseMap.h>
 #include <llvm/ADT/STLExtras.h>
 #include <llvm/ADT/SmallVector.h>
@@ -42,6 +41,17 @@ public:
     SmallVector<uint64_t, 4> LambdaCalleeInfo;
     SmallDenseMap<uint64_t, LambdaCallsiteRuntimeConstants, 4>
         CallsiteRuntimeConstants;
+
+    // Member-wise, so storage is kept; std::swap would deallocate.
+    void swap(DeviceLaunchInfo &Other) {
+      LambdaCalleeInfo.swap(Other.LambdaCalleeInfo);
+      CallsiteRuntimeConstants.swap(Other.CallsiteRuntimeConstants);
+    }
+
+    void clear() {
+      LambdaCalleeInfo.clear();
+      CallsiteRuntimeConstants.clear();
+    }
   };
 
   std::optional<JitVariantMap> getHostJitVariant(uint64_t FunctorID) const {
@@ -82,12 +92,8 @@ public:
   bool emptyHost() const { return currentHostJitVariables().empty(); }
 
   void beginDeviceLaunch() {
-    auto &PendingLaunchInfo = pendingDeviceLaunchInfo();
-    auto &CurrentLaunchInfo = currentDeviceLaunchInfo();
-    PendingLaunchInfo.LambdaCalleeInfo.clear();
-    PendingLaunchInfo.CallsiteRuntimeConstants.clear();
-    CurrentLaunchInfo.LambdaCalleeInfo.clear();
-    CurrentLaunchInfo.CallsiteRuntimeConstants.clear();
+    pendingDeviceLaunchInfo().clear();
+    currentDeviceLaunchInfo().clear();
   }
 
   void appendDeviceCallsiteRuntimeConstant(uint64_t LambdaID,
@@ -111,11 +117,8 @@ public:
                    return L.Pos < R.Pos;
                  });
     }
-    CurrentLaunchInfo.LambdaCalleeInfo.swap(PendingLaunchInfo.LambdaCalleeInfo);
-    CurrentLaunchInfo.CallsiteRuntimeConstants.swap(
-        PendingLaunchInfo.CallsiteRuntimeConstants);
-    PendingLaunchInfo.LambdaCalleeInfo.clear();
-    PendingLaunchInfo.CallsiteRuntimeConstants.clear();
+    CurrentLaunchInfo.swap(PendingLaunchInfo);
+    PendingLaunchInfo.clear();
   }
 
   // Valid until clearDeviceLaunchInfo or the next launch.
@@ -123,22 +126,17 @@ public:
     return currentDeviceLaunchInfo();
   }
 
-  void clearDeviceLaunchInfo() {
-    auto &CurrentLaunchInfo = currentDeviceLaunchInfo();
-    CurrentLaunchInfo.LambdaCalleeInfo.clear();
-    CurrentLaunchInfo.CallsiteRuntimeConstants.clear();
-  }
+  void clearDeviceLaunchInfo() { currentDeviceLaunchInfo().clear(); }
 
   void populateLambdaRegistrationCodeCache(void *Kernel,
                                            void *RegistrationFunc) {
     std::lock_guard<std::mutex> Lock(DeviceRegistrationMutex);
     KernelToLambdaRegistration[Kernel] = RegistrationFunc;
-    HasDeviceRegistrations.store(true, std::memory_order_release);
   }
 
   void invokeRegisterLambdaConstants(void *Kernel, void **Args) {
     void *RegistrationFunc = nullptr;
-    if (HasDeviceRegistrations.load(std::memory_order_acquire)) {
+    {
       std::lock_guard<std::mutex> Lock(DeviceRegistrationMutex);
       auto It = KernelToLambdaRegistration.find(Kernel);
       if (It != KernelToLambdaRegistration.end())
@@ -176,7 +174,6 @@ private:
   }
 
   mutable std::mutex DeviceRegistrationMutex;
-  std::atomic<bool> HasDeviceRegistrations{false};
   DenseMap<void *, void *> KernelToLambdaRegistration;
 };
 
