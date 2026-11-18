@@ -83,6 +83,7 @@ endfunction()
 
 add_subdirectory(cpu)
 add_subdirectory(ast)
+add_subdirectory(analysis)
 
 if(PROTEUS_ENABLE_HIP OR PROTEUS_ENABLE_CUDA)
     add_subdirectory(gpu)

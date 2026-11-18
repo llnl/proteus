@@ -136,6 +136,9 @@ struct ClobberQuery {
 struct UseDefWriteCandidate {
   Instruction *WriteCandidate;
   ClobberQuery ClobberInfo;
+  // Conditional connections collect possible writes but cannot supply a
+  // replacement value valid for all callers.
+  bool DiscoveryOnly = false;
 };
 
 struct ClobberQueryDenseMapInfo {
@@ -183,6 +186,15 @@ struct ReturnContinuation {
   bool Completed = false;
   std::optional<TrackedRange> ReturnedRange;
   DenseMap<Value *, TrackedRange> Ranges;
+  ConnectionContext CallerContext;
+};
+
+// A conditional alias path must not overwrite the ordinary traversal's range
+// facts. Its local users run through the same instruction visitors, with their
+// own tags. No interprocedural provenance is recovered from this path.
+struct ConnectionScan {
+  ContextualConnection Edge;
+  DenseMap<Value *, TrackedRange> Ranges;
 };
 
 // The basic unit of work on this analysis is a use--an edge connecting two
@@ -205,6 +217,8 @@ struct UseAnalysisWorkItem {
   Function *Frame = nullptr;
   Value *TrackedBase = nullptr;
   std::shared_ptr<ReturnContinuation> ReturnTo;
+  ConnectionContext Context;
+  std::shared_ptr<ConnectionScan> ConnectionPath;
 };
 
 inline std::optional<MemoryLocation>
@@ -238,9 +252,13 @@ private:
   // of the range of the closure.
   DenseMap<Value *, TrackedRange> RootValueRanges;
   DenseMap<Value *, TrackedRange> &valueRanges() {
+    if (Current.ConnectionPath)
+      return Current.ConnectionPath->Ranges;
     return Current.ReturnTo ? Current.ReturnTo->Ranges : RootValueRanges;
   }
   const DenseMap<Value *, TrackedRange> &valueRanges() const {
+    if (Current.ConnectionPath)
+      return Current.ConnectionPath->Ranges;
     return Current.ReturnTo ? Current.ReturnTo->Ranges : RootValueRanges;
   }
   DenseMap<ClobberQuery, MemorySSAClobber, ClobberQueryDenseMapInfo> QueryCache;
@@ -254,6 +272,8 @@ private:
   // Once a call is selected, its callee must explain that write as usual.
   std::optional<MemoryLocation> ArgumentLocation;
   Instruction *ArgumentBoundary = nullptr;
+  ConnectionContext ArgumentContext;
+  bool TaggedCallsScheduled = false;
   SmallPtrSet<Value *, 8> UnresolvedAliases;
   LambdaPtrUseAnalysis Result;
   DataLayout DL;
@@ -268,11 +288,14 @@ private:
   // edge at the front of the worklist (the def that brought us to the
   // current use).
   Value *Def = nullptr;
-  DenseSet<std::pair<Value *, const ReturnContinuation *>> Seen;
+  DenseSet<std::tuple<Value *, const ReturnContinuation *,
+                      const ConnectionCallContext *, const ConnectionScan *>>
+      Seen;
   SmallDenseSet<Value *> NeverVisit;
   // Owns every ReturnContinuation created by this visitor so the raw
   // addresses used as Seen keys remain valid and unique for its lifetime.
   SmallVector<std::shared_ptr<ReturnContinuation>, 8> OwnedContinuations;
+  SmallVector<std::shared_ptr<ConnectionScan>, 8> OwnedConnectionScans;
   // A pointer-valued load is an alias edge only when we have seen a store of
   // the tracked pointer into local storage and MemorySSA proves that store
   // reaches the load. Pointer fields loaded from a closure are captured data,
@@ -355,6 +378,16 @@ public:
     if (!ClobberingInst) {
       DEBUG(Logger::logs("proteus-pass")
             << "MemorySSA did not identify a clobbering instruction\n");
+      fail();
+      return nullptr;
+    }
+    // The ordinary ranges do not contain conditional-path coordinates. Do
+    // not combine these candidates into a provenance/aggregate-store proof.
+    if (llvm::any_of(PotentialClobbers,
+                     [](const auto &C) { return C.DiscoveryOnly; })) {
+      DEBUG(Logger::logs("proteus-pass")
+            << "[contextual-use] collected conditional writes; declining "
+               "replacement recovery\n");
       fail();
       return nullptr;
     }
@@ -621,15 +654,17 @@ public:
       const DataLayout &Dl, int64_t TargetOff,
       std::shared_ptr<MemorySSAClobberOracle> Oracle, uint64_t EntitySize,
       std::optional<TrackedRange> PostLoadRange,
-      std::optional<MemoryLocation> ArgumentQuery = std::nullopt)
+      std::optional<MemoryLocation> ArgumentQuery = std::nullopt,
+      ConnectionContext EntryContext = nullptr)
       : ClobberOracle(std::move(Oracle)), TrackedBase(PtrBegin),
         LoadedPointerRange(PostLoadRange), ArgumentLocation(ArgumentQuery),
-        ArgumentBoundary(ArgumentQuery ? SeenUse : nullptr), DL(Dl) {
+        ArgumentBoundary(ArgumentQuery ? SeenUse : nullptr),
+        ArgumentContext(EntryContext), DL(Dl) {
     // queryMemorySSA() constructs its MemoryLocation from this range. Populate
     // it before the first query so the cache cannot record a zero-byte query.
     valueRanges()[PtrBegin] = {TargetOff, EntitySize};
     WorkList.push_back({PtrBegin, nullptr, SeenUse, SeenUse->getFunction(),
-                        PtrBegin, nullptr});
+                        PtrBegin, nullptr, std::move(EntryContext), nullptr});
     // A pointer-transform on the backwards provenance path may also have an
     // earlier store as a user.  Visit that transform so those writes remain
     // visible, but stop before re-entering the lambda invocation itself.
@@ -663,33 +698,51 @@ public:
           I && I->getFunction() == ArgumentBoundary->getFunction() &&
           !isPotentiallyReachable(I, ArgumentBoundary))
         return true;
+    if (Current.ConnectionPath)
+      if (auto *I = dyn_cast<Instruction>(Val);
+          I && I->getFunction() == Current.Frame &&
+          !isPotentiallyReachable(I, Current.UseBoundary))
+        return true;
     return NeverVisit.contains(Val) ||
-           Seen.contains({Val, Current.ReturnTo.get()});
+           Seen.contains({Val, Current.ReturnTo.get(), Current.Context.get(),
+                          Current.ConnectionPath.get()});
   }
-  void markAsSeen(Value *Val) { Seen.insert({Val, Current.ReturnTo.get()}); }
-  void markAsUnseen(Value *Val) { Seen.erase({Val, Current.ReturnTo.get()}); }
+  void markAsSeen(Value *Val) {
+    Seen.insert({Val, Current.ReturnTo.get(), Current.Context.get(),
+                 Current.ConnectionPath.get()});
+  }
+  void markAsUnseen(Value *Val) {
+    Seen.erase({Val, Current.ReturnTo.get(), Current.Context.get(),
+                Current.ConnectionPath.get()});
+  }
   bool empty() { return WorkList.empty(); }
   bool success() { return AnalysisSuccess; }
   bool failed() { return AnalysisFailed; }
 
   auto getAnalysisResult() { return Result; }
+  ArrayRef<UseDefWriteCandidate> getCollectedCandidates() const {
+    return PotentialClobbers;
+  }
 
   // Keep track of Function frame
   void pushBack(Value *NextVal, Value *CurVal, Function *Frame,
                 Instruction *UseBoundary, Value *TrackedBase) {
     if (Current.ReturnTo)
       ++Current.ReturnTo->PendingWorkItems;
-    WorkList.push_back(
-        {NextVal, CurVal, UseBoundary, Frame, TrackedBase, Current.ReturnTo});
+    WorkList.push_back({NextVal, CurVal, UseBoundary, Frame, TrackedBase,
+                        Current.ReturnTo, Current.Context,
+                        Current.ConnectionPath});
   }
 
   void pushBack(Value *NextVal, Value *CurVal, Function *Frame,
                 Instruction *UseBoundary, Value *TrackedBase,
-                std::shared_ptr<ReturnContinuation> ReturnTo) {
+                std::shared_ptr<ReturnContinuation> ReturnTo,
+                ConnectionContext Context) {
     if (ReturnTo)
       ++ReturnTo->PendingWorkItems;
     WorkList.push_back({NextVal, CurVal, UseBoundary, Frame, TrackedBase,
-                        std::move(ReturnTo)});
+                        std::move(ReturnTo), std::move(Context),
+                        Current.ConnectionPath});
   }
 
   void noteTrackedWrite() {
@@ -723,7 +776,8 @@ public:
 
     for (User *Usr : Call->users())
       pushBack(Usr, Call, ReturnTo->CallerFrame, ReturnTo->CallerUseBoundary,
-               ReturnTo->CallerTrackedBase, ReturnTo->Parent);
+               ReturnTo->CallerTrackedBase, ReturnTo->Parent,
+               ReturnTo->CallerContext);
   }
 
   bool cacheCallBaseWorkItems(CallBase &CB, Value *DefBeforeCB) {
@@ -771,9 +825,13 @@ public:
       }
       FoundArg = true;
       valueRanges()[ArgToTrack] = valueRanges()[DefBeforeCB];
-      for (User *Usr : ArgToTrack->users())
-        Deferred.push_back({Usr, ArgToTrack, ReturnInstVec.front(),
-                            CalledFunction, ArgToTrack, Current.ReturnTo});
+      // Enter the formal using the existing deferred-call mechanism. Its
+      // local contextual edges are expanded once the callee round begins.
+      Deferred.push_back(
+          {ArgToTrack, nullptr, ReturnInstVec.front(), CalledFunction,
+           ArgToTrack, Current.ReturnTo,
+           ClobberOracle->getConnections(DL).enter(CB, Current.Context),
+           nullptr});
     }
 
     if (!FoundArg)
@@ -930,6 +988,34 @@ public:
 
   void resolveCollectedClobbersAndContinue() {
     if (ArgumentLocation) {
+      if (!TaggedCallsScheduled) {
+        TaggedCallsScheduled = true;
+        const auto &Tags = ClobberOracle->getConnections(DL).tags(
+            const_cast<Value *>(ArgumentLocation->Ptr), *ArgumentBoundary,
+            ArgumentContext);
+        bool Added = false;
+        for (CallBase *CB : Tags.Calls) {
+          if (CB->getFunction() != ArgumentBoundary->getFunction() ||
+              NeverVisit.contains(CB) ||
+              llvm::any_of(PotentialClobbers, [&](const auto &Candidate) {
+                return Candidate.WriteCandidate == CB;
+              }))
+            continue;
+          // Reachability through storage is only a candidate-discovery edge.
+          // Reuse the frame-local call visitor without inventing an alias
+          // range for the container or entering its callee during collection.
+          auto Scan = std::make_shared<ConnectionScan>();
+          Scan->Edge = {TrackedBase, CB, {}, std::nullopt};
+          Scan->Ranges = RootValueRanges;
+          OwnedConnectionScans.push_back(Scan);
+          WorkList.push_back({CB, nullptr, ArgumentBoundary,
+                              ArgumentBoundary->getFunction(), TrackedBase,
+                              nullptr, ArgumentContext, std::move(Scan)});
+          Added = true;
+        }
+        if (Added)
+          return; // Drain these candidates through the existing visitor loop.
+      }
       if (!UnresolvedAliases.empty() ||
           llvm::any_of(OwnedContinuations, [](const auto &Continuation) {
             return !Continuation->Completed;
@@ -964,7 +1050,44 @@ public:
   // pointee unchanged. Only the oracle's call-write proof may skip a call.
   MemorySSAClobber queryLocation(const MemoryLocation &Location,
                                  Instruction &UseBoundary) {
-    return ClobberOracle->query(Location, UseBoundary);
+    return ClobberOracle->query(
+        Location, UseBoundary,
+        [&](CallBase &CB, const MemoryLocation &Tracked) {
+          // The oracle may inspect calls on either arm of a MemoryPhi. Keep
+          // their graph conditions tied to this function's incoming context.
+          // Conditional provenance scans normally have no complete context of
+          // their own. During the location-wide argument query, use the saved
+          // caller context, but bound tag reachability at this candidate call
+          // so later closure uses cannot make it unresolved.
+          bool HasArgumentTagContext =
+              ArgumentLocation && ArgumentBoundary &&
+              CB.getFunction() == ArgumentBoundary->getFunction() &&
+              UseBoundary.getFunction() == ArgumentBoundary->getFunction();
+          if (CB.getFunction() != UseBoundary.getFunction() ||
+              (Current.ConnectionPath && !HasArgumentTagContext))
+            return ConnectionResult::Unresolved;
+          if (llvm::any_of(PotentialClobbers, [&](const auto &Candidate) {
+                return Candidate.WriteCandidate == &CB;
+              }))
+            return ConnectionResult::Connected;
+          auto Result = ClobberOracle->getConnections(DL).callConnection(
+              CB, Tracked,
+              HasArgumentTagContext ? ArgumentContext : Current.Context,
+              // Bound the connectedness walk at the call being queried. The
+              // original lambda invocation may be later in the block; walking
+              // through it can pull unrelated closure-body uses into the
+              // candidate's disconnection proof.
+              &CB);
+          DEBUG(Logger::logs("proteus-pass")
+                << "[contextual-use] call absent from collection: "
+                << (Result == ConnectionResult::Disconnected
+                        ? "proven disconnected"
+                    : Result == ConnectionResult::Connected
+                        ? "connected through caller bindings"
+                        : "unresolved effects or pointer origins")
+                << "; " << CB << "\n");
+          return Result;
+        });
   }
 
   // Resolve Query.Range exactly when traversal found a pointer denoting its
@@ -1141,7 +1264,43 @@ public:
       pushBack(Usr, V, Current.Frame, Current.UseBoundary, Current.TrackedBase);
   }
 
-  void visitArgument(Argument &A) { pushBackPointerUsers(&A); }
+  void visitArgument(Argument &A) {
+    pushBackPointerUsers(&A);
+    // Connections already summarize complete caller chains. Do not compose
+    // conditional local scans transitively or change the current frame.
+    if (Current.ConnectionPath || !valueRanges().contains(&A))
+      return;
+    auto &Graph = ClobberOracle->getConnections(DL);
+    for (const auto &Edge : Graph.connections(A)) {
+      assert(cast<Argument>(Edge.From)->getParent() == Current.Frame &&
+             cast<Argument>(Edge.To)->getParent() == Current.Frame);
+      if (!Edge.applies(Current.Context))
+        continue;
+      DEBUG(Edge.print(Logger::logs("proteus-pass")));
+      // Unknown overlap has no sound range translation. Retain the oracle's
+      // existing conservative handling instead of inventing a byte offset.
+      if (!Edge.Displacement)
+        continue;
+      TrackedRange Range = valueRanges().lookup(&A);
+      if (SubOverflow(Range.Offset, *Edge.Displacement, Range.Offset)) {
+        fail();
+        return;
+      }
+      auto Existing = valueRanges().find(Edge.To);
+      if (Existing != valueRanges().end() && Existing->second == Range)
+        continue; // Already seeded by ordinary call traversal.
+      auto Scan = std::make_shared<ConnectionScan>();
+      Scan->Edge = Edge;
+      Scan->Ranges = valueRanges();
+      Scan->Ranges[Edge.To] = Range;
+      OwnedConnectionScans.push_back(Scan);
+      if (Current.ReturnTo)
+        ++Current.ReturnTo->PendingWorkItems;
+      WorkList.push_back({Edge.To, nullptr, Current.UseBoundary, Current.Frame,
+                          Current.TrackedBase, Current.ReturnTo,
+                          Current.Context, std::move(Scan)});
+    }
+  }
 
   void visitStoreInst(StoreInst &SI) {
     Value *Stored = SI.getValueOperand();
@@ -1242,6 +1401,7 @@ public:
                 .OffsetOfWriteToBasePtr = WriteOffset,
                 .Range = valueRanges().lookup(Current.TrackedBase),
             },
+        .DiscoveryOnly = bool(Current.ConnectionPath),
     });
   }
 
@@ -1295,6 +1455,23 @@ public:
         !CB.getType()->isAggregateType())
       return;
 
+    if (Current.ConnectionPath) {
+      // Keep this conditional scan in its current function. The call is a
+      // candidate; do not recover replacement provenance across it. A readonly
+      // pointer return needs additional alias propagation, so decline for now.
+      if (CB.onlyReadsMemory()) {
+        fail();
+        return;
+      }
+      noteTrackedWrite();
+      PotentialClobbers.push_back(
+          {&CB,
+           {Current.Frame, Current.TrackedBase, Current.UseBoundary, 0,
+            valueRanges().lookup(Current.TrackedBase)},
+           true});
+      return;
+    }
+
     Value *DefBeforeCB = getLastDef();
 
     // A pointer-returning helper is another segment of this same use walk.
@@ -1337,6 +1514,7 @@ public:
           ReturnTo->CallerUseBoundary = Current.UseBoundary;
           ReturnTo->CallerTrackedBase = Current.TrackedBase;
           ReturnTo->Parent = Current.ReturnTo;
+          ReturnTo->CallerContext = Current.Context;
           ReturnTo->Ranges = valueRanges();
           for (unsigned ArgI = 0;
                ArgI < CB.arg_size() && ArgI < Callee->arg_size(); ++ArgI) {
@@ -1344,8 +1522,9 @@ public:
               continue;
             Argument *Formal = Callee->getArg(ArgI);
             ReturnTo->Ranges[Formal] = valueRanges()[DefBeforeCB];
-            for (User *Usr : Formal->users())
-              pushBack(Usr, Formal, Callee, Returns.front(), Formal, ReturnTo);
+            pushBack(
+                Formal, nullptr, Callee, Returns.front(), Formal, ReturnTo,
+                ClobberOracle->getConnections(DL).enter(CB, Current.Context));
             EnteredReturnedAlias = true;
           }
           // Seen contains raw continuation addresses; retain their owners.
@@ -1424,6 +1603,12 @@ public:
   }
 
   void visitReturnInst(ReturnInst &RI) {
+    if (Current.ConnectionPath) {
+      // Conditional alias facts cannot set the ordinary continuation's
+      // returned range. Supporting that requires context-specific provenance.
+      fail();
+      return;
+    }
     if (!Current.ReturnTo || RI.getReturnValue() != Current.LastVal ||
         !Current.LastVal || !valueRanges().contains(Current.LastVal)) {
       fail();
@@ -1705,7 +1890,8 @@ public:
                          .TrackedPtr = Current.TrackedBase,
                          .UseBoundary = Current.UseBoundary,
                          .OffsetOfWriteToBasePtr = OffsetCorrection,
-                         .Range = valueRanges().lookup(Current.TrackedBase)}});
+                         .Range = valueRanges().lookup(Current.TrackedBase)},
+         .DiscoveryOnly = bool(Current.ConnectionPath)});
   }
 
   void visitInstruction(Instruction &I) {
