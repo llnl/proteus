@@ -124,7 +124,7 @@ jobs:
         include:
           - os: ubuntu-latest
             artifact_name: wheels-host-linux
-          - os: macos-14
+          - os: macos-15
             artifact_name: wheels-host-macos
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -163,7 +163,7 @@ jobs:
           CIBW_ENVIRONMENT_LINUX: >-
             LLVM_INSTALL_DIR=/opt/llvm-${{ env.PROTEUS_LLVM_VERSION }} PATH=/opt/llvm-${{ env.PROTEUS_LLVM_VERSION }}/bin:$PATH
           CIBW_ENVIRONMENT_MACOS: >-
-            MACOSX_DEPLOYMENT_TARGET=14.0
+            MACOSX_DEPLOYMENT_TARGET=15.0
             LLVM_INSTALL_DIR=/opt/homebrew/opt/llvm@${{ env.PROTEUS_LLVM_MAJOR }}
             CC=/opt/homebrew/opt/llvm@${{ env.PROTEUS_LLVM_MAJOR }}/bin/clang
             CXX=/opt/homebrew/opt/llvm@${{ env.PROTEUS_LLVM_MAJOR }}/bin/clang++

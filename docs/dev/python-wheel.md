@@ -119,7 +119,7 @@ python3 -m venv /tmp/proteus-wheel-venv
 
 brew install llvm@22
 
-MACOSX_DEPLOYMENT_TARGET=14.0 \
+MACOSX_DEPLOYMENT_TARGET=15.0 \
 LLVM_INSTALL_DIR="$(brew --prefix llvm@22)" \
   /tmp/proteus-wheel-venv/bin/python -m build --wheel \
   --outdir wheelhouse \
