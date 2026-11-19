@@ -746,12 +746,9 @@ public:
 inline bool analyzeLambdaUses(
     llvm::Module &M,
     DenseMap<CallBase *, LambdaKernelArgAnalysis> &CallBaseToArgOffset,
-    const SmallVector<CallBase *> &CBToAnalyze, uint64_t FunctorStructSize) {
+    const SmallVector<CallBase *> &CBToAnalyze, uint64_t FunctorStructSize,
+    std::shared_ptr<MemorySSAClobberOracle> Oracle) {
   DEBUG(Logger::logs("proteus-pass") << "Beginning analysis " << "\n");
-  // The module is immutable during this pass. Reuse function-local AA and
-  // MemorySSA state across wrapper callsites instead of rebuilding it for
-  // every registered functor invocation.
-  auto Oracle = std::make_shared<MemorySSAClobberOracle>();
   for (auto *FunctorCB : CBToAnalyze) {
     LambdaArgVisitor Visitor(FunctorCB, M, FunctorStructSize, Oracle);
     while (!Visitor.empty() && !Visitor.success() && !Visitor.failed()) {

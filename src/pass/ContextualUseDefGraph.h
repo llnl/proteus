@@ -123,6 +123,14 @@ class ContextualUseDefGraph {
   void relate(llvm::Value *From, llvm::Value *To, ContextualConnection Edge,
               int64_t Delta, llvm::SmallVectorImpl<ContextualConnection> &Out,
               unsigned &Budget, unsigned Depth) {
+    // A null pointer cannot designate any object. In particular, CUDA lowers
+    // printf's unused va_list argument to a literal null pointer; leaving it
+    // unresolved would prevent the connection graph from proving that the
+    // call has no path to a tracked closure.
+    if (llvm::isa<llvm::ConstantPointerNull>(From) ||
+        llvm::isa<llvm::ConstantPointerNull>(To))
+      return;
+
     auto Unknown = [&] {
       Edge.Displacement.reset();
       Out.push_back(std::move(Edge));
@@ -455,19 +463,22 @@ public:
       return ConnectionResult::Connected;
     if (Tags.Unresolved)
       return ConnectionResult::Unresolved;
-    // An unavailable implementation cannot supply a complete use graph.
-    // An explicit argument-memory contract still permits the existing
-    // argument-connection query for declarations such as write_output.
-    auto *Callee = Call.getCalledFunction();
-    if ((!Callee || Callee->isDeclaration() || Callee->isInterposable()) &&
-        !Call.onlyAccessesArgMemory())
-      return ConnectionResult::Unresolved;
+    // The caller graph is the available proof of whether this call can reach
+    // the non-global tracked object. Inspect its pointer arguments even for an
+    // opaque callee: a connected or unresolved path still rejects the call,
+    // while disconnected pointer arguments prove it disjoint. With no pointer
+    // arguments, an opaque call without an arg-memory-only contract may still
+    // access the object through hidden state, so it remains unresolved.
     bool Unknown = false;
+    bool HasPointerArgument = false;
     for (unsigned I = 0; I < Call.arg_size(); ++I) {
       auto *Arg = Call.getArgOperand(I);
       if (Arg->getType()->isAggregateType())
         return ConnectionResult::Unresolved;
-      if (!Arg->getType()->isPointerTy() || Call.onlyReadsMemory(I))
+      if (!Arg->getType()->isPointerTy())
+        continue;
+      HasPointerArgument = true;
+      if (Call.onlyReadsMemory(I))
         continue;
       // LambdaASTChecker rejects registered wrapper objects with global
       // lifetime. A direct pointer to an unrelated global therefore cannot
@@ -481,6 +492,11 @@ public:
         return Result;
       Unknown |= Result == ConnectionResult::Unresolved;
     }
+    auto *Callee = Call.getCalledFunction();
+    if (!HasPointerArgument &&
+        (!Callee || Callee->isDeclaration() || Callee->isInterposable()) &&
+        !Call.onlyAccessesArgMemory())
+      return ConnectionResult::Unresolved;
     return Unknown ? ConnectionResult::Unresolved
                    : ConnectionResult::Disconnected;
   }
