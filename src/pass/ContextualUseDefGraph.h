@@ -231,6 +231,7 @@ public:
       Boundaries[C->Call->getFunction()] = C->Call;
     }
     llvm::SmallVector<std::pair<llvm::Value *, unsigned>, 32> Pending;
+    unsigned Budget = MaxWork;
     auto Add = [&](llvm::Value *V, unsigned Bits) {
       unsigned New = Bits & ~Result.Values.lookup(V);
       if (New) {
@@ -238,8 +239,30 @@ public:
         Pending.emplace_back(V, New);
       }
     };
+    // A tagged container may be reached through a different pointer value
+    // than the store that put the tracked pointer in it. Def-use traversal
+    // alone misses that case (%a and %b can alias even though they have no SSA
+    // relationship). Close container tags over every pointer reload whose
+    // source may alias the container. This is deliberately an overestimate;
+    // AA's NoAlias result is the only reason to leave a reload out.
+    auto AddAliasingReloads = [&](llvm::Value *Container, llvm::Function &F) {
+      llvm::Instruction *End = Boundaries.lookup(&F);
+      for (llvm::BasicBlock &BB : F)
+        for (llvm::Instruction &I : BB) {
+          if (!Budget) {
+            Result.Unresolved = true;
+            return;
+          }
+          --Budget;
+          auto *LI = llvm::dyn_cast<llvm::LoadInst>(&I);
+          if (!LI || !LI->getType()->isPointerTy() ||
+              (End && !llvm::isPotentiallyReachable(LI, End)))
+            continue;
+          if (!NoAlias(Container, LI->getPointerOperand(), F))
+            Add(LI, ConnectionTags::Pointer | ConnectionTags::Container);
+        }
+    };
     Add(Root, ConnectionTags::Pointer);
-    unsigned Budget = MaxWork;
     while (!Pending.empty() && Budget) {
       auto [V, Bits] = Pending.pop_back_val();
       --Budget;
@@ -271,6 +294,15 @@ public:
                 Base) &&
             !RoundTripSource)
           Result.Unresolved = true;
+        if (Bits & ConnectionTags::Container) {
+          llvm::Function *F = nullptr;
+          if (auto *I = llvm::dyn_cast<llvm::Instruction>(V))
+            F = I->getFunction();
+          else if (auto *A = llvm::dyn_cast<llvm::Argument>(V))
+            F = A->getParent();
+          if (F)
+            AddAliasingReloads(V, *F);
+        }
       }
       if (auto *A = llvm::dyn_cast<llvm::Argument>(V)) {
         auto *F = A->getParent();
@@ -437,11 +469,10 @@ public:
         return ConnectionResult::Unresolved;
       if (!Arg->getType()->isPointerTy() || Call.onlyReadsMemory(I))
         continue;
-      // The tracked location is a registered lambda closure. The frontend
-      // rejects registering closure storage with global lifetime, so a direct
-      // pointer into a GlobalVariable cannot denote these closure bytes. If
-      // the closure pointer was published through global storage, tags() marks
-      // that escape unresolved before we get here.
+      // LambdaASTChecker rejects registered wrapper objects with global
+      // lifetime. A direct pointer to an unrelated global therefore cannot
+      // denote the tracked closure bytes. Publication of the closure pointer
+      // through a global slot remains unresolved in tags().
       if (llvm::isa<llvm::GlobalVariable>(llvm::getUnderlyingObject(Arg)))
         continue;
       auto Result =

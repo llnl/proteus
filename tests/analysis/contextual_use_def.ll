@@ -13,6 +13,26 @@ define internal void @write_global(ptr %p) {
   ret void
 }
 
+define internal void @write_through_slot(ptr %slot) {
+  %destination = load ptr, ptr %slot
+  store i32 42, ptr %destination, align 4
+  ret void
+}
+
+; The stored pointer goes through %write_slot, but the reload uses the
+; potentially aliasing %read_slot. No SSA edge connects those formals.
+define void @aliasing_container(ptr %write_slot, ptr %read_slot) {
+  %closure = alloca i32, align 4
+  %relay = alloca ptr, align 8
+  store i32 1, ptr %closure, align 4
+  store ptr %closure, ptr %write_slot, align 8
+  %indirect = load ptr, ptr %read_slot, align 8
+  store ptr %indirect, ptr %relay, align 8
+  call void @write_through_slot(ptr %relay)
+  %value = load i32, ptr %closure, align 4
+  ret void
+}
+
 define internal void @use_closure(ptr %p) {
   %value = load i32, ptr %p, align 4
   ret void

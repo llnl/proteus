@@ -1,3 +1,0 @@
-interface:
-  display_name: "Lambda Analysis"
-  short_description: "Diagnose Proteus lambda provenance"

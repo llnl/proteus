@@ -261,6 +261,38 @@ int main(int Argc, char **Argv) {
               nullptr) == ConnectionResult::Disconnected,
           "pointer integer round trip lost the incoming graph root");
 
+  auto *AliasingContainer = M->getFunction("aliasing_container");
+  AllocaInst *AliasingClosure = nullptr;
+  LoadInst *AfterAliasingWriter = nullptr;
+  for (Instruction &I : AliasingContainer->getEntryBlock()) {
+    if (auto *AI = dyn_cast<AllocaInst>(&I); AI && AI->getName() == "closure")
+      AliasingClosure = AI;
+    if (auto *LI = dyn_cast<LoadInst>(&I); LI && LI->getName() == "value")
+      AfterAliasingWriter = LI;
+  }
+  auto AliasingContainerCalls = calls(*AliasingContainer);
+  require(AliasingClosure && AfterAliasingWriter &&
+              AliasingContainerCalls.size() == 1,
+          "malformed aliasing-container fixture");
+  MemoryLocation AliasingTracked(AliasingClosure, LocationSize::precise(4));
+  auto &AliasingTags =
+      Graph.tags(AliasingClosure, *AfterAliasingWriter, nullptr);
+  require(AliasingTags.Calls.contains(AliasingContainerCalls.front()),
+          "a reload through a may-alias pointer slot was missed");
+  require(Graph.callConnection(*AliasingContainerCalls.front(), AliasingTracked,
+                               nullptr, AfterAliasingWriter) ==
+              ConnectionResult::Connected,
+          "writer reached through an aliasing slot was discharged");
+  auto AliasingClobber =
+      Oracle->query(AliasingTracked, *AfterAliasingWriter,
+                    [&](CallBase &CB, const MemoryLocation &Location) {
+                      return Graph.callConnection(CB, Location, nullptr, &CB);
+                    });
+  require(AliasingClobber.Kind == MemorySSAClobberKind::Definition &&
+              AliasingClobber.ClobberingInstruction ==
+                  AliasingContainerCalls.front(),
+          "MemorySSA skipped the writer reached through an aliasing slot");
+
   auto *GlobalArgHelper = M->getFunction("global_arg_helper");
   auto GlobalArgCalls = calls(*GlobalArgHelper);
   require(GlobalArgCalls.size() == 2,

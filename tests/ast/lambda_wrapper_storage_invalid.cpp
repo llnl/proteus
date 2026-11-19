@@ -23,6 +23,12 @@ static auto makeBody(int A, int B) {
 
 using Registered = decltype(makeBody(0, 0));
 
+// Global-lifetime wrapper storage is outside the closure lifetime proof.
+// clang-format off
+// expected-error@+2 {{a registered lambda cannot be stored in global-lifetime storage}}
+// clang-format on
+static Registered GlobalRegisteredBody = makeBody(0, 0);
+
 template <typename F> struct Envelope {
   F Body;
   std::uint64_t Suffix;
@@ -32,6 +38,22 @@ template <typename F> struct PrefixedEnvelope {
   std::uint64_t Prefix[2];
   F Body;
 };
+
+struct VirtualWrapperBase {
+  Registered Body;
+};
+struct VirtualWrapperDerived : virtual VirtualWrapperBase {};
+
+// The wrapper interval is found through a virtual base using its virtual-base
+// offset. The whole-object copy is legal and must not assert in
+// ASTRecordLayout.
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdynamic-class-memaccess"
+void wholeVirtualBaseCopy(VirtualWrapperDerived *Dest,
+                          const VirtualWrapperDerived *Source) {
+  __builtin_memcpy(Dest, Source, sizeof(*Dest));
+}
+#pragma clang diagnostic pop
 
 // Interior-slot splice: write through a type-erased pointer. The casts are
 // recorded; the WRITE through them is the error.
@@ -52,6 +74,41 @@ void directErasedWrite(Registered *Body) {
   // expected-error@+2 {{cannot be reinterpreted through a type-erased mutable pointer}}
   // clang-format on
   *reinterpret_cast<std::uint32_t *>(Body) = 7;
+}
+
+// C-style casts and static_cast chains erase the same closure storage.
+void cStyleErasedWrite(Registered Copy) {
+  auto *Words = (std::uint32_t *)&Copy;
+  // clang-format off
+  // expected-error@+2 {{cannot be reinterpreted through a type-erased mutable pointer}}
+  // clang-format on
+  Words[1] = 5;
+}
+
+void staticCastErasedWrite(Registered Copy) {
+  auto *Words = static_cast<std::uint32_t *>(static_cast<void *>(&Copy));
+  // clang-format off
+  // expected-error@+2 {{cannot be reinterpreted through a type-erased mutable pointer}}
+  // clang-format on
+  Words[1] = 5;
+}
+
+void incrementErasedWrite(Registered Copy) {
+  auto *Words = reinterpret_cast<std::uint32_t *>(&Copy);
+  // clang-format off
+  // expected-error@+2 {{cannot be reinterpreted through a type-erased mutable pointer}}
+  // clang-format on
+  ++Words[1];
+}
+
+void writeErasedWords(std::uint32_t *Words) { Words[1] = 5; }
+
+void callErasedWriter(Registered Copy) {
+  auto *Words = reinterpret_cast<std::uint32_t *>(&Copy);
+  // clang-format off
+  // expected-error@+2 {{cannot be reinterpreted through a type-erased mutable pointer}}
+  // clang-format on
+  writeErasedWords(Words);
 }
 
 // Wrong-length copy: covers byte 0 of the closure but not its extent.

@@ -30,6 +30,7 @@
 #include <llvm/IR/Module.h>
 #include <llvm/IR/PassManager.h>
 #include <llvm/IR/Type.h>
+#include <llvm/Support/ErrorHandling.h>
 #include <memory>
 #include <optional>
 
@@ -246,9 +247,14 @@ private:
 
 public:
   LambdaArgVisitor(CallBase *LambdaCB, Module &M, uint64_t FunctorSize_)
+      : LambdaArgVisitor(LambdaCB, M, FunctorSize_,
+                         std::make_shared<MemorySSAClobberOracle>()) {}
+
+  LambdaArgVisitor(CallBase *LambdaCB, Module &M, uint64_t FunctorSize_,
+                   std::shared_ptr<MemorySSAClobberOracle> Oracle)
       : LambdaCB(LambdaCB), DL(M.getDataLayout()),
-        ClobberOracle(std::make_shared<MemorySSAClobberOracle>()),
-        FunctorSize(FunctorSize_), Offset(0), PointeeUseBoundary(LambdaCB) {
+        ClobberOracle(std::move(Oracle)), FunctorSize(FunctorSize_), Offset(0),
+        PointeeUseBoundary(LambdaCB) {
 
     auto *ClosurePtr = LambdaCB->getArgOperand(0);
     WorkList.push_back({ClosurePtr, LambdaCB});
@@ -541,43 +547,16 @@ public:
     WorkList.push_back({Ptr->getPointerOperand(), &ITP});
   }
 
-  void visitMemIntrinsic(MemIntrinsic &I) {
-    auto *MT = dyn_cast<MemTransferInst>(&I); // memcpy/memmove
-    if (!MT) {
-      // memset doesn't preserve any src->dst relationship we can use
-      fail();
-      return;
-    }
-
-    int64_t DstOff = 0, SrcOff = 0;
-    Value *DstBase =
-        GetPointerBaseWithConstantOffset(MT->getRawDest(), DstOff, DL);
-    Value *SrcBase =
-        GetPointerBaseWithConstantOffset(MT->getRawSource(), SrcOff, DL);
-    if (!DstBase || !SrcBase) {
-      fail();
-      return;
-    }
-
-    // Only valid if the tracked byte lies within the copied region AND the
-    // copy spans the tracked functor's full extent; a shorter copy (the
-    // classic wrong-sizeof bug) splices two sources into one functor and the
-    // byte-0 witness would lie for the uncovered slots.
-    if (auto *LenC = dyn_cast<ConstantInt>(MT->getLength())) {
-      uint64_t Len = LenC->getZExtValue();
-      if (Offset < DstOff || uint64_t(Offset - DstOff) >= Len ||
-          uint64_t(Offset - DstOff) + FunctorSize > Len) {
-        fail();
-        return;
-      }
-    }
-
-    WorkList.push_back({SrcBase->stripPointerCasts(), &I});
-    FollowingInvocationPointee = true;
-    PointeeUseBoundary = &I;
-    Offset = Offset - DstOff + SrcOff;
+  void visitMemIntrinsic(MemIntrinsic &) {
+    // The worklist contains pointer/aggregate values, never void-valued
+    // memory intrinsics. LambdaInstUseVisitor handles memory-intrinsic
+    // candidates and owns the functor-extent coverage check.
+    llvm_unreachable("MemIntrinsic entered LambdaArgVisitor worklist");
   }
 
+  // Value-producing intrinsics can be enqueued as operands by calls or
+  // stores, so keep this conservative fallback for pointer-producing
+  // intrinsics. Void memory intrinsics cannot enter the value worklist.
   void visitIntrinsicInst(IntrinsicInst &) {
     fail();
     return;
@@ -769,8 +748,12 @@ inline bool analyzeLambdaUses(
     DenseMap<CallBase *, LambdaKernelArgAnalysis> &CallBaseToArgOffset,
     const SmallVector<CallBase *> &CBToAnalyze, uint64_t FunctorStructSize) {
   DEBUG(Logger::logs("proteus-pass") << "Beginning analysis " << "\n");
+  // The module is immutable during this pass. Reuse function-local AA and
+  // MemorySSA state across wrapper callsites instead of rebuilding it for
+  // every registered functor invocation.
+  auto Oracle = std::make_shared<MemorySSAClobberOracle>();
   for (auto *FunctorCB : CBToAnalyze) {
-    LambdaArgVisitor Visitor(FunctorCB, M, FunctorStructSize);
+    LambdaArgVisitor Visitor(FunctorCB, M, FunctorStructSize, Oracle);
     while (!Visitor.empty() && !Visitor.success() && !Visitor.failed()) {
       auto [V, LastSeen] = Visitor.back();
       Visitor.MemoryAnalysisPtrUse = LastSeen;

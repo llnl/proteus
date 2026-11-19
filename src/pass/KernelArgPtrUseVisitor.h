@@ -1172,9 +1172,9 @@ public:
   // NOTE: deliberately NOT widened to the tracked entity's extent -- interior
   // slot stores are legitimate parallel copies in slot-wise assembly (the
   // mfem shape), and extent-wide visibility would require per-piece
-  // reconciliation to accept them. Interior-write soundness is a frontend
-  // contract; see the functor-extent discussion in
-  // docs/dev/reviews/clobbering-aware-use-analysis.md.
+  // reconciliation to accept them. The frontend rejects partial type-erased
+  // writes, and whole-object copies are separately checked against the full
+  // registered functor extent.
   std::optional<MemoryLocation>
   getPreciseTrackedLocation(const ClobberQuery &Query) const {
     if (Query.Range.Extent == 0)

@@ -21,12 +21,9 @@
 // Case 2 (kernelEnvelopeSuffix): the functor is the leading member of an
 // envelope whose trailing field is overwritten after the whole-envelope copy.
 // The functor's bytes are untouched, so specialization must survive -- but
-// without optnone the zero-index GEPs fold away, the reconciliation query
-// falls back to an unbounded location, and MemorySSA selects the suffix store
-// (outside the functor's extent) as the clobber: a spurious decline.
-// EXPECTED TO FAIL until the query location is bounded by the functor's size
-// (gate 8): the fix is MemoryLocation(base, proteus.functor_size), which
-// makes the out-of-range suffix store non-aliasing by construction.
+// without optnone the zero-index GEPs fold away. The registered functor extent
+// must keep the suffix store outside the queried location so specialization
+// survives.
 template <typename F>
 __device__ __attribute__((noinline)) static void invoke(F Lambda) {
   Lambda();

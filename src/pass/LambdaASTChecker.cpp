@@ -248,9 +248,10 @@ getWrapperIntervalInType(clang::QualType Root, clang::ASTContext &Context,
     if (auto Inner =
             getWrapperIntervalInType(Base.getType(), Context, Depth + 1)) {
       const auto *BaseRecord = getCanonicalRecord(Base.getType());
+      const auto *BaseDecl = llvm::cast<clang::CXXRecordDecl>(BaseRecord);
       uint64_t BaseOff =
-          Layout
-              .getBaseClassOffset(llvm::cast<clang::CXXRecordDecl>(BaseRecord))
+          (Base.isVirtual() ? Layout.getVBaseClassOffset(BaseDecl)
+                            : Layout.getBaseClassOffset(BaseDecl))
               .getQuantity();
       return std::make_pair(BaseOff + Inner->first, Inner->second);
     }
@@ -305,6 +306,28 @@ bool expressionContains(const clang::Expr *Haystack,
                         const clang::Expr *Needle) {
   ExpressionSearchVisitor Visitor(Needle);
   Visitor.TraverseStmt(const_cast<clang::Expr *>(Haystack));
+  return Visitor.found();
+}
+
+class WrapperPointerTypeVisitor
+    : public clang::RecursiveASTVisitor<WrapperPointerTypeVisitor> {
+public:
+  bool VisitExpr(clang::Expr *Expression) {
+    clang::QualType Type = Expression->getType();
+    Found |= Type->isPointerType() &&
+             typeContainsLambdaFunctorWrapper(Type->getPointeeType());
+    return !Found;
+  }
+
+  bool found() const { return Found; }
+
+private:
+  bool Found = false;
+};
+
+bool expressionContainsWrapperPointer(const clang::Expr *Expression) {
+  WrapperPointerTypeVisitor Visitor;
+  Visitor.TraverseStmt(const_cast<clang::Expr *>(Expression));
   return Visitor.found();
 }
 
@@ -410,20 +433,23 @@ public:
         TypeErasedWrapperStorage(TypeErasedWrapperStorage),
         MemoryBuiltinOnWrapper(MemoryBuiltinOnWrapper), Reported(Reported) {}
 
-  bool VisitCXXReinterpretCastExpr(clang::CXXReinterpretCastExpr *Cast) {
+  bool VisitCastExpr(clang::CastExpr *Cast) {
+    // Implicit conversions into builtin void* parameters are part of ordinary
+    // whole-object memory operations. The erased-storage contract concerns an
+    // explicit cast chosen by the source program (C-style, static, or
+    // reinterpret cast).
+    if (!llvm::isa<clang::ExplicitCastExpr>(Cast))
+      return true;
     if (isPointerToLambdaFunctorWrapper(Cast->getType(), 2))
       report(Cast->getExprLoc(), Cast->getSourceRange(),
              StorageHazard::TypeErasedSlot, TypeErasedSlot);
-    // Record casts that erase wrapper-containing storage into a mutable
-    // pointer. The cast alone is legal (container_of-style address math and
-    // const reads are common); only a WRITE through the erased pointer can
-    // break the whole-object discipline the IR analysis's witness model
-    // assumes (docs/dev/design/lambda-closure-provenance.md). The write scan
-    // happens in diagnoseErasedPointerWrites after the traversal.
-    clang::QualType Source = Cast->getSubExpr()->getType();
+    // Record explicit cast chains that erase wrapper-containing
+    // storage into a mutable pointer. The cast alone is legal; only a write
+    // through the erased pointer breaks the whole-object discipline. Search
+    // the whole source expression so chains such as
+    // static_cast<uint32_t *>(static_cast<void *>(&Copy)) stay tainted.
     clang::QualType Dest = Cast->getType();
-    if (Source->isPointerType() &&
-        typeContainsLambdaFunctorWrapper(Source->getPointeeType()) &&
+    if (expressionContainsWrapperPointer(Cast->getSubExpr()) &&
         Dest->isPointerType() &&
         !typeContainsLambdaFunctorWrapper(
             Dest->getPointeeType().getNonReferenceType()) &&
@@ -442,6 +468,12 @@ public:
     return true;
   }
 
+  bool VisitUnaryOperator(clang::UnaryOperator *Operator) {
+    if (Operator->isIncrementDecrementOp())
+      Mutations.push_back(Operator);
+    return true;
+  }
+
   // A write whose destination goes through an erased pointer: *p = v or
   // p[i] = v where p is a recorded erased cast or a variable holding one.
   void diagnoseErasedPointerWrites() {
@@ -452,21 +484,55 @@ public:
           !Variable->getType()->isPointerType() ||
           Variable->getType()->getPointeeType().isConstQualified())
         continue;
-      for (const clang::CXXReinterpretCastExpr *Cast : ErasedWrapperCasts)
+      for (const clang::CastExpr *Cast : ErasedWrapperCasts)
         if (expressionContains(Variable->getInit(), Cast))
           ErasedPointerVariables.insert(Variable->getCanonicalDecl());
     }
     for (const clang::BinaryOperator *Operator : Assignments) {
-      const clang::Expr *LHS = Operator->getLHS();
-      bool ThroughErased = false;
-      for (const clang::CXXReinterpretCastExpr *Cast : ErasedWrapperCasts)
-        ThroughErased |= expressionContains(LHS, Cast);
-      for (const clang::VarDecl *Variable : ErasedPointerVariables)
-        ThroughErased |= referencesVariable(LHS, Variable);
-      if (ThroughErased)
+      if (writesThroughErasedPointer(Operator->getLHS()))
         report(Operator->getOperatorLoc(), Operator->getSourceRange(),
                StorageHazard::TypeErasedWrapperStorage,
                TypeErasedWrapperStorage);
+    }
+    for (const clang::UnaryOperator *Operator : Mutations)
+      if (writesThroughErasedPointer(Operator->getSubExpr()))
+        report(Operator->getOperatorLoc(), Operator->getSourceRange(),
+               StorageHazard::TypeErasedWrapperStorage,
+               TypeErasedWrapperStorage);
+    for (const clang::CallExpr *Call : Calls) {
+      const clang::FunctionDecl *Callee = Call->getDirectCallee();
+      if (!Callee)
+        continue;
+      const unsigned Count =
+          std::min(Call->getNumArgs(), Callee->getNumParams());
+      for (unsigned I = 0; I < Count; ++I) {
+        if (!isErasedPointerExpression(Call->getArg(I)))
+          continue;
+        bool Writes = false;
+        const unsigned Builtin = Callee->getBuiltinID();
+        if (I == 0 && (Builtin == clang::Builtin::BImemcpy ||
+                       Builtin == clang::Builtin::BImemmove ||
+                       Builtin == clang::Builtin::BImemset ||
+                       Builtin == clang::Builtin::BI__builtin_memcpy ||
+                       Builtin == clang::Builtin::BI__builtin_memmove ||
+                       Builtin == clang::Builtin::BI__builtin_memset ||
+                       Builtin == clang::Builtin::BI__builtin_memcpy_inline ||
+                       Builtin == clang::Builtin::BI__builtin_memset_inline))
+          Writes = true;
+        else if (I < Callee->getNumParams() &&
+                 Callee->getParamDecl(I)->getType()->isPointerType() &&
+                 !Callee->getParamDecl(I)
+                      ->getType()
+                      ->getPointeeType()
+                      .isConstQualified()) {
+          const clang::FunctionDecl *Definition = Callee->getDefinition();
+          Writes = !Definition || getParameterEffects(Definition, I).Written;
+        }
+        if (Writes)
+          report(Call->getExprLoc(), Call->getSourceRange(),
+                 StorageHazard::TypeErasedWrapperStorage,
+                 TypeErasedWrapperStorage);
+      }
     }
   }
 
@@ -481,6 +547,7 @@ public:
   }
 
   bool VisitCallExpr(clang::CallExpr *Call) {
+    Calls.push_back(Call);
     const clang::FunctionDecl *Callee = Call->getDirectCallee();
     if (!Callee)
       return true;
@@ -558,6 +625,39 @@ public:
   }
 
 private:
+  bool isErasedPointerExpression(const clang::Expr *Expression) const {
+    for (const clang::CastExpr *Cast : ErasedWrapperCasts)
+      if (expressionContains(Expression, Cast))
+        return true;
+    for (const clang::VarDecl *Variable : ErasedPointerVariables)
+      if (referencesVariable(Expression, Variable))
+        return true;
+    return false;
+  }
+
+  bool writesThroughErasedPointer(const clang::Expr *Lvalue) const {
+    Lvalue = ignoreTransparentExprs(Lvalue);
+    if (const auto *Array =
+            llvm::dyn_cast_or_null<clang::ArraySubscriptExpr>(Lvalue))
+      return isErasedPointerExpression(Array->getBase()) ||
+             writesThroughErasedPointer(Array->getBase());
+    if (const auto *Unary =
+            llvm::dyn_cast_or_null<clang::UnaryOperator>(Lvalue)) {
+      if (Unary->getOpcode() == clang::UO_Deref)
+        return isErasedPointerExpression(Unary->getSubExpr()) ||
+               writesThroughErasedPointer(Unary->getSubExpr());
+      return false;
+    }
+    if (const auto *Member =
+            llvm::dyn_cast_or_null<clang::MemberExpr>(Lvalue)) {
+      if (Member->isArrow())
+        return isErasedPointerExpression(Member->getBase()) ||
+               writesThroughErasedPointer(Member->getBase());
+      return writesThroughErasedPointer(Member->getBase());
+    }
+    return false;
+  }
+
   void report(clang::SourceLocation Location, clang::SourceRange Range,
               StorageHazard Hazard, unsigned Diagnostic) {
     const uint64_t Key =
@@ -574,10 +674,11 @@ private:
   unsigned MemoryBuiltinOnWrapper;
   llvm::DenseSet<uint64_t> &Reported;
   llvm::DenseMap<const clang::VarDecl *, unsigned> CallWrites;
-  llvm::SmallVector<const clang::CXXReinterpretCastExpr *, 4>
-      ErasedWrapperCasts;
+  llvm::SmallVector<const clang::CastExpr *, 4> ErasedWrapperCasts;
   llvm::SmallPtrSet<const clang::VarDecl *, 4> ErasedPointerVariables;
   llvm::SmallVector<const clang::BinaryOperator *, 8> Assignments;
+  llvm::SmallVector<const clang::UnaryOperator *, 8> Mutations;
+  llvm::SmallVector<const clang::CallExpr *, 8> Calls;
   llvm::SmallVector<const clang::VarDecl *, 8> InitializedVariables;
 };
 
@@ -710,6 +811,13 @@ public:
     return true;
   }
 
+  bool VisitVarDecl(clang::VarDecl *Variable) {
+    if (Variable->hasGlobalStorage() &&
+        typeContainsLambdaFunctorWrapper(Variable->getType()))
+      GlobalWrapperStorage.push_back(Variable);
+    return true;
+  }
+
   bool VisitCXXRecordDecl(clang::CXXRecordDecl *Record) {
     if (Record->isUnion() && Record->isCompleteDefinition())
       Unions.push_back(Record);
@@ -737,6 +845,7 @@ public:
 
   llvm::SmallVector<clang::LambdaExpr *, 16> Lambdas;
   llvm::SmallVector<clang::CXXRecordDecl *, 8> Unions;
+  llvm::SmallVector<clang::VarDecl *, 8> GlobalWrapperStorage;
   llvm::SmallVector<clang::FunctionDecl *, 32> Functions;
   llvm::SmallVector<clang::CallExpr *, 16> JitVariableCalls;
   llvm::SmallVector<clang::CallExpr *, 16> RegisterLambdaCalls;
@@ -794,6 +903,9 @@ public:
     const unsigned InvalidRegisterArgument = Diagnostics.getCustomDiagID(
         clang::DiagnosticsEngine::Error,
         "proteus::register_lambda requires a lambda closure object");
+    const unsigned GlobalWrapperStorage = Diagnostics.getCustomDiagID(
+        clang::DiagnosticsEngine::Error,
+        "a registered lambda cannot be stored in global-lifetime storage");
     const unsigned AlreadyRegistered = Diagnostics.getCustomDiagID(
         clang::DiagnosticsEngine::Error,
         "a lambda returned by proteus::register_lambda cannot be registered "
@@ -843,6 +955,10 @@ public:
         if (typeContainsLambdaFunctorWrapper(Field->getType()))
           Diagnostics.Report(Field->getLocation(), UnionOverWrapper)
               << Field->getSourceRange();
+
+    for (const clang::VarDecl *Variable : Visitor.GlobalWrapperStorage)
+      Diagnostics.Report(Variable->getLocation(), GlobalWrapperStorage)
+          << Variable->getSourceRange();
 
     llvm::DenseSet<uint64_t> ReportedStorageHazards;
     for (clang::FunctionDecl *Function : Visitor.Functions) {

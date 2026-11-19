@@ -149,8 +149,8 @@ private:
 
   /// Record the registered functor's byte size on each wrapper operator so
   /// the kernel-arg analysis can reason about the functor's full extent
-  /// rather than a single byte (see gate item 8 in
-  /// docs/dev/reviews/clobbering-aware-use-analysis.md).
+  /// rather than a single byte. A partial copy can replace only some closure
+  /// slots, so byte-zero provenance alone is not sufficient.
   void attachFunctorSizeToCallsiteMetadata(
       Module &M,
       const DenseMap<uint64_t, StructType *> &FunctorIDToFunctorTypeMap) {
