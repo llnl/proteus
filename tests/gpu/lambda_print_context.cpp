@@ -17,7 +17,8 @@ template <typename F> __device__ const F *UtilitySource;
 // copy is our model's write; it is not a claim that printf itself overwrites a
 // closure. The print-only control below uses the actual builtin without it.
 template <typename F>
-__device__ __attribute__((noinline, optnone)) static void printWithHiddenWrite() {
+__device__ __attribute__((noinline, optnone)) static void
+printWithHiddenWrite() {
   __builtin_memcpy(UtilityDestination<F>, UtilitySource<F>, sizeof(F));
   printf("Context utility\n");
 }
@@ -59,8 +60,8 @@ template <bool HiddenWrite> static void run(int *DeviceResult) {
       makeBody<HiddenWrite>(Initial + 16), DeviceResult);
   gpuErrCheck(gpuDeviceSynchronize());
   int Result[2];
-  gpuErrCheck(gpuMemcpy(Result, DeviceResult, sizeof(Result),
-                       gpuMemcpyDeviceToHost));
+  gpuErrCheck(
+      gpuMemcpy(Result, DeviceResult, sizeof(Result), gpuMemcpyDeviceToHost));
   printf("print context %d: %d %d\n", HiddenWrite, Result[0], Result[1]);
   fflush(stdout);
 }

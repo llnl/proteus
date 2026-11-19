@@ -10,7 +10,9 @@
 #include "gpu_common.h"
 #include <proteus/JitInterface.h>
 
-template <typename F> struct Context { F *Body; };
+template <typename F> struct Context {
+  F *Body;
+};
 template <typename F> __device__ F *PublishedBody;
 template <typename F> __device__ const F *PublishedFinal;
 
@@ -94,20 +96,20 @@ template <int Case> static auto makeBody(int Value) {
 }
 
 int main() {
-  kernelHistory<0><<<1, 1>>>(makeBody<0>(1001), makeBody<0>(1003),
-                            makeBody<0>(1009));
+  kernelHistory<0>
+      <<<1, 1>>>(makeBody<0>(1001), makeBody<0>(1003), makeBody<0>(1009));
   gpuErrCheck(gpuDeviceSynchronize());
-  kernelHistory<1><<<1, 1>>>(makeBody<1>(1013), makeBody<1>(1019),
-                            makeBody<1>(1021));
+  kernelHistory<1>
+      <<<1, 1>>>(makeBody<1>(1013), makeBody<1>(1019), makeBody<1>(1021));
   gpuErrCheck(gpuDeviceSynchronize());
-  kernelHistory<2><<<1, 1>>>(makeBody<2>(1031), makeBody<2>(1033),
-                            makeBody<2>(1039));
+  kernelHistory<2>
+      <<<1, 1>>>(makeBody<2>(1031), makeBody<2>(1033), makeBody<2>(1039));
   gpuErrCheck(gpuDeviceSynchronize());
-  kernelHistory<3><<<1, 1>>>(makeBody<3>(1051), makeBody<3>(1061),
-                            makeBody<3>(1063));
+  kernelHistory<3>
+      <<<1, 1>>>(makeBody<3>(1051), makeBody<3>(1061), makeBody<3>(1063));
   gpuErrCheck(gpuDeviceSynchronize());
-  kernelHistory<4><<<1, 1>>>(makeBody<4>(1079), makeBody<4>(1081),
-                            makeBody<4>(1087));
+  kernelHistory<4>
+      <<<1, 1>>>(makeBody<4>(1079), makeBody<4>(1081), makeBody<4>(1087));
   gpuErrCheck(gpuDeviceSynchronize());
 }
 

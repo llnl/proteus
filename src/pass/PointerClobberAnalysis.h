@@ -211,11 +211,13 @@ public:
       Connections = std::make_unique<ContextualUseDefGraph>(
           DL,
           [this](LoadInst &LI) -> Value * {
-            if (!LI.getType()->isPointerTy() || LI.isVolatile() || LI.isAtomic() ||
+            if (!LI.getType()->isPointerTy() || LI.isVolatile() ||
+                LI.isAtomic() ||
                 !isa<AllocaInst>(getUnderlyingObject(LI.getPointerOperand())))
               return nullptr;
             auto Clobber = query(LI);
-            auto *SI = dyn_cast_or_null<StoreInst>(Clobber.ClobberingInstruction);
+            auto *SI =
+                dyn_cast_or_null<StoreInst>(Clobber.ClobberingInstruction);
             if (Clobber.Kind != MemorySSAClobberKind::Definition || !SI ||
                 SI->isVolatile() || SI->isAtomic() ||
                 SI->getValueOperand()->getType() != LI.getType() ||
@@ -225,18 +227,18 @@ public:
             return SI->getValueOperand();
           },
           [this](Value *A, Value *B, Function &F) {
-            return getState(F).getAA().alias(MemoryLocation::getBeforeOrAfter(A),
-                                           MemoryLocation::getBeforeOrAfter(B)) ==
+            return getState(F).getAA().alias(
+                       MemoryLocation::getBeforeOrAfter(A),
+                       MemoryLocation::getBeforeOrAfter(B)) ==
                    AliasResult::NoAlias;
           });
     return *Connections;
   }
 
-  MemorySSAClobber query(const MemoryLocation &Location,
-                         Instruction &UseBoundary,
-                         function_ref<ConnectionResult(
-                             CallBase &, const MemoryLocation &)>
-                             ConnectionQuery = nullptr) {
+  MemorySSAClobber
+  query(const MemoryLocation &Location, Instruction &UseBoundary,
+        function_ref<ConnectionResult(CallBase &, const MemoryLocation &)>
+            ConnectionQuery = nullptr) {
     FunctionMemorySSAState &State = getState(*UseBoundary.getFunction());
     MemorySSA &MSSA = State.getMemorySSA();
     MemoryAccess *Before = getStateBefore(MSSA, UseBoundary);
@@ -279,9 +281,9 @@ public:
       if (auto *Def = dyn_cast<MemoryDef>(Clobber)) {
         auto *CB = dyn_cast_or_null<CallBase>(Def->getMemoryInst());
         if (CB) {
-          ConnectionResult Connectivity =
-              ConnectionQuery ? ConnectionQuery(*CB, Location)
-                              : ConnectionResult::Unresolved;
+          ConnectionResult Connectivity = ConnectionQuery
+                                              ? ConnectionQuery(*CB, Location)
+                                              : ConnectionResult::Unresolved;
           // A completed disconnection proof from collection can discharge a
           // clobber. Absence from an incomplete candidate set cannot. Retain
           // existing call-effect proofs for cases the graph does not cover.

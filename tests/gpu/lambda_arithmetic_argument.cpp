@@ -18,10 +18,11 @@ unrelatedArithmetic(int Value, int *Output) {
 // Acceptance criterion for the conservative call-write proof: both pointers
 // enter this frame as arguments. Mapping the arithmetic helper's destination
 // back to Output does not establish that it is disjoint from Body. Decline
-// specialization without assuming that distinct formals denote distinct objects.
-// Contrast lambda_unrelated_arithmetic.cpp, where Output is a fresh local in
-// this frame and the test requires specialization. optnone preserves the calls
-// and pointer spills so optimization cannot supply the missing context for us.
+// specialization without assuming that distinct formals denote distinct
+// objects. Contrast lambda_unrelated_arithmetic.cpp, where Output is a fresh
+// local in this frame and the test requires specialization. optnone preserves
+// the calls and pointer spills so optimization cannot supply the missing
+// context for us.
 template <typename F>
 __device__ __attribute__((noinline, optnone)) static int
 invokeAfterArithmetic(F *Body, int *Output) {
@@ -39,15 +40,16 @@ int main() {
   auto Body = proteus::register_lambda(
       [X = proteus::jit_variable(53)] __host__ __device__ { return X + 0; });
   int *DeviceValues = nullptr;
-  gpuErrCheck(gpuMalloc(reinterpret_cast<void **>(&DeviceValues), 2 * sizeof(int)));
+  gpuErrCheck(
+      gpuMalloc(reinterpret_cast<void **>(&DeviceValues), 2 * sizeof(int)));
   // Runtime storage is disjoint. The test requires a decline because the
   // initial proof is local to invokeAfterArithmetic, not because this launch
   // actually overwrites the closure.
   kernelArithmeticArgument<<<1, 1>>>(Body, DeviceValues, DeviceValues + 1);
   gpuErrCheck(gpuDeviceSynchronize());
   int Values[2] = {};
-  gpuErrCheck(gpuMemcpy(Values, DeviceValues, sizeof(Values),
-                       gpuMemcpyDeviceToHost));
+  gpuErrCheck(
+      gpuMemcpy(Values, DeviceValues, sizeof(Values), gpuMemcpyDeviceToHost));
   gpuErrCheck(gpuFree(DeviceValues));
   printf("arithmetic argument output %d result %d\n", Values[0], Values[1]);
   return 0;

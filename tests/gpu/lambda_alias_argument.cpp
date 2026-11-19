@@ -24,8 +24,10 @@ template <typename F>
 __global__ __attribute__((annotate("jit"))) static void
 kernelAlias(F Initial, F Replacement, F Other) {
   static_assert(std::is_trivially_copyable_v<F>);
-  invokeThroughAlias(&Initial, &Initial, &Replacement); // CB1 target is modified
-  invokeThroughAlias(&Replacement, &Initial, &Other); // CB2 target is unmodified
+  invokeThroughAlias(&Initial, &Initial,
+                     &Replacement); // CB1 target is modified
+  invokeThroughAlias(&Replacement, &Initial,
+                     &Other); // CB2 target is unmodified
   // In CB1, Target and Alias connect through the same caller object. In CB2,
   // they connect to different objects. The memcpy is a clobber of Target in
   // CB1, but not CB2. Combining contexts conservatively must retain that write.

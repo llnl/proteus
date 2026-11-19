@@ -21,7 +21,8 @@ __device__ static int Counter;
 
 // Exercise the general isolation proof with user code and synchronization,
 // independently of any device printf implementation.
-__device__ __attribute__((noinline, optnone)) static void unrelatedGlobalWrite() {
+__device__ __attribute__((noinline, optnone)) static void
+unrelatedGlobalWrite() {
   atomicAdd(&Counter, 1);
 }
 
@@ -54,8 +55,8 @@ int main() {
   kernelUnrelatedArithmetic<<<1, 1>>>(Body, 7, DeviceResult);
   gpuErrCheck(gpuDeviceSynchronize());
   int Result = 0;
-  gpuErrCheck(gpuMemcpy(&Result, DeviceResult, sizeof(Result),
-                        gpuMemcpyDeviceToHost));
+  gpuErrCheck(
+      gpuMemcpy(&Result, DeviceResult, sizeof(Result), gpuMemcpyDeviceToHost));
   gpuErrCheck(gpuFree(DeviceResult));
   // Printing happens only on the host, after the device computation.
   printf("arithmetic helper result %d\n", Result);
@@ -65,8 +66,8 @@ int main() {
   gpuErrCheck(gpuMalloc(reinterpret_cast<void **>(&DeviceResult), sizeof(int)));
   kernelPrivateClosure<<<1, 1>>>(PrivateBody, DeviceResult);
   gpuErrCheck(gpuDeviceSynchronize());
-  gpuErrCheck(gpuMemcpy(&Result, DeviceResult, sizeof(Result),
-                        gpuMemcpyDeviceToHost));
+  gpuErrCheck(
+      gpuMemcpy(&Result, DeviceResult, sizeof(Result), gpuMemcpyDeviceToHost));
   gpuErrCheck(gpuFree(DeviceResult));
   printf("private closure result %d\n", Result);
   return 0;

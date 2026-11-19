@@ -442,8 +442,7 @@ public:
       // pointer into a GlobalVariable cannot denote these closure bytes. If
       // the closure pointer was published through global storage, tags() marks
       // that escape unresolved before we get here.
-      if (llvm::isa<llvm::GlobalVariable>(
-              llvm::getUnderlyingObject(Arg)))
+      if (llvm::isa<llvm::GlobalVariable>(llvm::getUnderlyingObject(Arg)))
         continue;
       auto Result =
           connection(const_cast<llvm::Value *>(Tracked.Ptr), Arg, Context);

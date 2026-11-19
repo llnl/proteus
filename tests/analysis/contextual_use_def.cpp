@@ -265,11 +265,10 @@ int main(int Argc, char **Argv) {
   auto GlobalArgCalls = calls(*GlobalArgHelper);
   require(GlobalArgCalls.size() == 2,
           "unexpected global-argument fixture calls");
-  require(Graph.callConnection(
-              *GlobalArgCalls.front(),
-              MemoryLocation(GlobalArgHelper->getArg(0),
-                             LocationSize::precise(4)),
-              nullptr, GlobalArgCalls.back()) ==
+  require(Graph.callConnection(*GlobalArgCalls.front(),
+                               MemoryLocation(GlobalArgHelper->getArg(0),
+                                              LocationSize::precise(4)),
+                               nullptr, GlobalArgCalls.back()) ==
               ConnectionResult::Disconnected,
           "direct global pointer argument was treated as a possible closure");
 
@@ -287,18 +286,16 @@ int main(int Argc, char **Argv) {
           "later opaque closure use contaminated an earlier candidate query");
   require(!CandidateBoundaryTags.Calls.contains(DeviceGlobalCalls.front()),
           "global write entered the candidate-bounded connected-call set");
-  require(Graph.callConnection(
-              *DeviceGlobalCalls.front(),
-              MemoryLocation(DeviceGlobalArg->getArg(0),
-                             LocationSize::precise(4)),
-              nullptr, DeviceGlobalCalls.front()) ==
+  require(Graph.callConnection(*DeviceGlobalCalls.front(),
+                               MemoryLocation(DeviceGlobalArg->getArg(0),
+                                              LocationSize::precise(4)),
+                               nullptr, DeviceGlobalCalls.front()) ==
               ConnectionResult::Disconnected,
           "device-style global write was not disconnected");
-  require(Graph.callConnection(
-              *DeviceGlobalCalls.front(),
-              MemoryLocation(DeviceGlobalArg->getArg(0),
-                             LocationSize::precise(4)),
-              nullptr, DeviceGlobalCalls.back()) ==
+  require(Graph.callConnection(*DeviceGlobalCalls.front(),
+                               MemoryLocation(DeviceGlobalArg->getArg(0),
+                                              LocationSize::precise(4)),
+                               nullptr, DeviceGlobalCalls.back()) ==
               ConnectionResult::Unresolved,
           "broad unresolved context was silently treated as disconnected");
   outs() << "contextual use-def checks passed\n";
