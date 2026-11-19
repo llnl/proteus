@@ -38,8 +38,7 @@ public:
   using JitVariantVec = SmallVector<JitVariantMap, 4>;
   struct DeviceLaunchInfo {
     SmallVector<uint64_t, 4> LambdaCalleeInfo;
-    SmallDenseMap<uint64_t, LambdaCallsiteRuntimeConstants, 4>
-        CallsiteRuntimeConstants;
+    LambdaCallsiteRuntimeConstantsMap CallsiteRuntimeConstants;
 
     // Member-wise, so storage is kept; std::swap would deallocate.
     void swap(DeviceLaunchInfo &Other) {
@@ -134,9 +133,7 @@ public:
     auto &CurrentLaunchInfo = currentDeviceLaunchInfo();
     LambdaCalleeInfo.assign(CurrentLaunchInfo.LambdaCalleeInfo.begin(),
                             CurrentLaunchInfo.LambdaCalleeInfo.end());
-    for (const auto &[CallsiteIndex, RCs] :
-         CurrentLaunchInfo.CallsiteRuntimeConstants)
-      LambdaJitValuesMap.try_emplace(CallsiteIndex, RCs);
+    LambdaJitValuesMap = CurrentLaunchInfo.CallsiteRuntimeConstants;
     CurrentLaunchInfo.clear();
   }
 
