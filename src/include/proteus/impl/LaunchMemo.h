@@ -12,6 +12,7 @@
 #include "proteus/CompilerInterfaceTypes.h"
 #include "proteus/Error.h"
 #include "proteus/impl/CompilerInterfaceRuntimeConstantInfo.h"
+#include "proteus/impl/Config.h"
 #include "proteus/impl/CoreDevice.h"
 #include "proteus/impl/LambdaRegistry.h"
 #include "proteus/impl/RuntimeConstantTypeHelpers.h"
@@ -40,15 +41,13 @@ public:
   LaunchMemo() = default;
 
   // Creates a memo, disabled if any runtime constant is not a scalar.
-  LaunchMemo(ArrayRef<RuntimeConstantInfo *> RCInfoArray, bool KeyGridDim)
-      : KeyGridDim(KeyGridDim) {
+  LaunchMemo(ArrayRef<RuntimeConstantInfo *> RCInfoArray) {
     if (!all_of(RCInfoArray, [](const RuntimeConstantInfo *RCInfo) {
           return isScalarRuntimeConstantType(RCInfo->ArgInfo.Type);
         }))
       return;
 
-    PrefixLen =
-        sizeof(dim3) + (KeyGridDim ? sizeof(dim3) : 0) + sizeof(uint64_t);
+    PrefixLen = 2 * sizeof(dim3) + sizeof(uint64_t) + CGConfigSize;
     for (const auto *RCInfo : RCInfoArray) {
       RuntimeConstantType Type = RCInfo->ArgInfo.Type;
       uint32_t Size = Type == RuntimeConstantType::PTR ? sizeof(void *)
@@ -67,6 +66,7 @@ public:
   // Serializes the launch inputs into Key.
   void encode(SmallVectorImpl<char> &Key, void **KernelArgs, dim3 GridDim,
               dim3 BlockDim, uint64_t PluginGeneration,
+              const CodeGenerationConfig &CGConfig,
               const LambdaRegistry::DeviceLaunchInfo &LaunchInfo) const {
     assert(Enabled && "Expected enabled launch memo");
 
@@ -82,9 +82,11 @@ public:
     for (const ArgField &F : Fields)
       Out = putField(Out, KernelArgs[F.Pos], F.Size);
     Out = put(Out, BlockDim);
-    if (KeyGridDim)
-      Out = put(Out, GridDim);
+    bool KeyGridDim =
+        CGConfig.specializeDims() || CGConfig.specializeDimsRange();
+    Out = put(Out, KeyGridDim ? GridDim : dim3{0, 0, 0});
     Out = put(Out, PluginGeneration);
+    Out = putCGConfig(Out, CGConfig);
     for (const auto &[CallsiteIndex, RCs] :
          LaunchInfo.CallsiteRuntimeConstants) {
       Out = put(Out, static_cast<uint64_t>(CallsiteIndex));
@@ -134,9 +136,28 @@ private:
                                          2 * sizeof(int32_t) +
                                          sizeof(RuntimeConstantValue);
 
+  // Pipeline hash, codegen opt level, tuned max threads, tuned min blocks per
+  // SM, codegen, opt level, flags.
+  static constexpr size_t CGConfigSize =
+      sizeof(uint64_t) + 3 * sizeof(int) + 3 * sizeof(uint8_t);
+
   template <typename T> static char *put(char *Out, const T &V) {
     std::memcpy(Out, &V, sizeof(T));
     return Out + sizeof(T);
+  }
+
+  static char *putCGConfig(char *Out, const CodeGenerationConfig &CGConfig) {
+    uint8_t Flags =
+        CGConfig.specializeArgs() | CGConfig.specializeLaunchBounds() << 1 |
+        CGConfig.specializeDims() << 2 | CGConfig.specializeDimsRange() << 3;
+    Out = put(Out, CGConfig.optPipelineHash());
+    Out = put(Out, CGConfig.codeGenOptLevel());
+    Out = put(Out, CGConfig.tunedMaxThreads());
+    Out = put(Out, CGConfig.tunedMinBlocksPerSM());
+    Out = put(Out, static_cast<uint8_t>(CGConfig.codeGenOption()));
+    Out = put(Out, static_cast<uint8_t>(CGConfig.optLevel()));
+    Out = put(Out, Flags);
+    return Out;
   }
 
   static char *putField(char *Out, const void *In, uint32_t Size) {
@@ -166,12 +187,11 @@ private:
   std::unique_ptr<char[]> Keys;
   // nullptr marks an empty slot.
   std::array<void *, NumSlots> Funcs{};
-  // Kernel RCs, dims, plugin generation.
+  // Kernel RCs, dims, plugin generation, codegen config.
   uint32_t PrefixLen = 0;
   // 0 until the first insert.
   uint32_t KeyLen = 0;
   uint8_t Next = 0;
-  bool KeyGridDim = false;
   bool Enabled = false;
 };
 

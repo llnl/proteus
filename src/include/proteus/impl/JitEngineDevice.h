@@ -242,13 +242,11 @@ class JITKernelInfo {
 
   // Cache statistics count lookups, so tracing them disables the memo.
   static LaunchMemo
-  makeLaunchMemo(StringRef Name, ArrayRef<RuntimeConstantInfo *> RCInfoArray) {
+  makeLaunchMemo(ArrayRef<RuntimeConstantInfo *> RCInfoArray) {
     const Config &C = Config::get();
     if (C.traceCacheStats() || C.traceKernels())
       return LaunchMemo();
-    const auto &CGConfig = C.getCGConfig(Name);
-    return LaunchMemo(RCInfoArray, CGConfig.specializeDims() ||
-                                       CGConfig.specializeDimsRange());
+    return LaunchMemo(RCInfoArray);
   }
 
 public:
@@ -258,7 +256,7 @@ public:
         RCInfoArray(RCInfoArray), ExtractedModule(std::nullopt),
         Bitcode{std::nullopt}, BinInfo(BinInfo), LambdaCalleeInfo(std::nullopt),
         LambdaCallsiteLocationInfo(std::nullopt),
-        Memo(makeLaunchMemo(Name, RCInfoArray)) {}
+        Memo(makeLaunchMemo(RCInfoArray)) {}
 
   JITKernelInfo() = default;
   void *getKernel() const {
@@ -602,7 +600,7 @@ JitEngineDevice<ImplT>::compileAndRun(
   SmallVector<char, 128> MemoKey;
   if (Memo.isEnabled()) {
     Memo.encode(MemoKey, KernelArgs, GridDim, BlockDim,
-                getJITPassPluginGeneration(),
+                getJITPassPluginGeneration(), CGConfig,
                 LambdaRegistry::instance().peekDeviceLaunchInfo());
     if (void *KernelFunc = Memo.lookup(MemoKey)) {
       LambdaRegistry::instance().clearDeviceLaunchInfo();
