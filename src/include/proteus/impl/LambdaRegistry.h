@@ -36,7 +36,6 @@ public:
 
   using JitVariantMap = DenseMap<int32_t, RuntimeConstant>;
   using JitVariantVec = SmallVector<JitVariantMap, 4>;
-  // Rebuilt on every launch, so keep the common few-callsite case inline.
   struct DeviceLaunchInfo {
     SmallVector<uint64_t, 4> LambdaCalleeInfo;
     SmallDenseMap<uint64_t, LambdaCallsiteRuntimeConstants, 4>
@@ -127,6 +126,19 @@ public:
   }
 
   void clearDeviceLaunchInfo() { currentDeviceLaunchInfo().clear(); }
+
+  // Copies rather than moves, so the registry keeps its storage.
+  void
+  takeDeviceLaunchInfo(SmallVector<uint64_t> &LambdaCalleeInfo,
+                       LambdaCallsiteRuntimeConstantsMap &LambdaJitValuesMap) {
+    auto &CurrentLaunchInfo = currentDeviceLaunchInfo();
+    LambdaCalleeInfo.assign(CurrentLaunchInfo.LambdaCalleeInfo.begin(),
+                            CurrentLaunchInfo.LambdaCalleeInfo.end());
+    for (const auto &[CallsiteIndex, RCs] :
+         CurrentLaunchInfo.CallsiteRuntimeConstants)
+      LambdaJitValuesMap.try_emplace(CallsiteIndex, RCs);
+    CurrentLaunchInfo.clear();
+  }
 
   void populateLambdaRegistrationCodeCache(void *Kernel,
                                            void *RegistrationFunc) {
