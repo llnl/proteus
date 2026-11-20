@@ -1644,19 +1644,6 @@ public:
     }
 
     int64_t GEPOffset = StepOffset.getSExtValue();
-    // LLVM may lower aggregate field materialization to a byte-wise GEP under
-    // opaque pointers. Preserve that shape when the allocation still provides
-    // local aggregate provenance, but reject byte arithmetic through an
-    // argument or another root whose storage type is unavailable here.
-    Value *UnderlyingObject = getUnderlyingObject(GEP.getPointerOperand());
-    if (GEPOffset != 0 && GEP.getSourceElementType()->isIntegerTy(8) &&
-        !isa<AllocaInst>(UnderlyingObject)) {
-      DEBUG(Logger::logs("proteus-pass")
-            << "    [PTR use analysis]: Rejecting byte-wise pointer offset "
-            << GEP << "\n");
-      fail();
-      return;
-    }
     DEBUG(Logger::logs("proteus-pass")
           << "    " << "Computed GEP offset " << GEPOffset << "\n");
     Value *GEPBase = GEP.getPointerOperand();
@@ -1670,21 +1657,49 @@ public:
 
     TrackedRange BaseRange = valueRanges()[GEPBase];
     auto ResultSize = getTypeStoreSize(DL, GEP.getResultElementType());
-    DEBUG(if (ResultSize) Logger::logs("proteus-pass")
-              << "    GEP size = " << *ResultSize << "\n";)
-    bool TypeErasedGEP = GEP.getSourceElementType()->isIntegerTy(8);
-    if ((!TypeErasedGEP && ResultSize &&
-         !rangesOverlap(BaseRange.Offset, BaseRange.Extent, GEPOffset,
-                        *ResultSize)) ||
-        (TypeErasedGEP &&
-         !offsetCoveredByRange(GEPOffset, BaseRange.Offset, BaseRange.Extent)))
+    bool ResultOverlapsTrackedRange =
+        ResultSize && rangesOverlap(BaseRange.Offset, BaseRange.Extent,
+                                    GEPOffset, *ResultSize);
+    // An out-of-range non-inbounds GEP may wrap or otherwise lose the
+    // allocation provenance needed to interpret the relative range. An
+    // inbounds GEP stays within the same allocated object, so it is safe to
+    // carry the tracked range through an intermediate pointer outside the
+    // closure (such as the enclosing object pointer in a container_of idiom).
+    if (!ResultOverlapsTrackedRange && !GEP.isInBounds()) {
+      // Keep the old local-allocation pruning rule for unrelated fields. An
+      // argument-rooted out-of-range GEP has no local object layout to bound
+      // it, so do not silently drop a path that could later return to the
+      // tracked bytes.
+      if (isa<AllocaInst>(getUnderlyingObject(GEPBase)))
+        return;
+      DEBUG(Logger::logs("proteus-pass")
+            << "    [PTR use analysis]: Cannot track out-of-range non-inbounds "
+               "GEP: "
+            << GEP << "\n");
+      fail();
       return;
+    }
+
+    // Keep the tracked bytes' displacement relative to every constant GEP,
+    // even when the GEP points outside those bytes. Such an intermediate
+    // pointer can lead back to the closure (for example, a helper can subtract
+    // offsetof(member), then add it back). Memory accesses through the
+    // intermediate pointer are still filtered by their overlap with this
+    // range, while propagating the range lets us see later aliases and writes.
+    int64_t ResultOffset;
+    if (__builtin_sub_overflow(BaseRange.Offset, GEPOffset, &ResultOffset)) {
+      DEBUG(Logger::logs("proteus-pass")
+            << "    [PTR use analysis]: GEP offset overflows tracked range: "
+            << GEP << "\n");
+      fail();
+      return;
+    }
     DEBUG(Logger::logs("proteus-pass") << "    Found GEP applicable to range="
                                        << BaseRange << " ; " << GEP << "\n");
     // A GEP changes the pointer-relative offset but not the extent of the
-    // tracked entity. This also supports constant type-erased byte GEPs: their
-    // i8 element type describes pointer arithmetic, not entity size.
-    valueRanges()[&GEP] = {BaseRange.Offset - GEPOffset, BaseRange.Extent};
+    // tracked entity. The result may point before or after the entity; later
+    // loads and stores are checked against the resulting range.
+    valueRanges()[&GEP] = {ResultOffset, BaseRange.Extent};
     DEBUG(Logger::logs("proteus-pass") << "    " << "Setting map K " << GEP
                                        << " : " << valueRanges()[&GEP] << "\n");
     pushBackPointerUsers(&GEP);
