@@ -597,12 +597,10 @@ JitEngineDevice<ImplT>::compileAndRun(
   const auto &CGConfig = Config::get().getCGConfig(KernelInfo.getName());
 
   LaunchMemo &Memo = KernelInfo.getLaunchMemo();
-  SmallVector<char, 128> MemoKey;
   if (Memo.isEnabled()) {
-    Memo.encode(MemoKey, KernelArgs, GridDim, BlockDim,
-                getJITPassPluginGeneration(), CGConfig,
-                LambdaRegistry::instance().peekDeviceLaunchInfo());
-    if (void *KernelFunc = Memo.lookup(MemoKey)) {
+    Memo.encode(KernelArgs, GridDim, BlockDim, getJITPassPluginGeneration(),
+                CGConfig, LambdaRegistry::instance().peekDeviceLaunchInfo());
+    if (void *KernelFunc = Memo.lookup()) {
       LambdaRegistry::instance().clearDeviceLaunchInfo();
       return launchKernelFunction(
           reinterpret_cast<KernelFunction_t>(KernelFunc), GridDim, BlockDim,
@@ -630,7 +628,7 @@ JitEngineDevice<ImplT>::compileAndRun(
 
   auto Launch = [&](void *KernelFunc) {
     if (Memo.isEnabled())
-      Memo.insert(MemoKey, KernelFunc);
+      Memo.insert(KernelFunc);
     return static_cast<DeviceError_t>(Dispatch
                                           .launch(KernelFunc, GridDim, BlockDim,
                                                   KernelArgs, ShmemSize, Stream)
