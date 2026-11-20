@@ -310,9 +310,9 @@ CREATE_GPU_TEST(lambda_argument_collection lambda_argument_collection.cpp)
 CREATE_GPU_TEST(lambda_unrelated_arithmetic lambda_unrelated_arithmetic.cpp)
 CREATE_GPU_TEST(lambda_arithmetic_argument lambda_arithmetic_argument.cpp)
 foreach(test IN ITEMS lambda_alias_argument lambda_source_history
-                      lambda_caller_history lambda_global_callback
-                      lambda_pointer_history lambda_hidden_call_writes
-                      lambda_print_context)
+                      lambda_caller_history
+                      lambda_readonly_plan
+                      lambda_aliasing_memcpy)
     CREATE_GPU_TEST(${test} ${test}.cpp)
     # These regressions use legal whole-object copies. Keep the frontend
     # contract in error mode so future diagnostics cannot silently exclude them.
@@ -320,6 +320,12 @@ foreach(test IN ITEMS lambda_alias_argument lambda_source_history
     list(REMOVE_ITEM strict_options
          "SHELL:-Xclang -plugin-arg-proteus-lambda-checker -Xclang -contract-warn")
     set_property(TARGET ${test}.${lang} PROPERTY COMPILE_OPTIONS "${strict_options}")
+endforeach()
+# These retain deliberate global-publication cases as IR fallback tests.
+# Production builds reject them; the standard test flags use contract-warn.
+foreach(test IN ITEMS lambda_global_callback lambda_pointer_history
+                      lambda_hidden_call_writes lambda_print_context)
+    CREATE_GPU_TEST(${test} ${test}.cpp)
 endforeach()
 CREATE_GPU_TEST(lambda_displaced_helper_memcpy lambda_displaced_helper_memcpy.cpp)
 CREATE_GPU_TEST(lambda_callee_join_no_phi lambda_callee_join_no_phi.cpp)

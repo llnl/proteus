@@ -152,13 +152,17 @@ bool isPointerToLambdaFunctorWrapper(clang::QualType Type,
 // Whether Type is, or transitively holds by value, a registered lambda
 // wrapper. This is the storage the kernel-arg analysis specializes from;
 // envelopes and enclosing closures that capture a wrapper by value count.
-bool typeContainsLambdaFunctorWrapper(clang::QualType Type,
-                                      unsigned Depth = 0) {
+bool typeContainsLambdaFunctorWrapper(clang::QualType Type, unsigned Depth = 0,
+                                      bool FollowPointers = false) {
   if (Depth > 8)
     return false;
   Type = Type.getNonReferenceType();
+  if (FollowPointers && Type->isPointerType())
+    return typeContainsLambdaFunctorWrapper(Type->getPointeeType(), Depth + 1,
+                                            true);
   if (const auto *Array = Type->getAsArrayTypeUnsafe())
-    return typeContainsLambdaFunctorWrapper(Array->getElementType(), Depth + 1);
+    return typeContainsLambdaFunctorWrapper(Array->getElementType(), Depth + 1,
+                                            FollowPointers);
   const clang::CXXRecordDecl *Record = getCanonicalRecord(Type);
   if (!Record)
     return false;
@@ -167,10 +171,12 @@ bool typeContainsLambdaFunctorWrapper(clang::QualType Type,
   if (!Record->hasDefinition())
     return false;
   for (const clang::CXXBaseSpecifier &Base : Record->bases())
-    if (typeContainsLambdaFunctorWrapper(Base.getType(), Depth + 1))
+    if (typeContainsLambdaFunctorWrapper(Base.getType(), Depth + 1,
+                                         FollowPointers))
       return true;
   for (const clang::FieldDecl *Field : Record->fields())
-    if (typeContainsLambdaFunctorWrapper(Field->getType(), Depth + 1))
+    if (typeContainsLambdaFunctorWrapper(Field->getType(), Depth + 1,
+                                         FollowPointers))
       return true;
   return false;
 }
@@ -812,9 +818,26 @@ public:
   }
 
   bool VisitVarDecl(clang::VarDecl *Variable) {
-    if (Variable->hasGlobalStorage() &&
-        typeContainsLambdaFunctorWrapper(Variable->getType()))
+    if (!Variable->hasGlobalStorage())
+      return true;
+    if (typeContainsLambdaFunctorWrapper(Variable->getType()))
       GlobalWrapperStorage.push_back(Variable);
+    else if (typeContainsLambdaFunctorWrapper(Variable->getType(), 0, true) ||
+             (Variable->hasInit() &&
+              expressionContainsWrapperPointer(Variable->getInit())))
+      GlobalWrapperPointerStorage.push_back(Variable);
+    return true;
+  }
+
+  bool VisitBinaryOperator(clang::BinaryOperator *Operator) {
+    // Also diagnose direct publication through erased global storage. Typed
+    // globals are diagnosed at their declarations instead.
+    if (Operator->isAssignmentOp() &&
+        !typeContainsLambdaFunctorWrapper(Operator->getLHS()->getType(), 0,
+                                          true) &&
+        referencesGlobalStorage(Operator->getLHS()) &&
+        expressionContainsWrapperPointer(Operator->getRHS()))
+      GlobalWrapperPublications.push_back(Operator);
     return true;
   }
 
@@ -846,6 +869,8 @@ public:
   llvm::SmallVector<clang::LambdaExpr *, 16> Lambdas;
   llvm::SmallVector<clang::CXXRecordDecl *, 8> Unions;
   llvm::SmallVector<clang::VarDecl *, 8> GlobalWrapperStorage;
+  llvm::SmallVector<clang::VarDecl *, 8> GlobalWrapperPointerStorage;
+  llvm::SmallVector<clang::Expr *, 8> GlobalWrapperPublications;
   llvm::SmallVector<clang::FunctionDecl *, 32> Functions;
   llvm::SmallVector<clang::CallExpr *, 16> JitVariableCalls;
   llvm::SmallVector<clang::CallExpr *, 16> RegisterLambdaCalls;
@@ -906,6 +931,11 @@ public:
     const unsigned GlobalWrapperStorage = Diagnostics.getCustomDiagID(
         clang::DiagnosticsEngine::Error,
         "a registered lambda cannot be stored in global-lifetime storage");
+    const unsigned GlobalWrapperPointerStorage = Diagnostics.getCustomDiagID(
+        ContractWarnOnly ? clang::DiagnosticsEngine::Warning
+                         : clang::DiagnosticsEngine::Error,
+        "a pointer to a registered lambda cannot be stored in "
+        "global-lifetime storage");
     const unsigned AlreadyRegistered = Diagnostics.getCustomDiagID(
         clang::DiagnosticsEngine::Error,
         "a lambda returned by proteus::register_lambda cannot be registered "
@@ -959,6 +989,14 @@ public:
     for (const clang::VarDecl *Variable : Visitor.GlobalWrapperStorage)
       Diagnostics.Report(Variable->getLocation(), GlobalWrapperStorage)
           << Variable->getSourceRange();
+    llvm::DenseSet<const clang::VarDecl *> ReportedGlobalPointers;
+    for (const clang::VarDecl *Variable : Visitor.GlobalWrapperPointerStorage)
+      if (ReportedGlobalPointers.insert(Variable->getCanonicalDecl()).second)
+        Diagnostics.Report(Variable->getLocation(), GlobalWrapperPointerStorage)
+            << Variable->getSourceRange();
+    for (const clang::Expr *Publication : Visitor.GlobalWrapperPublications)
+      Diagnostics.Report(Publication->getExprLoc(), GlobalWrapperPointerStorage)
+          << Publication->getSourceRange();
 
     llvm::DenseSet<uint64_t> ReportedStorageHazards;
     for (clang::FunctionDecl *Function : Visitor.Functions) {

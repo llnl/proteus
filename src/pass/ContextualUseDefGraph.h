@@ -250,10 +250,10 @@ public:
     // A tagged container may be reached through a different pointer value
     // than the store that put the tracked pointer in it. Def-use traversal
     // alone misses that case (%a and %b can alias even though they have no SSA
-    // relationship). Close container tags over every pointer reload whose
-    // source may alias the container. This is deliberately an overestimate;
-    // AA's NoAlias result is the only reason to leave a reload out.
-    auto AddAliasingReloads = [&](llvm::Value *Container, llvm::Function &F) {
+    // relationship). Close container tags over pointer reloads and memory
+    // transfers whose source may alias the container. Copying pointer bytes
+    // preserves reachability even without a pointer-typed LoadInst.
+    auto AddAliasingReads = [&](llvm::Value *Container, llvm::Function &F) {
       llvm::Instruction *End = Boundaries.lookup(&F);
       for (llvm::BasicBlock &BB : F)
         for (llvm::Instruction &I : BB) {
@@ -262,12 +262,18 @@ public:
             return;
           }
           --Budget;
-          auto *LI = llvm::dyn_cast<llvm::LoadInst>(&I);
-          if (!LI || !LI->getType()->isPointerTy() ||
-              (End && !llvm::isPotentiallyReachable(LI, End)))
+          if (!llvm::isa<llvm::LoadInst, llvm::MemTransferInst>(&I))
             continue;
-          if (!NoAlias(Container, LI->getPointerOperand(), F))
-            Add(LI, ConnectionTags::Pointer | ConnectionTags::Container);
+          if (End && !llvm::isPotentiallyReachable(&I, End))
+            continue;
+          if (auto *LI = llvm::dyn_cast<llvm::LoadInst>(&I)) {
+            if (LI->getType()->isPointerTy() &&
+                !NoAlias(Container, LI->getPointerOperand(), F))
+              Add(LI, ConnectionTags::Pointer | ConnectionTags::Container);
+          } else if (auto *MT = llvm::dyn_cast<llvm::MemTransferInst>(&I)) {
+            if (!NoAlias(Container, MT->getRawSource(), F))
+              Add(MT->getRawDest(), ConnectionTags::Container);
+          }
         }
     };
     Add(Root, ConnectionTags::Pointer);
@@ -309,7 +315,7 @@ public:
           else if (auto *A = llvm::dyn_cast<llvm::Argument>(V))
             F = A->getParent();
           if (F)
-            AddAliasingReloads(V, *F);
+            AddAliasingReads(V, *F);
         }
       }
       if (auto *A = llvm::dyn_cast<llvm::Argument>(V)) {
@@ -463,12 +469,10 @@ public:
       return ConnectionResult::Connected;
     if (Tags.Unresolved)
       return ConnectionResult::Unresolved;
-    // The caller graph is the available proof of whether this call can reach
-    // the non-global tracked object. Inspect its pointer arguments even for an
-    // opaque callee: a connected or unresolved path still rejects the call,
-    // while disconnected pointer arguments prove it disjoint. With no pointer
-    // arguments, an opaque call without an arg-memory-only contract may still
-    // access the object through hidden state, so it remains unresolved.
+    // Inspect direct pointer connections even for an opaque callee. Ordinary
+    // arguments can also contain pointers supplied before this frame starts;
+    // their disjointness alone does not prove that the call is harmless.
+    // Only an argument-memory contract bounds those effects to direct roots.
     bool Unknown = false;
     bool HasPointerArgument = false;
     for (unsigned I = 0; I < Call.arg_size(); ++I) {
@@ -478,7 +482,9 @@ public:
       if (!Arg->getType()->isPointerTy())
         continue;
       HasPointerArgument = true;
-      if (Call.onlyReadsMemory(I))
+      if (llvm::isa<llvm::ConstantPointerNull>(Arg))
+        continue;
+      if (Call.onlyReadsMemory(I) && Call.onlyAccessesArgMemory())
         continue;
       // LambdaASTChecker rejects registered wrapper objects with global
       // lifetime. A direct pointer to an unrelated global therefore cannot
@@ -491,6 +497,11 @@ public:
       if (Result == ConnectionResult::Connected)
         return Result;
       Unknown |= Result == ConnectionResult::Unresolved;
+      // Disjoint argument storage does not exclude a pointer loaded from
+      // inside it. Unless the effects are confined to argument-based memory,
+      // leave indirect destinations to CallWriteAnalysis. This also applies
+      // to readonly arguments: only the container itself is read-only.
+      Unknown |= !Call.onlyAccessesArgMemory();
     }
     auto *Callee = Call.getCalledFunction();
     if (!HasPointerArgument &&
