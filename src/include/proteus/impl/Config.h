@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <array>
 #include <cstdint>
+#include <functional>
 #include <limits>
 #include <sstream>
 #include <string>
@@ -210,6 +211,8 @@ class CodeGenerationConfig {
   }
 
   std::optional<const std::string> ProteusOptPipeline;
+  // Lets launch memo keys cover the pipeline without hashing per launch.
+  uint64_t OptPipelineHash;
   CodegenOption ProteusCodegen;
   bool ProteusSpecializeArgs;
   bool ProteusSpecializeLaunchBounds;
@@ -231,7 +234,11 @@ class CodeGenerationConfig {
                        int MinBlocksPerSM = 0,
                        std::optional<LaunchDim> TunedGridDim = std::nullopt,
                        std::optional<LaunchDim> TunedBlockDim = std::nullopt)
-      : ProteusOptPipeline(ProteusOptPipeline), ProteusCodegen(ProteusCodegen),
+      : ProteusOptPipeline(ProteusOptPipeline),
+        OptPipelineHash(ProteusOptPipeline
+                            ? std::hash<std::string>{}(*ProteusOptPipeline)
+                            : 0),
+        ProteusCodegen(ProteusCodegen),
         ProteusSpecializeArgs(ProteusSpecializeArgs),
         ProteusSpecializeLaunchBounds(ProteusSpecializeLaunchBounds),
         ProteusSpecializeDims(ProteusSpecializeDims),
@@ -295,8 +302,12 @@ public:
   std::optional<const std::string> optPipeline() const {
     return ProteusOptPipeline;
   }
+  uint64_t optPipelineHash() const { return OptPipelineHash; }
   const std::optional<LaunchDim> &gridDim() const { return TunedGridDim; }
   const std::optional<LaunchDim> &blockDim() const { return TunedBlockDim; }
+
+  int tunedMaxThreads() const { return TunedMaxThreads; }
+  int tunedMinBlocksPerSM() const { return MinBlocksPerSM; }
 
   int minBlocksPerSM(int MaxThreads) const {
     // NOTE: We only return the tuned value when the current LBMaxThreads is
