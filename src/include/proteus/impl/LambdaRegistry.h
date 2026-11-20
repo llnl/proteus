@@ -76,11 +76,8 @@ public:
     if (PendingIt->second.empty())
       return;
 
-    // Swap and clear instead of moving so neither map frees and reallocates its
-    // buckets on every register_lambda call.
-    auto &Current = currentHostJitVariables()[FunctorID];
-    Current.swap(PendingIt->second);
-    PendingIt->second.clear();
+    currentHostJitVariables()[FunctorID] = std::move(PendingIt->second);
+    PendingVariants.erase(PendingIt);
   }
 
   void eraseHostJitVariables(uint64_t FunctorID) {
