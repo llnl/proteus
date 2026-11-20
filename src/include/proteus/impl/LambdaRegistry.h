@@ -123,17 +123,6 @@ public:
 
   void clearDeviceLaunchInfo() { currentDeviceLaunchInfo().clear(); }
 
-  // Copies rather than moves, so the registry keeps its storage.
-  void
-  takeDeviceLaunchInfo(SmallVector<uint64_t> &LambdaCalleeInfo,
-                       LambdaCallsiteRuntimeConstantsMap &LambdaJitValuesMap) {
-    auto &CurrentLaunchInfo = currentDeviceLaunchInfo();
-    LambdaCalleeInfo.assign(CurrentLaunchInfo.LambdaCalleeInfo.begin(),
-                            CurrentLaunchInfo.LambdaCalleeInfo.end());
-    LambdaJitValuesMap = CurrentLaunchInfo.CallsiteRuntimeConstants;
-    CurrentLaunchInfo.clear();
-  }
-
   void populateLambdaRegistrationCodeCache(void *Kernel,
                                            void *RegistrationFunc) {
     std::lock_guard<std::mutex> Lock(DeviceRegistrationMutex);

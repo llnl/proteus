@@ -31,6 +31,7 @@
 #include "proteus/impl/TransformLambdaSpecialization.h"
 #include "proteus/impl/Utils.h"
 
+#include <llvm/ADT/ScopeExit.h>
 #include <llvm/ADT/SmallPtrSet.h>
 #include <llvm/ADT/SmallVector.h>
 #include <llvm/ADT/StringRef.h>
@@ -460,14 +461,6 @@ public:
     return KernelInfo.getBitcode();
   }
 
-  void
-  getLambdaJitValues(SmallVector<uint64_t> &LambdaCalleeInfo,
-                     LambdaCallsiteRuntimeConstantsMap &LambdaJitValuesMap) {
-    TIMESCOPE(JitEngineDevice, getLambdaJitValues);
-    LambdaRegistry::instance().takeDeviceLaunchInfo(LambdaCalleeInfo,
-                                                    LambdaJitValuesMap);
-  }
-
   void registerVar(void *Handle, const char *VarName, const void *HostAddr,
                    uint64_t VarSize) {
     if (!HandleToBinaryInfo.count(Handle))
@@ -608,9 +601,14 @@ JitEngineDevice<ImplT>::compileAndRun(
   SmallVector<RuntimeConstant> RCVec =
       getRuntimeConstantValues(KernelArgs, KernelInfo.getRCInfoArray());
 
-  SmallVector<uint64_t> LambdaCalleeInfoToSpecialize;
-  LambdaCallsiteRuntimeConstantsMap LambdaJitValuesMap;
-  getLambdaJitValues(LambdaCalleeInfoToSpecialize, LambdaJitValuesMap);
+  // Borrowed: nothing below mutates the registry until ClearOnExit.
+  const auto &LaunchInfo = LambdaRegistry::instance().peekDeviceLaunchInfo();
+  SmallVector<uint64_t> LambdaCalleeInfoToSpecialize(
+      LaunchInfo.LambdaCalleeInfo.begin(), LaunchInfo.LambdaCalleeInfo.end());
+  const LambdaCallsiteRuntimeConstantsMap &LambdaJitValuesMap =
+      LaunchInfo.CallsiteRuntimeConstants;
+  auto ClearOnExit = llvm::make_scope_exit(
+      [] { LambdaRegistry::instance().clearDeviceLaunchInfo(); });
   // Determine the hash based on dimension specialization.  If we do not
   // specialize IR based on grid dimensions, avoid hashing on those to
   // eliminate repeated compilation overhead.
