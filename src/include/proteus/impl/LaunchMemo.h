@@ -75,9 +75,9 @@ public:
     if (KeyLen != 0 && Len != KeyLen)
       reportFatalError("Launch memo key size changed");
 
-    KeyBuf.resize_for_overwrite(Len);
+    Key.resize_for_overwrite(Len);
 
-    char *Out = KeyBuf.data();
+    char *Out = Key.data();
     for (const ArgField &F : Fields)
       Out = putField(Out, KernelArgs[F.Pos], F.Size);
     Out = put(Out, BlockDim);
@@ -98,13 +98,13 @@ public:
         Out = put(Out, RC.Value);
       }
     }
-    assert(Out == KeyBuf.data() + Len && "Launch memo key size mismatch");
+    assert(Out == Key.data() + Len && "Launch memo key size mismatch");
   }
 
   // Returns the kernel function memoized for the encoded key, or nullptr.
   void *lookup() const {
     for (unsigned I = 0; I < NumSlots; ++I)
-      if (Funcs[I] && std::memcmp(slot(I), KeyBuf.data(), KeyLen) == 0)
+      if (Funcs[I] && std::memcmp(slot(I), Key.data(), KeyLen) == 0)
         return Funcs[I];
     return nullptr;
   }
@@ -113,13 +113,13 @@ public:
   void insert(void *KernelFunc) {
     assert(Enabled && "Expected enabled launch memo");
     if (KeyLen == 0) {
-      KeyLen = KeyBuf.size();
+      KeyLen = Key.size();
       Keys.reset(new char[NumSlots * size_t(KeyLen)]);
-    } else if (KeyBuf.size() != KeyLen) {
+    } else if (Key.size() != KeyLen) {
       reportFatalError("Launch memo key size changed");
     }
 
-    std::memcpy(slot(Next), KeyBuf.data(), KeyLen);
+    std::memcpy(slot(Next), Key.data(), KeyLen);
     Funcs[Next] = KernelFunc;
     Next = (Next + 1) % NumSlots;
   }
@@ -183,7 +183,7 @@ private:
 
   SmallVector<ArgField, 6> Fields;
   // Key of the current launch, reused so it allocates at most once.
-  SmallVector<char, 0> KeyBuf;
+  SmallVector<char, 0> Key;
   // NumSlots * KeyLen, set on first insert.
   std::unique_ptr<char[]> Keys;
   // nullptr marks an empty slot.

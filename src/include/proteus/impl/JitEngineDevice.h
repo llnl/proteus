@@ -599,12 +599,12 @@ JitEngineDevice<ImplT>::compileAndRun(
   SmallVector<RuntimeConstant> RCVec =
       getRuntimeConstantValues(KernelArgs, KernelInfo.getRCInfoArray());
 
-  // Borrowed: nothing below mutates the registry until ClearOnExit.
   const auto &LaunchInfo = LambdaRegistry::instance().peekDeviceLaunchInfo();
   SmallVector<uint64_t> LambdaCalleeInfoToSpecialize(
       LaunchInfo.LambdaCalleeInfo.begin(), LaunchInfo.LambdaCalleeInfo.end());
   const LambdaCallsiteRuntimeConstantsMap &LambdaJitValuesMap =
       LaunchInfo.CallsiteRuntimeConstants;
+  // Clear this launch's lambda state on every return path.
   auto ClearOnExit = llvm::make_scope_exit(
       [] { LambdaRegistry::instance().clearDeviceLaunchInfo(); });
   // Determine the hash based on dimension specialization.  If we do not
