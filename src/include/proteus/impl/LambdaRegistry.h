@@ -39,6 +39,17 @@ public:
   struct DeviceLaunchInfo {
     SmallVector<uint64_t, 4> LambdaCalleeInfo;
     LambdaCallsiteRuntimeConstantsMap CallsiteRuntimeConstants;
+
+    // Member-wise, so storage is kept; std::swap would deallocate.
+    void swap(DeviceLaunchInfo &Other) {
+      LambdaCalleeInfo.swap(Other.LambdaCalleeInfo);
+      CallsiteRuntimeConstants.swap(Other.CallsiteRuntimeConstants);
+    }
+
+    void clear() {
+      LambdaCalleeInfo.clear();
+      CallsiteRuntimeConstants.clear();
+    }
   };
 
   std::optional<JitVariantMap> getHostJitVariant(uint64_t FunctorID) const {
@@ -76,12 +87,8 @@ public:
   bool emptyHost() const { return currentHostJitVariables().empty(); }
 
   void beginDeviceLaunch() {
-    auto &PendingLaunchInfo = pendingDeviceLaunchInfo();
-    auto &CurrentLaunchInfo = currentDeviceLaunchInfo();
-    PendingLaunchInfo.LambdaCalleeInfo.clear();
-    PendingLaunchInfo.CallsiteRuntimeConstants.clear();
-    CurrentLaunchInfo.LambdaCalleeInfo.clear();
-    CurrentLaunchInfo.CallsiteRuntimeConstants.clear();
+    pendingDeviceLaunchInfo().clear();
+    currentDeviceLaunchInfo().clear();
   }
 
   void appendDeviceCallsiteRuntimeConstant(uint64_t LambdaID,
@@ -105,29 +112,16 @@ public:
                    return L.Pos < R.Pos;
                  });
     }
-    CurrentLaunchInfo = std::move(PendingLaunchInfo);
-    PendingLaunchInfo.LambdaCalleeInfo.clear();
-    PendingLaunchInfo.CallsiteRuntimeConstants.clear();
+    CurrentLaunchInfo.swap(PendingLaunchInfo);
+    PendingLaunchInfo.clear();
   }
 
-  // Valid until takeDeviceLaunchInfo, clearDeviceLaunchInfo or the next launch.
+  // Valid until clearDeviceLaunchInfo or the next launch.
   const DeviceLaunchInfo &peekDeviceLaunchInfo() const {
     return currentDeviceLaunchInfo();
   }
 
-  void clearDeviceLaunchInfo() {
-    auto &CurrentLaunchInfo = currentDeviceLaunchInfo();
-    CurrentLaunchInfo.LambdaCalleeInfo.clear();
-    CurrentLaunchInfo.CallsiteRuntimeConstants.clear();
-  }
-
-  DeviceLaunchInfo takeDeviceLaunchInfo() {
-    auto &CurrentLaunchInfo = currentDeviceLaunchInfo();
-    DeviceLaunchInfo LaunchInfo = std::move(CurrentLaunchInfo);
-    CurrentLaunchInfo.LambdaCalleeInfo.clear();
-    CurrentLaunchInfo.CallsiteRuntimeConstants.clear();
-    return LaunchInfo;
-  }
+  void clearDeviceLaunchInfo() { currentDeviceLaunchInfo().clear(); }
 
   void populateLambdaRegistrationCodeCache(void *Kernel,
                                            void *RegistrationFunc) {

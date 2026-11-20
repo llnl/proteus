@@ -63,11 +63,10 @@ public:
 
   bool isEnabled() const { return Enabled; }
 
-  // Serializes the launch inputs into Key.
-  void encode(SmallVectorImpl<char> &Key, void **KernelArgs, dim3 GridDim,
-              dim3 BlockDim, uint64_t PluginGeneration,
-              const CodeGenerationConfig &CGConfig,
-              const LambdaRegistry::DeviceLaunchInfo &LaunchInfo) const {
+  // Serializes the launch inputs into the key buffer.
+  void encode(void **KernelArgs, dim3 GridDim, dim3 BlockDim,
+              uint64_t PluginGeneration, const CodeGenerationConfig &CGConfig,
+              const LambdaRegistry::DeviceLaunchInfo &LaunchInfo) {
     assert(Enabled && "Expected enabled launch memo");
 
     size_t Len = PrefixLen;
@@ -102,16 +101,16 @@ public:
     assert(Out == Key.data() + Len && "Launch memo key size mismatch");
   }
 
-  // Returns the memoized kernel function, or nullptr.
-  void *lookup(ArrayRef<char> Key) const {
+  // Returns the kernel function memoized for the encoded key, or nullptr.
+  void *lookup() const {
     for (unsigned I = 0; I < NumSlots; ++I)
       if (Funcs[I] && std::memcmp(slot(I), Key.data(), KeyLen) == 0)
         return Funcs[I];
     return nullptr;
   }
 
-  // Replaces the oldest entry.
-  void insert(ArrayRef<char> Key, void *KernelFunc) {
+  // Inserts the encoded key, replacing the oldest entry.
+  void insert(void *KernelFunc) {
     assert(Enabled && "Expected enabled launch memo");
     if (KeyLen == 0) {
       KeyLen = Key.size();
@@ -183,6 +182,8 @@ private:
   char *slot(unsigned I) const { return Keys.get() + size_t(I) * KeyLen; }
 
   SmallVector<ArgField, 6> Fields;
+  // Key of the current launch, reused so it allocates at most once.
+  SmallVector<char, 0> Key;
   // NumSlots * KeyLen, set on first insert.
   std::unique_ptr<char[]> Keys;
   // nullptr marks an empty slot.

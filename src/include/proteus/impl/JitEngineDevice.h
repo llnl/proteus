@@ -460,19 +460,6 @@ public:
     return KernelInfo.getBitcode();
   }
 
-  void
-  getLambdaJitValues(SmallVector<uint64_t> &LambdaCalleeInfo,
-                     LambdaCallsiteRuntimeConstantsMap &LambdaJitValuesMap) {
-    TIMESCOPE(JitEngineDevice, getLambdaJitValues);
-    LambdaRegistry &LR = LambdaRegistry::instance();
-    auto LaunchInfo = LR.takeDeviceLaunchInfo();
-    if (LaunchInfo.CallsiteRuntimeConstants.empty()) {
-      return;
-    }
-    LambdaCalleeInfo = std::move(LaunchInfo.LambdaCalleeInfo);
-    LambdaJitValuesMap = std::move(LaunchInfo.CallsiteRuntimeConstants);
-  }
-
   void registerVar(void *Handle, const char *VarName, const void *HostAddr,
                    uint64_t VarSize) {
     if (!HandleToBinaryInfo.count(Handle))
@@ -597,12 +584,10 @@ JitEngineDevice<ImplT>::compileAndRun(
   const auto &CGConfig = Config::get().getCGConfig(KernelInfo.getName());
 
   LaunchMemo &Memo = KernelInfo.getLaunchMemo();
-  SmallVector<char, 128> MemoKey;
   if (Memo.isEnabled()) {
-    Memo.encode(MemoKey, KernelArgs, GridDim, BlockDim,
-                getJITPassPluginGeneration(), CGConfig,
-                LambdaRegistry::instance().peekDeviceLaunchInfo());
-    if (void *KernelFunc = Memo.lookup(MemoKey)) {
+    Memo.encode(KernelArgs, GridDim, BlockDim, getJITPassPluginGeneration(),
+                CGConfig, LambdaRegistry::instance().peekDeviceLaunchInfo());
+    if (void *KernelFunc = Memo.lookup()) {
       LambdaRegistry::instance().clearDeviceLaunchInfo();
       return launchKernelFunction(
           reinterpret_cast<KernelFunction_t>(KernelFunc), GridDim, BlockDim,
@@ -613,9 +598,17 @@ JitEngineDevice<ImplT>::compileAndRun(
   SmallVector<RuntimeConstant> RCVec =
       getRuntimeConstantValues(KernelArgs, KernelInfo.getRCInfoArray());
 
-  SmallVector<uint64_t> LambdaCalleeInfoToSpecialize;
-  LambdaCallsiteRuntimeConstantsMap LambdaJitValuesMap;
-  getLambdaJitValues(LambdaCalleeInfoToSpecialize, LambdaJitValuesMap);
+  const auto &LaunchInfo = LambdaRegistry::instance().peekDeviceLaunchInfo();
+  SmallVector<uint64_t> LambdaCalleeInfoToSpecialize(
+      LaunchInfo.LambdaCalleeInfo.begin(), LaunchInfo.LambdaCalleeInfo.end());
+  const LambdaCallsiteRuntimeConstantsMap &LambdaJitValuesMap =
+      LaunchInfo.CallsiteRuntimeConstants;
+  // Clear this launch's lambda state on every return path.
+  struct ClearLaunchInfoOnExit {
+    ~ClearLaunchInfoOnExit() {
+      LambdaRegistry::instance().clearDeviceLaunchInfo();
+    }
+  } ClearOnExit;
   // Determine the hash based on dimension specialization.  If we do not
   // specialize IR based on grid dimensions, avoid hashing on those to
   // eliminate repeated compilation overhead.
@@ -630,7 +623,7 @@ JitEngineDevice<ImplT>::compileAndRun(
 
   auto Launch = [&](void *KernelFunc) {
     if (Memo.isEnabled())
-      Memo.insert(MemoKey, KernelFunc);
+      Memo.insert(KernelFunc);
     return static_cast<DeviceError_t>(Dispatch
                                           .launch(KernelFunc, GridDim, BlockDim,
                                                   KernelArgs, ShmemSize, Stream)
