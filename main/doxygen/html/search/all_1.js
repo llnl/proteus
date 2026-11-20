@@ -30,7 +30,7 @@ var searchData=
   ['argtys_27',['ArgTys',['../classproteus_1_1MLIRIRFunction.html#a15f487656a98db4ca188fbca87b2a8af',1,'proteus::MLIRIRFunction']]],
   ['argument_5ftypes_28',['argument_types',['../structproteus_1_1sig__traits_3_01R_07Args_8_8_8_08_4.html#a74672e63a0780ecb08ab7f77d4443213',1,'proteus::sig_traits&lt; R(Args...)&gt;']]],
   ['arithop_29',['ArithOp',['../namespaceproteus.html#a3518c876bedf0d51909bb3dca16870b7',1,'proteus']]],
-  ['array_30',['array',['../namespaceproteus.html#a321b5206e698d88e9dbf55b4c1c69ee1a1605f8b3dab001eb8e86082491eebaa9',1,'proteus::ARRAY'],['../namespaceproteus.html#ad44857f031a4f66111485d3db4210016a4410ec34d9e6c1a68100ca0ce033fb17',1,'proteus::Array']]],
+  ['array_30',['array',['../namespaceproteus.html#ad44857f031a4f66111485d3db4210016a4410ec34d9e6c1a68100ca0ce033fb17',1,'proteus::Array'],['../namespaceproteus.html#a321b5206e698d88e9dbf55b4c1c69ee1a1605f8b3dab001eb8e86082491eebaa9',1,'proteus::ARRAY']]],
   ['arrayinfo_31',['ArrayInfo',['../structproteus_1_1ArrayInfo.html',1,'proteus']]],
   ['arrinfo_32',['ArrInfo',['../structproteus_1_1RuntimeConstant.html#a03baf9e0d36059800c9d55a16bed5863',1,'proteus::RuntimeConstant']]],
   ['artifactkind_33',['ArtifactKind',['../structproteus_1_1CppJitArtifact.html#af76d4a220716324e84d0d36e932ae404',1,'proteus::CppJitArtifact']]],

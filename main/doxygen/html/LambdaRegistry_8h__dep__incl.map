@@ -1,25 +1,28 @@
 <map id="src/include/proteus/impl/LambdaRegistry.h" name="src/include/proteus/impl/LambdaRegistry.h">
-<area shape="rect" id="Node000001" title=" " alt="" coords="255,5,429,45"/>
-<area shape="rect" id="Node000002" href="$JitEngineDevice_8h.html" title=" " alt="" coords="183,181,357,221"/>
-<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="244,53,215,71,192,95,186,113,192,132,212,159,237,179,234,183,208,163,188,135,181,113,188,92,212,66,241,48"/>
-<area shape="rect" id="Node000007" href="$CompilerInterfaceDevice_8cpp.html" title=" " alt="" coords="5,269,223,309"/>
-<area shape="poly" id="edge11_Node000001_Node000007" title=" " alt="" coords="248,53,212,70,181,95,165,115,152,138,133,186,123,233,118,269,113,268,117,232,128,185,147,136,161,112,177,91,209,66,245,48"/>
-<area shape="rect" id="Node000008" href="$TransformLambdaSpecialization_8h.html" title=" " alt="" coords="203,93,481,133"/>
-<area shape="poly" id="edge8_Node000001_Node000008" title=" " alt="" coords="345,59,345,93,339,93,339,59"/>
-<area shape="rect" id="Node000009" href="$JitEngineHost_8cpp.html" title=" " alt="" coords="401,189,616,214"/>
-<area shape="poly" id="edge13_Node000001_Node000009" title=" " alt="" coords="438,48,470,66,496,92,509,116,514,143,513,188,508,188,509,144,504,118,492,95,467,71,436,53"/>
-<area shape="rect" id="Node000010" href="$CompilerInterfaceHost_8cpp.html" title=" " alt="" coords="557,93,775,133"/>
-<area shape="poly" id="edge12_Node000001_Node000010" title=" " alt="" coords="427,46,596,91,594,96,425,51"/>
-<area shape="rect" id="Node000003" href="$JitEngineDeviceCUDA_8h.html" title=" " alt="" coords="298,269,509,309"/>
-<area shape="poly" id="edge2_Node000002_Node000003" title=" " alt="" coords="312,227,375,267,372,271,310,231"/>
-<area shape="rect" id="Node000004" href="$JitEngineDeviceCUDA_8cpp.html" title=" " alt="" coords="231,357,434,397"/>
-<area shape="poly" id="edge7_Node000002_Node000004" title=" " alt="" coords="274,235,278,271,288,308,302,334,318,355,314,359,297,336,284,310,273,272,268,236"/>
-<area shape="rect" id="Node000005" href="$JitEngineDeviceHIP_8h.html" title=" " alt="" coords="533,269,727,309"/>
-<area shape="poly" id="edge4_Node000002_Node000005" title=" " alt="" coords="363,222,552,267,551,272,361,227"/>
-<area shape="poly" id="edge6_Node000002_Node000007" title=" " alt="" coords="225,230,149,272,147,267,222,226"/>
-<area shape="poly" id="edge3_Node000003_Node000004" title=" " alt="" coords="381,322,350,359,346,355,377,318"/>
-<area shape="rect" id="Node000006" href="$JitEngineDeviceHIP_8cpp.html" title=" " alt="" coords="529,357,731,397"/>
-<area shape="poly" id="edge5_Node000005_Node000006" title=" " alt="" coords="633,323,633,357,627,357,627,323"/>
-<area shape="poly" id="edge9_Node000008_Node000002" title=" " alt="" coords="319,146,288,183,284,179,315,142"/>
-<area shape="poly" id="edge10_Node000008_Node000009" title=" " alt="" coords="392,137,488,186,485,191,389,142"/>
+<area shape="rect" id="Node000001" title=" " alt="" coords="414,5,589,45"/>
+<area shape="rect" id="Node000002" href="$JitEngineDevice_8h.html" title=" " alt="" coords="91,181,264,221"/>
+<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="400,31,309,36,213,47,131,66,101,79,81,95,74,106,74,117,86,140,111,161,140,179,137,184,108,165,82,143,69,118,69,105,77,92,98,75,129,61,212,42,308,31,400,25"/>
+<area shape="rect" id="Node000007" href="$CompilerInterfaceDevice_8cpp.html" title=" " alt="" coords="529,269,746,309"/>
+<area shape="poly" id="edge13_Node000001_Node000007" title=" " alt="" coords="547,51,569,70,588,92,611,139,626,188,639,269,634,270,621,189,606,141,583,95,565,73,544,55"/>
+<area shape="rect" id="Node000008" href="$LaunchMemo_8h.html" title=" " alt="" coords="91,93,250,133"/>
+<area shape="poly" id="edge8_Node000001_Node000008" title=" " alt="" coords="416,51,244,96,242,91,415,46"/>
+<area shape="rect" id="Node000009" href="$TransformLambdaSpecialization_8h.html" title=" " alt="" coords="274,93,553,133"/>
+<area shape="poly" id="edge10_Node000001_Node000009" title=" " alt="" coords="474,57,435,95,431,91,470,53"/>
+<area shape="rect" id="Node000010" href="$JitEngineHost_8cpp.html" title=" " alt="" coords="347,189,562,214"/>
+<area shape="poly" id="edge15_Node000001_Node000010" title=" " alt="" coords="538,53,554,70,567,91,573,113,568,134,553,154,534,170,493,191,490,186,531,165,549,150,563,132,568,113,562,93,550,74,534,56"/>
+<area shape="rect" id="Node000011" href="$CompilerInterfaceHost_8cpp.html" title=" " alt="" coords="679,93,897,133"/>
+<area shape="poly" id="edge14_Node000001_Node000011" title=" " alt="" coords="578,47,726,91,724,96,577,52"/>
+<area shape="rect" id="Node000003" href="$JitEngineDeviceCUDA_8h.html" title=" " alt="" coords="72,269,283,309"/>
+<area shape="poly" id="edge2_Node000002_Node000003" title=" " alt="" coords="180,235,180,269,175,269,175,235"/>
+<area shape="rect" id="Node000004" href="$JitEngineDeviceCUDA_8cpp.html" title=" " alt="" coords="5,357,208,397"/>
+<area shape="poly" id="edge7_Node000002_Node000004" title=" " alt="" coords="108,230,82,247,62,271,57,292,63,315,75,337,90,356,86,359,71,340,58,317,52,292,58,268,78,243,105,225"/>
+<area shape="rect" id="Node000005" href="$JitEngineDeviceHIP_8h.html" title=" " alt="" coords="307,269,501,309"/>
+<area shape="poly" id="edge4_Node000002_Node000005" title=" " alt="" coords="241,224,355,267,353,272,239,229"/>
+<area shape="poly" id="edge6_Node000002_Node000007" title=" " alt="" coords="278,219,537,267,536,272,277,224"/>
+<area shape="poly" id="edge3_Node000003_Node000004" title=" " alt="" coords="155,322,124,359,120,355,151,318"/>
+<area shape="rect" id="Node000006" href="$JitEngineDeviceHIP_8cpp.html" title=" " alt="" coords="303,357,505,397"/>
+<area shape="poly" id="edge5_Node000005_Node000006" title=" " alt="" coords="407,323,407,357,401,357,401,323"/>
+<area shape="poly" id="edge9_Node000008_Node000002" title=" " alt="" coords="176,147,179,181,173,181,171,147"/>
+<area shape="poly" id="edge11_Node000009_Node000002" title=" " alt="" coords="350,141,230,184,228,179,348,136"/>
+<area shape="poly" id="edge12_Node000009_Node000010" title=" " alt="" coords="431,145,451,187,447,189,426,147"/>
 </map>

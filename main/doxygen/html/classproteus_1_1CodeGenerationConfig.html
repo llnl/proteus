@@ -125,10 +125,16 @@ Public Member Functions</h2></td></tr>
 <tr class="separator:af7d9945275ac498c8c02374ab369f639"><td class="memSeparator" colspan="2">&#160;</td></tr>
 <tr class="memitem:a73ce87845eef71f1515ae7628238bc36" id="r_a73ce87845eef71f1515ae7628238bc36"><td class="memItemLeft" align="right" valign="top">std::optional&lt; const std::string &gt;&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="classproteus_1_1CodeGenerationConfig.html#a73ce87845eef71f1515ae7628238bc36">optPipeline</a> () const</td></tr>
 <tr class="separator:a73ce87845eef71f1515ae7628238bc36"><td class="memSeparator" colspan="2">&#160;</td></tr>
+<tr class="memitem:ab44fc7b24cd95d245780fa8fb51033b5" id="r_ab44fc7b24cd95d245780fa8fb51033b5"><td class="memItemLeft" align="right" valign="top">uint64_t&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="classproteus_1_1CodeGenerationConfig.html#ab44fc7b24cd95d245780fa8fb51033b5">optPipelineHash</a> () const</td></tr>
+<tr class="separator:ab44fc7b24cd95d245780fa8fb51033b5"><td class="memSeparator" colspan="2">&#160;</td></tr>
 <tr class="memitem:a327f256ee7fd94646ffdf7f5ffc37972" id="r_a327f256ee7fd94646ffdf7f5ffc37972"><td class="memItemLeft" align="right" valign="top">const std::optional&lt; LaunchDim &gt; &amp;&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="classproteus_1_1CodeGenerationConfig.html#a327f256ee7fd94646ffdf7f5ffc37972">gridDim</a> () const</td></tr>
 <tr class="separator:a327f256ee7fd94646ffdf7f5ffc37972"><td class="memSeparator" colspan="2">&#160;</td></tr>
 <tr class="memitem:a084a76d3832f9aac02aa0b78f3bd283d" id="r_a084a76d3832f9aac02aa0b78f3bd283d"><td class="memItemLeft" align="right" valign="top">const std::optional&lt; LaunchDim &gt; &amp;&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="classproteus_1_1CodeGenerationConfig.html#a084a76d3832f9aac02aa0b78f3bd283d">blockDim</a> () const</td></tr>
 <tr class="separator:a084a76d3832f9aac02aa0b78f3bd283d"><td class="memSeparator" colspan="2">&#160;</td></tr>
+<tr class="memitem:a3f35a93cd02d2a876ff0d2b152e5de70" id="r_a3f35a93cd02d2a876ff0d2b152e5de70"><td class="memItemLeft" align="right" valign="top">int&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="classproteus_1_1CodeGenerationConfig.html#a3f35a93cd02d2a876ff0d2b152e5de70">tunedMaxThreads</a> () const</td></tr>
+<tr class="separator:a3f35a93cd02d2a876ff0d2b152e5de70"><td class="memSeparator" colspan="2">&#160;</td></tr>
+<tr class="memitem:a21bc827b020e491c9bd4a60c3f747677" id="r_a21bc827b020e491c9bd4a60c3f747677"><td class="memItemLeft" align="right" valign="top">int&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="classproteus_1_1CodeGenerationConfig.html#a21bc827b020e491c9bd4a60c3f747677">tunedMinBlocksPerSM</a> () const</td></tr>
+<tr class="separator:a21bc827b020e491c9bd4a60c3f747677"><td class="memSeparator" colspan="2">&#160;</td></tr>
 <tr class="memitem:a1cdcb5006e1c9ed9923b965fe35dc86b" id="r_a1cdcb5006e1c9ed9923b965fe35dc86b"><td class="memItemLeft" align="right" valign="top">int&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="classproteus_1_1CodeGenerationConfig.html#a1cdcb5006e1c9ed9923b965fe35dc86b">minBlocksPerSM</a> (int MaxThreads) const</td></tr>
 <tr class="separator:a1cdcb5006e1c9ed9923b965fe35dc86b"><td class="memSeparator" colspan="2">&#160;</td></tr>
 <tr class="memitem:a18becaeaa7be4977dd71d7c5057c2b0c" id="r_a18becaeaa7be4977dd71d7c5057c2b0c"><td class="memTemplParams" colspan="2">template&lt;typename T &gt; </td></tr>
@@ -398,6 +404,31 @@ template&lt;typename T &gt; </div>
 
 </div>
 </div>
+<a id="ab44fc7b24cd95d245780fa8fb51033b5" name="ab44fc7b24cd95d245780fa8fb51033b5"></a>
+<h2 class="memtitle"><span class="permalink"><a href="#ab44fc7b24cd95d245780fa8fb51033b5">&#9670;&#160;</a></span>optPipelineHash()</h2>
+
+<div class="memitem">
+<div class="memproto">
+<table class="mlabels">
+  <tr>
+  <td class="mlabels-left">
+      <table class="memname">
+        <tr>
+          <td class="memname">uint64_t proteus::CodeGenerationConfig::optPipelineHash </td>
+          <td>(</td>
+          <td class="paramname"></td><td>)</td>
+          <td> const</td>
+        </tr>
+      </table>
+  </td>
+  <td class="mlabels-right">
+<span class="mlabels"><span class="mlabel">inline</span></span>  </td>
+  </tr>
+</table>
+</div><div class="memdoc">
+
+</div>
+</div>
 <a id="a2c8c03a28bc1a9539d6624ac52da2b88" name="a2c8c03a28bc1a9539d6624ac52da2b88"></a>
 <h2 class="memtitle"><span class="permalink"><a href="#a2c8c03a28bc1a9539d6624ac52da2b88">&#9670;&#160;</a></span>specializeArgs()</h2>
 
@@ -484,6 +515,56 @@ template&lt;typename T &gt; </div>
       <table class="memname">
         <tr>
           <td class="memname">bool proteus::CodeGenerationConfig::specializeLaunchBounds </td>
+          <td>(</td>
+          <td class="paramname"></td><td>)</td>
+          <td> const</td>
+        </tr>
+      </table>
+  </td>
+  <td class="mlabels-right">
+<span class="mlabels"><span class="mlabel">inline</span></span>  </td>
+  </tr>
+</table>
+</div><div class="memdoc">
+
+</div>
+</div>
+<a id="a3f35a93cd02d2a876ff0d2b152e5de70" name="a3f35a93cd02d2a876ff0d2b152e5de70"></a>
+<h2 class="memtitle"><span class="permalink"><a href="#a3f35a93cd02d2a876ff0d2b152e5de70">&#9670;&#160;</a></span>tunedMaxThreads()</h2>
+
+<div class="memitem">
+<div class="memproto">
+<table class="mlabels">
+  <tr>
+  <td class="mlabels-left">
+      <table class="memname">
+        <tr>
+          <td class="memname">int proteus::CodeGenerationConfig::tunedMaxThreads </td>
+          <td>(</td>
+          <td class="paramname"></td><td>)</td>
+          <td> const</td>
+        </tr>
+      </table>
+  </td>
+  <td class="mlabels-right">
+<span class="mlabels"><span class="mlabel">inline</span></span>  </td>
+  </tr>
+</table>
+</div><div class="memdoc">
+
+</div>
+</div>
+<a id="a21bc827b020e491c9bd4a60c3f747677" name="a21bc827b020e491c9bd4a60c3f747677"></a>
+<h2 class="memtitle"><span class="permalink"><a href="#a21bc827b020e491c9bd4a60c3f747677">&#9670;&#160;</a></span>tunedMinBlocksPerSM()</h2>
+
+<div class="memitem">
+<div class="memproto">
+<table class="mlabels">
+  <tr>
+  <td class="mlabels-left">
+      <table class="memname">
+        <tr>
+          <td class="memname">int proteus::CodeGenerationConfig::tunedMinBlocksPerSM </td>
           <td>(</td>
           <td class="paramname"></td><td>)</td>
           <td> const</td>

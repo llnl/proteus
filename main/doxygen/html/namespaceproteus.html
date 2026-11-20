@@ -240,6 +240,8 @@ Classes</h2></td></tr>
 <tr class="separator:"><td class="memSeparator" colspan="2">&#160;</td></tr>
 <tr class="memitem:"><td class="memItemLeft" align="right" valign="top">class &#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="classproteus_1_1LambdaRegistry.html">LambdaRegistry</a></td></tr>
 <tr class="separator:"><td class="memSeparator" colspan="2">&#160;</td></tr>
+<tr class="memitem:"><td class="memItemLeft" align="right" valign="top">class &#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="classproteus_1_1LaunchMemo.html">LaunchMemo</a></td></tr>
+<tr class="separator:"><td class="memSeparator" colspan="2">&#160;</td></tr>
 <tr class="memitem:"><td class="memItemLeft" align="right" valign="top">struct &#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="structproteus_1_1LinkingCloner.html">LinkingCloner</a></td></tr>
 <tr class="separator:"><td class="memSeparator" colspan="2">&#160;</td></tr>
 <tr class="memitem:"><td class="memItemLeft" align="right" valign="top">class &#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="classproteus_1_1LLVMCodeBuilder.html">LLVMCodeBuilder</a></td></tr>
@@ -716,6 +718,8 @@ Functions</h2></td></tr>
 <tr class="separator:a0ce1a8fe801a000d944f3d5bf5dcfaac"><td class="memSeparator" colspan="2">&#160;</td></tr>
 <tr class="memitem:a1b17eaa2717750d9169f68eac00d808b" id="r_a1b17eaa2717750d9169f68eac00d808b"><td class="memItemLeft" align="right" valign="top">std::vector&lt; <a class="el" href="structproteus_1_1JITPassPluginConfig.html">JITPassPluginConfig</a> &gt;&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="namespaceproteus.html#a1b17eaa2717750d9169f68eac00d808b">getJITPassPluginConfigs</a> ()</td></tr>
 <tr class="separator:a1b17eaa2717750d9169f68eac00d808b"><td class="memSeparator" colspan="2">&#160;</td></tr>
+<tr class="memitem:a2964208b987aa941ad641535ccad2e86" id="r_a2964208b987aa941ad641535ccad2e86"><td class="memItemLeft" align="right" valign="top">uint64_t&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="namespaceproteus.html#a2964208b987aa941ad641535ccad2e86">getJITPassPluginGeneration</a> ()</td></tr>
+<tr class="separator:a2964208b987aa941ad641535ccad2e86"><td class="memSeparator" colspan="2">&#160;</td></tr>
 <tr class="memitem:a0039090b9f33da4156b9cd36c9fcd471" id="r_a0039090b9f33da4156b9cd36c9fcd471"><td class="memItemLeft" align="right" valign="top">void&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="namespaceproteus.html#a0039090b9f33da4156b9cd36c9fcd471">setLambdaCallsiteMetadata</a> (CallBase &amp;CB, uint64_t <a class="el" href="CompilerInterfaceDevice_8cpp.html#a47cd70d25244738dc6068ed25f6272c2">LambdaID</a>, uint32_t <a class="el" href="CompilerInterfaceDevice_8cpp.html#a18204ea9e58ad72ebae0099b0789662a">CallsiteIndex</a>)</td></tr>
 <tr class="separator:a0039090b9f33da4156b9cd36c9fcd471"><td class="memSeparator" colspan="2">&#160;</td></tr>
 <tr class="memitem:a352242dd47dbe85d71aa54eb8da671c6" id="r_a352242dd47dbe85d71aa54eb8da671c6"><td class="memItemLeft" align="right" valign="top">std::optional&lt; std::pair&lt; uint64_t, uint32_t &gt; &gt;&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="namespaceproteus.html#a352242dd47dbe85d71aa54eb8da671c6">getLambdaCallsiteMetadata</a> (const CallBase &amp;CB)</td></tr>
@@ -2922,6 +2926,23 @@ template&lt;typename T &gt; </div>
       <table class="memname">
         <tr>
           <td class="memname">std::vector&lt; <a class="el" href="structproteus_1_1JITPassPluginConfig.html">JITPassPluginConfig</a> &gt; proteus::getJITPassPluginConfigs </td>
+          <td>(</td>
+          <td class="paramname"></td><td>)</td>
+          <td></td>
+        </tr>
+      </table>
+</div><div class="memdoc">
+
+</div>
+</div>
+<a id="a2964208b987aa941ad641535ccad2e86" name="a2964208b987aa941ad641535ccad2e86"></a>
+<h2 class="memtitle"><span class="permalink"><a href="#a2964208b987aa941ad641535ccad2e86">&#9670;&#160;</a></span>getJITPassPluginGeneration()</h2>
+
+<div class="memitem">
+<div class="memproto">
+      <table class="memname">
+        <tr>
+          <td class="memname">uint64_t proteus::getJITPassPluginGeneration </td>
           <td>(</td>
           <td class="paramname"></td><td>)</td>
           <td></td>
