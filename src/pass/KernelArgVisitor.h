@@ -3,6 +3,7 @@
 
 #include "Helpers.h"
 #include "KernelArgPtrUseVisitor.h"
+#include "PointerClobberAnalysis.h"
 #include "proteus/CompilerInterfaceTypes.h"
 #include "proteus/impl/Logger.h"
 #include "proteus/impl/RuntimeConstantTypeHelpers.h"
@@ -15,6 +16,7 @@
 #include <llvm/ADT/SmallPtrSet.h>
 #include <llvm/ADT/SmallVector.h>
 
+#include <limits>
 #include <llvm/Analysis/ValueTracking.h>
 #include <llvm/IR/CFG.h>
 #include <llvm/IR/Constants.h>
@@ -28,19 +30,12 @@
 #include <llvm/IR/Module.h>
 #include <llvm/IR/PassManager.h>
 #include <llvm/IR/Type.h>
+#include <llvm/Support/ErrorHandling.h>
 #include <memory>
 #include <optional>
 
 namespace proteus {
 using namespace llvm;
-
-std::optional<ReturnInst *> getRetInst(Function &F) {
-  for (auto &BB : F) {
-    if (auto *TermInst = dyn_cast<ReturnInst>(BB.getTerminator()))
-      return TermInst;
-  }
-  return std::nullopt;
-}
 
 inline int64_t getValueIndicesOffset(const DataLayout &DL, Type *AggTy,
                                      ArrayRef<unsigned> Indices) {
@@ -50,128 +45,6 @@ inline int64_t getValueIndicesOffset(const DataLayout &DL, Type *AggTy,
   for (unsigned Idx : Indices)
     GEPIndices.push_back(ConstantInt::get(Type::getInt32Ty(Ctx), Idx));
   return DL.getIndexedOffsetInType(AggTy, GEPIndices);
-}
-
-struct ReachingPointerStores {
-  SmallVector<Value *, 4> Values;
-  bool Complete = true;
-};
-
-// Return whether LHS and RHS name exactly the same byte address after peeling
-// constant-offset pointer arithmetic and casts.
-inline bool isSamePointerAddress(const DataLayout &DL, Value *LHS, Value *RHS) {
-  int64_t LHSOffset = 0;
-  int64_t RHSOffset = 0;
-  Value *LHSBase = GetPointerBaseWithConstantOffset(LHS, LHSOffset, DL);
-  Value *RHSBase = GetPointerBaseWithConstantOffset(RHS, RHSOffset, DL);
-  return LHSBase && RHSBase && LHSBase == RHSBase && LHSOffset == RHSOffset;
-}
-
-// Collect the closest pointer-valued store to Address on every CFG path that
-// reaches Before. A path with no store, or a revisited block (such as a loop),
-// marks the result incomplete so callers conservatively decline rather than
-// infer a store that is not guaranteed to reach the load.
-inline void collectReachingPointerStores(const DataLayout &DL, BasicBlock *BB,
-                                         Instruction *Before, Value *Address,
-                                         SmallPtrSetImpl<BasicBlock *> &Visited,
-                                         ReachingPointerStores &Result) {
-  if (!Visited.insert(BB).second) {
-    Result.Complete = false;
-    return;
-  }
-
-  for (Instruction *I = Before ? Before->getPrevNode() : BB->getTerminator(); I;
-       I = I->getPrevNode()) {
-    auto *SI = dyn_cast<StoreInst>(I);
-    if (SI && SI->getValueOperand()->getType()->isPointerTy() &&
-        isSamePointerAddress(DL, SI->getPointerOperand(), Address)) {
-      Result.Values.push_back(SI->getValueOperand());
-      return;
-    }
-  }
-
-  if (pred_empty(BB)) {
-    Result.Complete = false;
-    return;
-  }
-  for (BasicBlock *Pred : predecessors(BB))
-    collectReachingPointerStores(DL, Pred, nullptr, Address, Visited, Result);
-}
-
-// Resolve pointer spills by walking backwards from the load through the CFG.
-// This finds the nearest store on every incoming path instead of depending on
-// the arbitrary order in which Value::users() happens to enumerate writes.
-// The result is complete only when every incoming path contributes a store.
-inline ReachingPointerStores getReachingPointerStores(const DataLayout &DL,
-                                                      LoadInst &LI) {
-  ReachingPointerStores Result;
-  SmallPtrSet<BasicBlock *, 8> Visited;
-  collectReachingPointerStores(DL, LI.getParent(), &LI, LI.getPointerOperand(),
-                               Visited, Result);
-  return Result;
-}
-
-inline Value *getPointerLoadOrigin(const DataLayout &DL, Value *V,
-                                   SmallPtrSetImpl<Value *> &Visited);
-
-// Return one source pointer when every reaching store has the same origin.
-// Nested pointer-spill loads are recursively resolved; distinct origins or
-// cycles are ambiguous and return nullptr.
-inline Value *getUniqueReachingPointer(const DataLayout &DL,
-                                       const ReachingPointerStores &Stores,
-                                       SmallPtrSetImpl<Value *> &Visited) {
-  if (!Stores.Complete || Stores.Values.empty())
-    return nullptr;
-
-  Value *First = getPointerLoadOrigin(DL, Stores.Values.front(), Visited);
-  if (!First)
-    return nullptr;
-  for (Value *V : drop_begin(Stores.Values)) {
-    Value *Origin = getPointerLoadOrigin(DL, V, Visited);
-    if (Origin != First)
-      return nullptr;
-  }
-  return First;
-}
-
-// Resolve a pointer value through nested pointer-spill loads. Non-load pointer
-// values are already origins. Visited prevents cyclic spill graphs from being
-// mistaken for a unique source.
-inline Value *getPointerLoadOrigin(const DataLayout &DL, Value *V,
-                                   SmallPtrSetImpl<Value *> &Visited) {
-  auto *LI = dyn_cast<LoadInst>(V);
-  if (!LI || !LI->getType()->isPointerTy())
-    return V;
-  if (!Visited.insert(V).second)
-    return nullptr;
-
-  ReachingPointerStores Stores = getReachingPointerStores(DL, *LI);
-  return getUniqueReachingPointer(DL, Stores, Visited);
-}
-
-// Report ambiguity only for complete reaching-store sets. Incomplete sets can
-// still be handled by ordinary backward memory-use analysis.
-inline bool hasAmbiguousReachingPointers(const DataLayout &DL,
-                                         const ReachingPointerStores &Stores) {
-  if (!Stores.Complete || Stores.Values.empty())
-    return false;
-  SmallPtrSet<Value *, 8> Visited;
-  return !getUniqueReachingPointer(DL, Stores, Visited);
-}
-
-// A compiler spill is a temporary local slot the compiler uses to save an SSA
-// pointer value (for example, `alloca ptr`, followed by `store ptr` and a
-// later `load ptr`).  A pointer-valued load is not necessarily such a spill:
-// it can instead read an ordinary pointer field from a closure/context
-// aggregate.  The reaching-store recovery below is only valid for a local
-// `alloca ptr` slot; aggregate fields must be traced backwards through their
-// address.
-inline bool isPointerSpillLoad(const LoadInst &LI) {
-  if (!LI.getType()->isPointerTy())
-    return false;
-  const Value *Storage = getUnderlyingObject(LI.getPointerOperand());
-  auto *Slot = dyn_cast_or_null<AllocaInst>(Storage);
-  return Slot && Slot->getAllocatedType()->isPointerTy();
 }
 
 struct LambdaKernelArgAnalysis {
@@ -194,17 +67,34 @@ struct FunctionAnalysis {
 
 struct WorkItem {
   Value *CurVal;
-  Value *Src;
+  Instruction *Src;
 };
 
 class LambdaArgVisitor : public InstVisitor<LambdaArgVisitor> {
 private:
   CallBase *LambdaCB;
   const DataLayout &DL;
+  std::shared_ptr<MemorySSAClobberOracle> ClobberOracle;
   SmallVector<WorkItem> WorkList;
   SmallDenseSet<Value *> Seen;
-
+  // The size of the struct, a pointer to this is passed to the call operator
+  uint64_t FunctorSize;
   int64_t Offset;
+  // Query a pointer's pointee at the use that consumes its closure bytes.
+  // A memory transfer starts a new such history at its source; ordinary
+  // SSA value transfers do not.
+  bool FollowingInvocationPointee = true;
+  // The byte-consuming use can be later than the SSA use that introduced a
+  // pointer (for example, an early spill of a formal followed by memcpy).
+  Instruction *PointeeUseBoundary = nullptr;
+  // A live-on-entry pointer load starts a distinct history for the pointer's
+  // storage. Restore the pointed-to entity when that history reaches a store.
+  struct PendingPointee {
+    TrackedRange Range;
+    Instruction *UseBoundary;
+    bool TrackPointee;
+  };
+  SmallVector<PendingPointee, 2> PendingPointees;
   uint32_t KernelArg = 0;
   Function *KernelFunction = nullptr;
   // instructions like inttoptr can change the runtimeconstant type
@@ -213,31 +103,26 @@ private:
   bool AnalysisSuccess = false;
   bool AnalysisFailed = false;
 
-  // Constructor used for cloning and merging branches of phi node analysis
-  LambdaArgVisitor(Value *Start, Value *LastSeen, CallBase *LambdaCBArg,
-                   int64_t Off, const DataLayout &Dl)
-      : LambdaCB(LambdaCBArg), DL(Dl), Offset(Off) {
-    WorkList.push_back({Start, LastSeen});
+  // The two flags are a unit: never both true. Every conservative decline
+  // routes through here.
+  void fail() {
+    AnalysisFailed = true;
+    AnalysisSuccess = false;
   }
+  // Depth of nested clone/function sub-analyses. Cyclic PHI webs and
+  // recursive pointer-returning callees otherwise recurse without bound,
+  // because each sub-analysis starts with a fresh Seen set.
+  int AnalysisDepth = 0;
+  static constexpr int MaxAnalysisDepth = 32;
 
-  std::optional<Value *> getCallBaseIdentityArgOperand(CallBase &CB) {
-    auto *CalledFunction = CB.getCalledFunction();
-    DEBUG(Logger::logs("proteus-pass")
-          << "Checking if function is identity " << *CalledFunction << "\n");
-    auto RetInstOpt = getRetInst(*CalledFunction);
-    if (!RetInstOpt)
-      return std::nullopt;
-    auto *RetInst = *RetInstOpt;
-
-    DEBUG(Logger::logs("proteus-pass") << "CB called function return inst "
-                                       << *RetInst->getReturnValue() << "\n");
-    for (size_t ArgNum = 0; ArgNum < CalledFunction->arg_size(); ++ArgNum) {
-      DEBUG(Logger::logs("proteus-pass")
-            << "Called Fn arg " << *CalledFunction->getArg(ArgNum) << "\n");
-      if (RetInst->getReturnValue() == CalledFunction->getArg(ArgNum))
-        return CB.getArgOperand(ArgNum);
-    }
-    return std::nullopt;
+  // Constructor used for cloning and merging branches of phi node analysis
+  LambdaArgVisitor(Value *Start, Instruction *LastSeen, CallBase *LambdaCBArg,
+                   int64_t Off, const DataLayout &Dl,
+                   std::shared_ptr<MemorySSAClobberOracle> Oracle,
+                   uint64_t FunctorSizeArg)
+      : LambdaCB(LambdaCBArg), DL(Dl), ClobberOracle(std::move(Oracle)),
+        FunctorSize(FunctorSizeArg), Offset(Off) {
+    WorkList.push_back({Start, LastSeen});
   }
 
 public:
@@ -250,7 +135,7 @@ public:
   // which is where the LambdaArgVisitor continues its analysis.
   // This pointer identifies which Ptr use the main analysis used
   // to discover the Ptr needing analysis, so as to prevent cycles.
-  Value *MemoryAnalysisPtrUse = nullptr;
+  Instruction *MemoryAnalysisPtrUse = nullptr;
   auto back() { return WorkList.back(); }
   void popBack() { WorkList.pop_back(); }
   bool seen(Value *Val) { return Seen.contains(Val); }
@@ -262,10 +147,20 @@ public:
 
 private:
   inline std::optional<LambdaKernelArgAnalysis>
-  cloneAndAnalyze(Value *Start, Value *MemoryAnalysisPtrUse,
+  cloneAndAnalyze(Value *Start, Instruction *MemoryAnalysisPtrUse,
                   int64_t StartOffset) {
+    if (AnalysisDepth >= MaxAnalysisDepth) {
+      DEBUG(Logger::logs("proteus-pass")
+            << "[Lambda arg analysis]: Sub-analysis depth limit reached at "
+            << *Start << "\n");
+      return std::nullopt;
+    }
     LambdaArgVisitor Visitor(Start, MemoryAnalysisPtrUse, LambdaCB, StartOffset,
-                             DL);
+                             DL, ClobberOracle, FunctorSize);
+    Visitor.AnalysisDepth = AnalysisDepth + 1;
+    Visitor.FollowingInvocationPointee = FollowingInvocationPointee;
+    Visitor.PointeeUseBoundary = PointeeUseBoundary;
+    Visitor.PendingPointees = PendingPointees;
     while (!Visitor.empty() && !Visitor.success() && !Visitor.failed()) {
       auto [V, AccessedFrom] = Visitor.back();
       Visitor.MemoryAnalysisPtrUse = AccessedFrom;
@@ -289,13 +184,33 @@ private:
 
   inline std::optional<FunctionAnalysis> analyzeFunction(CallBase &CB,
                                                          int64_t StartOffset) {
+    if (AnalysisDepth >= MaxAnalysisDepth) {
+      DEBUG(Logger::logs("proteus-pass")
+            << "[Lambda arg analysis]: Sub-analysis depth limit reached at "
+            << CB << "\n");
+      return std::nullopt;
+    }
     FunctionAnalysis Result;
     auto &F = *CB.getCalledFunction();
-    auto RetInstOpt = getRetInst(F);
-    if (!RetInstOpt)
+    // Analyzing one return of a multi-return callee would specialize every
+    // path through it from a single path's provenance. Require exactly one
+    // value-returning ReturnInst, matching the forward use visitor.
+    const auto Returns = getReturnInstructions(F);
+    if (Returns.size() != 1 || !Returns.front()->getReturnValue()) {
+      DEBUG(Logger::logs("proteus-pass")
+            << "[Lambda arg analysis]: Expected exactly one value-returning "
+               "ReturnInst in "
+            << F.getName() << "; found " << Returns.size() << "\n");
       return std::nullopt;
-    LambdaArgVisitor Visitor(RetInstOpt.value()->getReturnValue(),
-                             MemoryAnalysisPtrUse, LambdaCB, StartOffset, DL);
+    }
+    LambdaArgVisitor Visitor(Returns.front()->getReturnValue(),
+                             MemoryAnalysisPtrUse, LambdaCB, StartOffset, DL,
+                             ClobberOracle, FunctorSize);
+    Visitor.AnalysisDepth = AnalysisDepth + 1;
+    // This sub-analysis recovers the returned pointer's identity. Its caller
+    // subsequently checks the mapped pointee at the original consuming use,
+    // including this call's writes; do not query caller memory in this frame.
+    Visitor.FollowingInvocationPointee = false;
     while (!Visitor.empty() && !Visitor.success() && !Visitor.failed()) {
       auto [V, AccessedFrom] = Visitor.back();
       DEBUG(Logger::logs("proteus-pass")
@@ -331,13 +246,23 @@ private:
   }
 
 public:
-  LambdaArgVisitor(CallBase *LambdaCB, Module &M)
-      : LambdaCB(LambdaCB), DL(M.getDataLayout()), Offset(0) {
+  LambdaArgVisitor(CallBase *LambdaCB, Module &M, uint64_t FunctorSize_)
+      : LambdaArgVisitor(LambdaCB, M, FunctorSize_,
+                         std::make_shared<MemorySSAClobberOracle>()) {}
+
+  LambdaArgVisitor(CallBase *LambdaCB, Module &M, uint64_t FunctorSize_,
+                   std::shared_ptr<MemorySSAClobberOracle> Oracle)
+      : LambdaCB(LambdaCB), DL(M.getDataLayout()),
+        ClobberOracle(std::move(Oracle)), FunctorSize(FunctorSize_), Offset(0),
+        PointeeUseBoundary(LambdaCB) {
+
     auto *ClosurePtr = LambdaCB->getArgOperand(0);
     WorkList.push_back({ClosurePtr, LambdaCB});
   }
 
   void visitStoreInst(StoreInst &SI) {
+    if (!SI.getValueOperand()->getType()->isPointerTy())
+      FollowingInvocationPointee = false;
     WorkList.push_back({SI.getValueOperand(), &SI});
   }
 
@@ -347,8 +272,7 @@ public:
             << "[Lambda arg analysis]: Cannot trace indirect or declaration "
                "call "
             << CB << "\n");
-      AnalysisFailed = true;
-      AnalysisSuccess = false;
+      fail();
       return;
     }
     // Clone the visitor to determine if this function (a) returns a ptr
@@ -362,54 +286,128 @@ public:
     DEBUG(Logger::logs("proteus-pass")
           << "Function analysis of \n"
           << *CB.getCalledFunction() << " failed \n");
-    AnalysisFailed = true;
-    AnalysisSuccess = false;
+    fail();
   }
 
   void visitLoadInst(LoadInst &LI) {
     DEBUG(Logger::logs("proteus-pass") << "Load inst analysis \n")
-    // Loading a pointer from a spill slot does not change the offset within
-    // the pointee.  Resolve the pointer-sized store at offset zero in the slot,
-    // then continue with the original pointee-relative Offset.
-    if (isPointerSpillLoad(LI)) {
-      ReachingPointerStores Stores = getReachingPointerStores(DL, LI);
-      SmallPtrSet<Value *, 8> Visited;
-      if (Value *StoredPointer =
-              getUniqueReachingPointer(DL, Stores, Visited)) {
-        WorkList.push_back({StoredPointer, &LI});
-        return;
+    MemorySSAClobber Clobber = ClobberOracle->query(LI);
+    if (Clobber.Kind == MemorySSAClobberKind::LiveOnEntry) {
+      if (LI.getType()->isPointerTy() && FollowingInvocationPointee) {
+        // First discharge this frame's writes to the pointee. Following the
+        // address below resolves different bytes: the stored pointer itself.
+        if (!PointeeUseBoundary ||
+            PointeeUseBoundary->getFunction() != LI.getFunction() ||
+            Offset < 0 ||
+            static_cast<uint64_t>(Offset) > UINT64_MAX - FunctorSize ||
+            ClobberOracle
+                    ->query(MemoryLocation(&LI, LocationSize::precise(
+                                                    Offset + FunctorSize)),
+                            *PointeeUseBoundary)
+                    .Kind != MemorySSAClobberKind::LiveOnEntry) {
+          fail();
+          return;
+        }
+        PendingPointees.push_back({{Offset, FunctorSize}, nullptr, true});
+        Offset = 0;
+        FunctorSize = DL.getPointerTypeSize(LI.getType());
+        PointeeUseBoundary = &LI;
       }
-      if (hasAmbiguousReachingPointers(DL, Stores)) {
-        DEBUG(Logger::logs("proteus-pass")
-              << "[Lambda arg analysis]: Pointer spill load has ambiguous "
-                 "reaching stores: "
-              << LI << "\n");
-        AnalysisFailed = true;
-        AnalysisSuccess = false;
-        return;
-      }
-      auto Res = getDominatingUse(DL, LI.getPointerOperand(), &LI, 0, LambdaCB);
-      if (!Res) {
-        AnalysisFailed = true;
-        AnalysisSuccess = false;
-        return;
-      }
-      WorkList.push_back({Res->DominatingWrite, &LI});
+      DEBUG(Logger::logs("proteus-pass")
+            << "[Lambda arg analysis]: Load reads live-on-entry memory; "
+               "continuing from its address\n");
+      WorkList.push_back({LI.getPointerOperand(), &LI});
       return;
     }
 
-    WorkList.push_back({LI.getPointerOperand(), &LI});
+    if (Clobber.Kind == MemorySSAClobberKind::Definition) {
+      int64_t AddressOffset = 0;
+      Value *AddressBase = GetPointerBaseWithConstantOffset(
+          LI.getPointerOperand(), AddressOffset, DL);
+      if (!AddressBase) {
+        fail();
+        return;
+      }
+
+      // MemorySSA tells us which memory definition reaches this load, but a
+      // definition may be a store, memory transfer, or a call that writes the
+      // tracked storage.  Let LambdaInstUseVisitor interpret that definition
+      // and cross any required call boundary.  Start at the underlying object
+      // so the forward use walk can see every pointer expression used to
+      // reach the selected write.
+      int64_t OriginalOffset = Offset;
+      int64_t TargetOffset = AddressOffset;
+      if (!LI.getType()->isPointerTy())
+        TargetOffset += OriginalOffset;
+      DEBUG({
+        auto &OS = Logger::logs("proteus-pass");
+        OS << "[Lambda arg analysis]: Resolving load definition from base "
+           << *AddressBase << " at byte offset " << TargetOffset
+           << "; MemorySSA selected ";
+        if (Clobber.ClobberingInstruction)
+          OS << *Clobber.ClobberingInstruction;
+        else
+          OS << "<no instruction>";
+        OS << "\n";
+      });
+
+      // The entity under resolution is the functor storage for value loads,
+      // or the spilled pointer itself for pointer loads -- the pointer's own
+      // store size, so partial corruption of a spill slot is range-checked.
+      uint64_t QueryEntitySize = LI.getType()->isPointerTy()
+                                     ? DL.getTypeStoreSize(LI.getType())
+                                     : FunctorSize;
+      std::optional<TrackedRange> PostLoadRange;
+      if (LI.getType()->isPointerTy())
+        PostLoadRange = TrackedRange{OriginalOffset, FunctorSize};
+      auto Res =
+          getDominatingUse(DL, AddressBase, &LI, TargetOffset, LambdaCB,
+                           ClobberOracle, QueryEntitySize, PostLoadRange);
+      if (!Res) {
+        fail();
+        return;
+      }
+
+      WorkList.push_back({Res->DominatingWrite, Res->WriteBoundary});
+      Offset = OriginalOffset + AddressOffset - Res->Offset;
+      if (isa<MemTransferInst>(Res->WriteBoundary)) {
+        if (LI.getType()->isPointerTy()) {
+          PendingPointees.push_back({{OriginalOffset, FunctorSize},
+                                     PointeeUseBoundary,
+                                     FollowingInvocationPointee});
+          FunctorSize = QueryEntitySize;
+          Offset = AddressOffset - Res->Offset;
+        }
+        FollowingInvocationPointee = true;
+        PointeeUseBoundary = Res->WriteBoundary;
+      } else if (!LI.getType()->isPointerTy()) {
+        FollowingInvocationPointee = false;
+      }
+      return;
+    }
+
+    if (Clobber.Kind == MemorySSAClobberKind::Phi) {
+      DEBUG(Logger::logs("proteus-pass")
+            << "[Lambda arg analysis]: MemorySSA selected a MemoryPhi for "
+            << LI << "\n");
+    } else {
+      DEBUG(Logger::logs("proteus-pass")
+            << "[Lambda arg analysis]: MemorySSA clobber query failed for "
+            << LI << "\n");
+    }
+
+    // Unknown and MemoryPhi results cannot identify one reaching value.
+    fail();
   }
 
   void visitGetElementPtrInst(GetElementPtrInst &GEP) {
     APInt StepOffset(DL.getIndexTypeSizeInBits(GEP.getType()), 0);
     if (!GEP.accumulateConstantOffset(DL, StepOffset)) {
-      AnalysisFailed = true;
-      AnalysisSuccess = false;
+      fail();
       return;
     }
     Offset += StepOffset.getSExtValue();
-    WorkList.push_back({GEP.getPointerOperand(), &GEP});
+    WorkList.push_back({GEP.getPointerOperand(), MemoryAnalysisPtrUse});
   }
 
   void visitExtractValueInst(ExtractValueInst &EVI) {
@@ -449,38 +447,68 @@ public:
       if (Cur)
         AggregateOperand = Cur->getAggregateOperand();
     }
-    AnalysisFailed = true;
-    AnalysisSuccess = false;
+    fail();
   }
 
-  // todo: these three methods need to be changed to find a dominating store
+  Instruction *memoryBoundary() const {
+    return FollowingInvocationPointee ? PointeeUseBoundary
+                                      : MemoryAnalysisPtrUse;
+  }
+
+  void restoreStoredPointee(const LambdaPtrUseAnalysis &Res) {
+    if (PendingPointees.empty() || !isa<StoreInst>(Res.WriteBoundary) ||
+        !Res.DominatingWrite->getType()->isPointerTy())
+      return;
+    PendingPointee Pointee = PendingPointees.pop_back_val();
+    Offset += Pointee.Range.Offset;
+    FunctorSize = Pointee.Range.Extent;
+    FollowingInvocationPointee = Pointee.TrackPointee;
+    if (Pointee.UseBoundary)
+      PointeeUseBoundary = Pointee.UseBoundary;
+  }
+
   void visitAllocaInst(AllocaInst &Alloca) {
-    auto Res =
-        getDominatingUse(DL, &Alloca, MemoryAnalysisPtrUse, Offset, LambdaCB);
+    auto Res = getDominatingUse(DL, &Alloca, memoryBoundary(), Offset, LambdaCB,
+                                ClobberOracle, FunctorSize);
     if (!Res)
       return;
 
-    WorkList.push_back({Res->DominatingWrite, &Alloca});
+    WorkList.push_back({Res->DominatingWrite, Res->WriteBoundary});
+    FollowingInvocationPointee = isa<MemTransferInst>(Res->WriteBoundary);
+    if (FollowingInvocationPointee)
+      PointeeUseBoundary = Res->WriteBoundary;
     // Res->Offset converts the current allocation-relative byte offset into
     // the coordinate system of DominatingWrite. For a field store it removes
     // the field displacement; for a memory transfer it translates destination
     // displacement into the corresponding source displacement.
     Offset -= Res->Offset;
+    restoreStoredPointee(*Res);
   }
 
   void visitBitCastInst(BitCastInst &BC) {
-    auto Res =
-        getDominatingUse(DL, &BC, MemoryAnalysisPtrUse, Offset, LambdaCB);
+    auto Res = getDominatingUse(DL, &BC, memoryBoundary(), Offset, LambdaCB,
+                                ClobberOracle, FunctorSize);
     if (!Res)
       return;
-    WorkList.push_back({Res->DominatingWrite, &BC});
+    WorkList.push_back({Res->DominatingWrite, Res->WriteBoundary});
+    FollowingInvocationPointee = isa<MemTransferInst>(Res->WriteBoundary);
+    if (FollowingInvocationPointee)
+      PointeeUseBoundary = Res->WriteBoundary;
     // Res->Offset converts the current cast-relative byte offset into the
     // coordinate system of DominatingWrite.
     Offset -= Res->Offset;
+    restoreStoredPointee(*Res);
   }
 
   void visitAddrSpaceCastInst(AddrSpaceCastInst &ASC) {
-    WorkList.push_back({ASC.getPointerOperand(), &ASC});
+    // An address-space cast of an SSA argument does not load through the
+    // pointer. Continue along the direct use-def edge; there is no memory
+    // definition for MemorySSA to resolve.
+    if (isa<Argument>(ASC.getPointerOperand())) {
+      WorkList.push_back({ASC.getPointerOperand(), &ASC});
+      return;
+    }
+
     // LLVM 23 materializes by-value AMDGPU arguments in addrspace(5), copies
     // the argument into that alloca, and only then casts the alloca to the
     // generic pointer address space.  Starting the forward use walk at the
@@ -492,23 +520,26 @@ public:
             dyn_cast<AllocaInst>(getUnderlyingObject(ASC.getPointerOperand())))
       AnalysisBase = Alloca;
 
-    auto Res = getDominatingUse(DL, AnalysisBase, MemoryAnalysisPtrUse, Offset,
-                                LambdaCB);
+    auto Res = getDominatingUse(DL, AnalysisBase, memoryBoundary(), Offset,
+                                LambdaCB, ClobberOracle, FunctorSize);
     if (!Res)
       return;
 
-    WorkList.push_back({Res->DominatingWrite, &ASC});
+    WorkList.push_back({Res->DominatingWrite, Res->WriteBoundary});
+    FollowingInvocationPointee = isa<MemTransferInst>(Res->WriteBoundary);
+    if (FollowingInvocationPointee)
+      PointeeUseBoundary = Res->WriteBoundary;
     // Res->Offset converts the current cast-relative byte offset into the
     // coordinate system of DominatingWrite.
     Offset -= Res->Offset;
+    restoreStoredPointee(*Res);
   }
 
   void visitIntToPtr(IntToPtrInst &ITP) {
     auto *IntegerVal = ITP.getOperand(0);
     auto *Ptr = dyn_cast<PtrToIntInst>(IntegerVal);
     if (!Ptr) {
-      AnalysisSuccess = false;
-      AnalysisFailed = true;
+      fail();
       return;
     }
     ChangedRC = convertTypeToRuntimeConstantType(Ptr->getType());
@@ -516,40 +547,18 @@ public:
     WorkList.push_back({Ptr->getPointerOperand(), &ITP});
   }
 
-  void visitMemIntrinsic(MemIntrinsic &I) {
-    auto *MT = dyn_cast<MemTransferInst>(&I); // memcpy/memmove
-    if (!MT) {
-      // memset doesn't preserve any src->dst relationship we can use
-      AnalysisFailed = true;
-      return;
-    }
-
-    int64_t DstOff = 0, SrcOff = 0;
-    Value *DstBase =
-        GetPointerBaseWithConstantOffset(MT->getRawDest(), DstOff, DL);
-    Value *SrcBase =
-        GetPointerBaseWithConstantOffset(MT->getRawSource(), SrcOff, DL);
-    if (!DstBase || !SrcBase) {
-      AnalysisFailed = true;
-      return;
-    }
-
-    // Optional safety: only valid if the tracked byte lies within the copied
-    // region.
-    if (auto *LenC = dyn_cast<ConstantInt>(MT->getLength())) {
-      uint64_t Len = LenC->getZExtValue();
-      if (Offset < DstOff || uint64_t(Offset - DstOff) >= Len) {
-        AnalysisFailed = true;
-        return;
-      }
-    }
-
-    WorkList.push_back({SrcBase->stripPointerCasts(), &I});
-    Offset = Offset - DstOff + SrcOff;
+  void visitMemIntrinsic(MemIntrinsic &) {
+    // The worklist contains pointer/aggregate values, never void-valued
+    // memory intrinsics. LambdaInstUseVisitor handles memory-intrinsic
+    // candidates and owns the functor-extent coverage check.
+    llvm_unreachable("MemIntrinsic entered LambdaArgVisitor worklist");
   }
 
+  // Value-producing intrinsics can be enqueued as operands by calls or
+  // stores, so keep this conservative fallback for pointer-producing
+  // intrinsics. Void memory intrinsics cannot enter the value worklist.
   void visitIntrinsicInst(IntrinsicInst &) {
-    AnalysisFailed = true;
+    fail();
     return;
   }
 
@@ -562,6 +571,43 @@ public:
     DEBUG(Logger::logs("proteus-pass")
           << "Visiting argument with parent function = \n"
           << *F << "\n");
+
+    // Before crossing this frame, validate its complete memory history at
+    // the use of these bytes, even when the forward scan finds no writer.
+    bool InPointeeFrame =
+        PointeeUseBoundary && PointeeUseBoundary->getFunction() == F;
+    if (FollowingInvocationPointee && A.getType()->isPointerTy() &&
+        InPointeeFrame) {
+      if (Offset < 0 ||
+          static_cast<uint64_t>(Offset) >
+              std::numeric_limits<uint64_t>::max() - FunctorSize) {
+        fail();
+        return;
+      }
+      // Cover the argument-relative range. The invocation operand can denote
+      // a loaded pointer rather than this argument's storage.
+      uint64_t LocationSize = static_cast<uint64_t>(Offset) + FunctorSize;
+      MemoryLocation Location(&A, llvm::LocationSize::precise(LocationSize));
+      auto Res =
+          getDominatingUse(DL, &A, PointeeUseBoundary, Offset, LambdaCB,
+                           ClobberOracle, FunctorSize, std::nullopt, Location);
+      if (!Res) {
+        fail();
+        return;
+      }
+      if (Res->Kind == LambdaPtrUseKind::Definition) {
+        WorkList.push_back({Res->DominatingWrite, Res->WriteBoundary});
+        Offset -= Res->Offset;
+        FollowingInvocationPointee = isa<MemTransferInst>(Res->WriteBoundary);
+        if (FollowingInvocationPointee)
+          PointeeUseBoundary = Res->WriteBoundary;
+        restoreStoredPointee(*Res);
+        return;
+      }
+      // MemorySSA proved that no write in this frame reaches the use that
+      // consumes these bytes. Continue to the caller/kernel argument below.
+    }
+
     auto ArgNum = A.getArgNo();
     // termination case:  we have reached the parent calling kernel
     // todo: we could just pass in the kernel pointer here and check equality
@@ -571,6 +617,11 @@ public:
         (F->hasMetadata("proteus.jit") &&
          !F->hasMetadata("proteus.wrapper_call") &&
          !F->hasMetadata("proteus.registered_lambda"))) {
+      if (!PendingPointees.empty() ||
+          (FollowingInvocationPointee && !InPointeeFrame)) {
+        fail();
+        return;
+      }
       DEBUG(Logger::logs("proteus-pass")
             << "Found termination case from function " << F->getName() << "\n");
       DEBUG(Logger::logs("proteus-pass").flush());
@@ -581,36 +632,64 @@ public:
       return;
     }
 
-    for (User *U : F->users()) {
-      auto *CB = dyn_cast<CallBase>(U);
-      if (!CB)
+    // Only direct callsites of F can supply this argument. Any other use --
+    // F passed as a call operand, its address stored -- means the address
+    // escapes, so an unseen indirect callsite could also supply the lambda
+    // and single-caller reasoning no longer holds.
+    SmallVector<CallBase *, 2> CallSites;
+    bool AddressEscapes = false;
+    for (Use &U : F->uses()) {
+      auto *CB = dyn_cast<CallBase>(U.getUser());
+      if (!CB || !CB->isCallee(&U)) {
+        AddressEscapes = true;
         continue;
-      DEBUG(Logger::logs("proteus-pass")
-            << "Analysis crossed interprocedural boundary at "
-            << *CB->getArgOperand(ArgNum) << "\n");
-      WorkList.push_back({CB->getArgOperand(ArgNum), CB});
+      }
+      if (ArgNum < CB->arg_size())
+        CallSites.push_back(CB);
     }
+
+    // This visitor does not carry call context. Following more than one
+    // caller would let worklist order choose which actual argument supplies
+    // the lambda, so reject that shape conservatively.
+    if (AddressEscapes || CallSites.size() != 1) {
+      DEBUG(Logger::logs("proteus-pass")
+            << "[Lambda arg analysis]: Expected one direct caller for argument "
+            << A << "; found " << CallSites.size()
+            << (AddressEscapes ? " plus address-escaping uses" : "") << "\n");
+      fail();
+      return;
+    }
+
+    CallBase *CB = CallSites.front();
+    // A pointer-slot definition may supply a formal from a nested writer.
+    // Project it back into the consuming frame before querying its pointee.
+    // That query includes the writer call, so its effects are not skipped.
+    if (FollowingInvocationPointee && InPointeeFrame)
+      PointeeUseBoundary = CB;
+    DEBUG(Logger::logs("proteus-pass")
+          << "Analysis crossed interprocedural boundary at "
+          << *CB->getArgOperand(ArgNum) << "\n");
+    WorkList.push_back({CB->getArgOperand(ArgNum), CB});
   }
 
   void visitInstruction(Instruction &I) {
     DEBUG(Logger::logs("proteus-pass")
           << "[Lambda arg analysis]: Unhandled instruction "
           << I.getOpcodeName() << ": " << I << "\n");
-    AnalysisFailed = true;
+    fail();
     return;
   }
 
   void visitPHINode(PHINode &P) {
     if (P.getNumIncomingValues() == 0) {
-      AnalysisFailed = true;
+      fail();
       return;
     }
 
     auto FirstAnalysis =
         cloneAndAnalyze(P.getIncomingValue(0), MemoryAnalysisPtrUse, Offset);
     if (!FirstAnalysis) {
-      AnalysisFailed = true;
-      AnalysisSuccess = false;
+      fail();
       return;
     }
     auto BaseSlot = FirstAnalysis->KernelArgIndex;
@@ -621,8 +700,7 @@ public:
                                       MemoryAnalysisPtrUse, Offset);
       if (!Analysis || Analysis->KernelArgIndex != BaseSlot ||
           Analysis->Offset != BaseOffset) {
-        AnalysisFailed = true;
-        AnalysisSuccess = false;
+        fail();
         return;
       }
     }
@@ -652,8 +730,7 @@ public:
             << "[Lambda arg analysis]: Select arms do not resolve to the "
                "same kernel argument and offset: "
             << S << "\n");
-      AnalysisFailed = true;
-      AnalysisSuccess = false;
+      fail();
       return;
     }
 
@@ -669,10 +746,11 @@ public:
 inline bool analyzeLambdaUses(
     llvm::Module &M,
     DenseMap<CallBase *, LambdaKernelArgAnalysis> &CallBaseToArgOffset,
-    const SmallVector<CallBase *> &CBToAnalyze) {
+    const SmallVector<CallBase *> &CBToAnalyze, uint64_t FunctorStructSize,
+    std::shared_ptr<MemorySSAClobberOracle> Oracle) {
   DEBUG(Logger::logs("proteus-pass") << "Beginning analysis " << "\n");
   for (auto *FunctorCB : CBToAnalyze) {
-    LambdaArgVisitor Visitor(FunctorCB, M);
+    LambdaArgVisitor Visitor(FunctorCB, M, FunctorStructSize, Oracle);
     while (!Visitor.empty() && !Visitor.success() && !Visitor.failed()) {
       auto [V, LastSeen] = Visitor.back();
       Visitor.MemoryAnalysisPtrUse = LastSeen;

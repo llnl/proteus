@@ -555,6 +555,10 @@ private:
     findFunctionsWithU64Metadata(M, "proteus.wrapper_call",
                                  FunctorOperatorMethods);
     uint32_t NextCallsiteIndex = 0;
+    // This walk only adds Proteus metadata; it does not change instructions or
+    // memory effects. Share function-local AA and MemorySSA across all functor
+    // operators and callsites.
+    auto ClobberOracle = std::make_shared<MemorySSAClobberOracle>();
     // Iterate through user-registered functors wrapping lambdas and analyze
     // their callsites.
     for (auto &[FunctorOperator, FunctorId] : FunctorOperatorMethods) {
@@ -586,10 +590,16 @@ private:
         }
       }
 
+      auto optionalMeta =
+          getU64Metadata(FunctorOperator, "proteus.functor_size");
+      if (!optionalMeta)
+        reportFatalError("Internal Proteus Error: Missing metadata on functor "
+                         "size.  Please report this bug.");
       DenseMap<CallBase *, LambdaKernelArgAnalysis> CallBaseToArgOffset;
       // If capture offset analysis fails, the manifest entries above still
       // register the kernels for the unspecialized JIT path.
-      if (!analyzeLambdaUses(M, CallBaseToArgOffset, CBToAnalyze))
+      if (!analyzeLambdaUses(M, CallBaseToArgOffset, CBToAnalyze, *optionalMeta,
+                             ClobberOracle))
         continue;
 
       for (CallBase *CB : CBToAnalyze) {

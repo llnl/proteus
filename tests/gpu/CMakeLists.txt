@@ -280,11 +280,56 @@ CREATE_GPU_TEST(lambda_index_first_wrapper lambda_index_first_wrapper.cpp)
 CREATE_GPU_TEST(lambda_phi_analysis lambda_phi_analysis.cpp)
 CREATE_GPU_TEST(lambda_insertvalue_offsets lambda_insertvalue_offsets.cpp)
 CREATE_GPU_TEST(lambda_provenance_shapes lambda_provenance_shapes.cpp)
-# TODO(Bowen) enable this test when the clobbering store helper is implemented
-# CREATE_GPU_TEST(lambda_store_order lambda_store_order.cpp)
+CREATE_GPU_TEST(lambda_store_order lambda_store_order.cpp)
+CREATE_GPU_TEST(lambda_mixed_field_overwrite lambda_mixed_field_overwrite.cpp)
+CREATE_GPU_TEST(lambda_aggregate_store_reconciliation
+                lambda_aggregate_store_reconciliation.cpp)
+CREATE_GPU_TEST(lambda_reconciliation_adversarial
+                lambda_reconciliation_adversarial.cpp)
 CREATE_GPU_TEST(lambda_call_shapes lambda_call_shapes.cpp)
 CREATE_GPU_TEST(lambda_memory_intrinsic_shapes lambda_memory_intrinsic_shapes.cpp)
 CREATE_GPU_TEST(lambda_pointer_field_load lambda_pointer_field_load.cpp)
+CREATE_GPU_TEST(lambda_clobber_shapes lambda_clobber_shapes.cpp)
+CREATE_GPU_TEST(lambda_clobber_query_range lambda_clobber_query_range.cpp)
+CREATE_GPU_TEST(lambda_clobber_query_suffix lambda_clobber_query_suffix.cpp)
+CREATE_GPU_TEST(lambda_portability_aggregate_shapes
+                lambda_portability_aggregate_shapes.cpp)
+CREATE_GPU_TEST(lambda_size_test lambda_size_test.cpp)
+CREATE_GPU_TEST(lambda_traversal_guards lambda_traversal_guards.cpp)
+CREATE_GPU_TEST(lambda_slot_selection_supported
+                lambda_slot_selection_supported.cpp)
+CREATE_GPU_TEST(lambda_multiple_callers lambda_multiple_callers.cpp)
+CREATE_GPU_TEST(lambda_unknown_clobber lambda_unknown_clobber.cpp)
+CREATE_GPU_TEST_RDC(lambda_declaration_clobber lambda_declaration_clobber.cpp
+                    lambda_unknown_clobber_decl.cpp)
+CREATE_GPU_TEST(lambda_inst_visitor_call_clobber lambda_inst_visitor_call_clobber.cpp)
+CREATE_GPU_TEST(lambda_pointee_overwrite lambda_pointee_overwrite.cpp)
+CREATE_GPU_TEST(lambda_argument_helper_overwrite
+                lambda_argument_helper_overwrite.cpp)
+CREATE_GPU_TEST(lambda_argument_write_order lambda_argument_write_order.cpp)
+CREATE_GPU_TEST(lambda_argument_collection lambda_argument_collection.cpp)
+CREATE_GPU_TEST(lambda_unrelated_arithmetic lambda_unrelated_arithmetic.cpp)
+CREATE_GPU_TEST(lambda_arithmetic_argument lambda_arithmetic_argument.cpp)
+foreach(test IN ITEMS lambda_alias_argument lambda_source_history
+                      lambda_caller_history
+                      lambda_readonly_plan
+                      lambda_aliasing_memcpy)
+    CREATE_GPU_TEST(${test} ${test}.cpp)
+    # These regressions use legal whole-object copies. Keep the frontend
+    # contract in error mode so future diagnostics cannot silently exclude them.
+    get_target_property(strict_options ${test}.${lang} COMPILE_OPTIONS)
+    list(REMOVE_ITEM strict_options
+         "SHELL:-Xclang -plugin-arg-proteus-lambda-checker -Xclang -contract-warn")
+    set_property(TARGET ${test}.${lang} PROPERTY COMPILE_OPTIONS "${strict_options}")
+endforeach()
+# These retain deliberate global-publication cases as IR fallback tests.
+# Production builds reject them; the standard test flags use contract-warn.
+foreach(test IN ITEMS lambda_global_callback lambda_pointer_history
+                      lambda_hidden_call_writes lambda_print_context)
+    CREATE_GPU_TEST(${test} ${test}.cpp)
+endforeach()
+CREATE_GPU_TEST(lambda_displaced_helper_memcpy lambda_displaced_helper_memcpy.cpp)
+CREATE_GPU_TEST(lambda_callee_join_no_phi lambda_callee_join_no_phi.cpp)
 CREATE_PROTEUS_GPU_SHARED_LIBRARY(lambda_factory_so_tu1 lambda_factory_tu1.cpp)
 CREATE_PROTEUS_GPU_SHARED_LIBRARY(lambda_factory_so_tu2 lambda_factory_tu2.cpp)
 CREATE_GPU_TEST_LIBS(lambda_factory_so_runner "lambda_factory_so_tu1;lambda_factory_so_tu2" lambda_factory_so_runner.cpp)

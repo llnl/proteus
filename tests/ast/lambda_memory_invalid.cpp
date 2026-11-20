@@ -35,9 +35,12 @@ void *EscapedSlot;
 
 template <typename F> void escapePointerSlot(F **Slot) { EscapedSlot = Slot; }
 
+void opaqueUnrelatedWrite() {}
+
 template <typename F> void invokeWithEscapedSlot(F *Initial, F *Replacement) {
   F *Slot = Initial;
   Slot = Replacement;
+  opaqueUnrelatedWrite();
   (*Slot)();
   // expected-error@+1 {{cannot escape to global storage}}
   escapePointerSlot(&Slot);
@@ -55,7 +58,7 @@ F *volatile *returnSlotThroughPhi(F *volatile *First, F *volatile *Second,
     Result = returnSlotOnce(Second);
   else
     Result = returnSlotOnce(First);
-  // expected-error@+1 {{cannot be selected from multiple control-flow}}
+  // expected-warning@+1 {{has been passed through control-flow assignments}}
   return Result;
 }
 

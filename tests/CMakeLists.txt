@@ -71,12 +71,19 @@ function(proteus_attach_pass_plugin_rebuild_dep target)
         PUBLIC
         -fpass-plugin=$<TARGET_FILE:ProteusPass>
         -fplugin=$<TARGET_FILE:ProteusASTChecker>
+        # The analysis test suite deliberately violates the wrapper-storage
+        # contract (type-erased writes, partial memory builtins) to pin the IR
+        # analysis's conservative declines -- the second line of defense.
+        # Downgrade those checker diagnostics to warnings here; consumer
+        # builds via add_proteus() keep them as errors.
+        "SHELL:-Xclang -plugin-arg-proteus-lambda-checker -Xclang -contract-warn"
     )
     add_dependencies(${target} ProteusASTChecker)
 endfunction()
 
 add_subdirectory(cpu)
 add_subdirectory(ast)
+add_subdirectory(analysis)
 
 if(PROTEUS_ENABLE_HIP OR PROTEUS_ENABLE_CUDA)
     add_subdirectory(gpu)
