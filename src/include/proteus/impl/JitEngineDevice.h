@@ -31,7 +31,6 @@
 #include "proteus/impl/TransformLambdaSpecialization.h"
 #include "proteus/impl/Utils.h"
 
-#include <llvm/ADT/ScopeExit.h>
 #include <llvm/ADT/SmallPtrSet.h>
 #include <llvm/ADT/SmallVector.h>
 #include <llvm/ADT/StringRef.h>
@@ -605,8 +604,11 @@ JitEngineDevice<ImplT>::compileAndRun(
   const LambdaCallsiteRuntimeConstantsMap &LambdaJitValuesMap =
       LaunchInfo.CallsiteRuntimeConstants;
   // Clear this launch's lambda state on every return path.
-  auto ClearOnExit = llvm::make_scope_exit(
-      [] { LambdaRegistry::instance().clearDeviceLaunchInfo(); });
+  struct ClearLaunchInfoOnExit {
+    ~ClearLaunchInfoOnExit() {
+      LambdaRegistry::instance().clearDeviceLaunchInfo();
+    }
+  } ClearOnExit;
   // Determine the hash based on dimension specialization.  If we do not
   // specialize IR based on grid dimensions, avoid hashing on those to
   // eliminate repeated compilation overhead.
